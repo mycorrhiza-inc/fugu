@@ -7,6 +7,7 @@ edition = "2021"
 aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1.82.0"
 clap = { version = "*", features = ["cargo"] }
+rand = { version = "0.9", features = ["std"] }
 rkyv = "0.8.10"
 rkyv_dyn = "0.7.44"
 rust-s3 = "0.35"
@@ -14,3 +15,4 @@ serde = "1.0.219"
 sled = { version = "*" }
 tantivy = { version = "0.22.0" }
 tokio = { version = "1.44.1", features = ["full"] }
+tonic = "0.13.0"
