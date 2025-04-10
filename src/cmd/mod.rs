@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use daemonize::Daemonize;
-use std::fs::{File, OpenOptions};
+use std::fs::{OpenOptions};
 use std::path::PathBuf;
 
 pub mod commands;
@@ -18,6 +18,15 @@ pub enum Commands {
 
     /// Namespace operations
     Namespace(commands::NamespaceCommand),
+    
+    /// Index a document in a namespace
+    Index(commands::NamespaceIndexCommand),
+    
+    /// Search in a namespace
+    Search(commands::NamespaceSearchCommand),
+    
+    /// Delete a document from a namespace
+    Delete(commands::NamespaceDeleteCommand),
 
     /// Gracefully shuts down the fugu process
     Down(commands::DownCommand),
@@ -60,12 +69,27 @@ pub async fn start() {
         Some(Commands::Namespace(args)) => {
             let _ = namespaces::run(args).await;
         }
+        Some(Commands::Index(args)) => {
+            // Handle index command with default namespace if none provided
+            let namespace = cli.namespace.unwrap_or_else(|| "default".to_string());
+            let _ = namespaces::handle_index_command(args, &namespace).await;
+        }
+        Some(Commands::Search(args)) => {
+            // Handle search command with default namespace if none provided
+            let namespace = cli.namespace.unwrap_or_else(|| "default".to_string());
+            let _ = namespaces::handle_search_command(args, &namespace).await;
+        }
+        Some(Commands::Delete(args)) => {
+            // Handle delete command with default namespace if none provided
+            let namespace = cli.namespace.unwrap_or_else(|| "default".to_string());
+            let _ = namespaces::handle_delete_command(args, &namespace).await;
+        }
         Some(Commands::Up(args)) => {
             // Path for this instance - in a real app, this might come from config
             let path = PathBuf::from("./data");
 
             // Default gRPC server address
-            let addr = "0.0.0.0:50051".to_string();
+            let addr = "127.0.0.1:50051".to_string();
 
             if args.daemon {
                 println!("Starting the fugu node as a daemon...");
@@ -98,7 +122,7 @@ pub async fn start() {
                         // Set up a runtime for the daemon
                         let rt = tokio::runtime::Runtime::new().unwrap();
                         rt.block_on(async {
-                            if let Err(e) = crate::fugu::grpc::start_grpc_server(path, addr, None).await {
+                            if let Err(e) = crate::fugu::grpc::start_grpc_server(path, addr, None, None).await {
                                 eprintln!("Server error: {}", e);
                             }
                         });
@@ -108,18 +132,19 @@ pub async fn start() {
             } else {
                 println!("Starting the fugu node in foreground...");
 
-                // Create a channel to signal when the server is ready
-                let (tx, rx) = tokio::sync::oneshot::channel();
+                // Create channels for ready signal and shutdown
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
                 // Spawn in a background task so it doesn't block
-                let server_handle = tokio::spawn(async move {
-                    if let Err(e) = crate::fugu::grpc::start_grpc_server(path, addr, Some(tx)).await {
+                let _server_handle = tokio::spawn(async move {
+                    if let Err(e) = crate::fugu::grpc::start_grpc_server(path, addr, Some(ready_tx), Some(shutdown_rx)).await {
                         eprintln!("Server error: {}", e);
                     }
                 });
 
                 // Wait for the server to signal it's ready
-                let _ = rx.await;
+                let _ = ready_rx.await;
                 
                 // We don't await the handle here, as we want the server to run in the background
                 println!("Fugu node started successfully in foreground mode");
@@ -129,6 +154,14 @@ pub async fn start() {
                 tokio::signal::ctrl_c()
                     .await
                     .expect("Failed to listen for ctrl-c event");
+                
+                // Send shutdown signal to gracefully shutdown the server
+                println!("Shutting down server...");
+                let _ = shutdown_tx.send(());
+                
+                // Give server a moment to clean up
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                println!("Server shutdown complete");
             }
         }
         Some(Commands::Down(args)) => {

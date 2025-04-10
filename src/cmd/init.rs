@@ -1,7 +1,4 @@
-use crate::cmd::commands;
-use crate::fugu::server;
-use clap::{command, value_parser, ArgMatches, Args, Parser};
-use std::fs::{self, Metadata};
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 

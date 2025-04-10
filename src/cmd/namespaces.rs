@@ -1,18 +1,16 @@
-use crate::cmd::commands::{NamespaceCommand, NamespaceSubcommands};
-use crate::fugu::grpc::{client_index, client_delete, client_search, client_vector_search};
+use crate::cmd::commands::{
+    NamespaceCommand, NamespaceSubcommands,
+    NamespaceIndexCommand, NamespaceSearchCommand, NamespaceDeleteCommand
+};
+use crate::fugu::grpc::{client_index, client_delete, client_search};
 use std::path::PathBuf;
+use std::convert::TryInto;
 
 // Default gRPC server address
 const DEFAULT_GRPC_ADDR: &str = "http://127.0.0.1:50051";
 
 pub async fn run(ns: NamespaceCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let namespace = match ns.namespace {
-        Some(ns) => ns,
-        None => {
-            println!("No namespace provided for command");
-            return Ok(());
-        }
-    };
+    let namespace = ns.namespace;
 
     // Use namespace in the address for future scalability
     let grpc_addr = format!("{}", DEFAULT_GRPC_ADDR);
@@ -64,5 +62,44 @@ pub async fn run(ns: NamespaceCommand) -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
+    Ok(())
+}
+
+// Handle the index subcommand
+pub async fn handle_index_command(
+    cmd: NamespaceIndexCommand, 
+    namespace: &str
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Indexing file in namespace `{namespace}`...");
+    
+    // Index the file using the client
+    client_index(cmd.addr, cmd.file).await?;
+    
+    Ok(())
+}
+
+// Handle the search subcommand
+pub async fn handle_search_command(
+    cmd: NamespaceSearchCommand,
+    namespace: &str
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Searching in namespace `{namespace}`...");
+    
+    // Perform the search
+    client_search(cmd.addr, cmd.query, cmd.limit.try_into().unwrap_or(10), cmd.offset.try_into().unwrap_or(0)).await?;
+    
+    Ok(())
+}
+
+// Handle the delete subcommand
+pub async fn handle_delete_command(
+    cmd: NamespaceDeleteCommand,
+    namespace: &str
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Deleting from namespace `{namespace}`...");
+    
+    // Delete the document
+    client_delete(cmd.addr, cmd.location).await?;
+    
     Ok(())
 }

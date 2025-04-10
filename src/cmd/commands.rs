@@ -1,5 +1,4 @@
-use clap::{value_parser, Parser, Subcommand};
-use std::path::PathBuf;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "init", about = "initializes the fugu service")]
@@ -72,8 +71,7 @@ pub struct UpCommand {
 )]
 pub struct NamespaceCommand {
     /// Namespace to operate on
-    #[arg(required = true)]
-    pub namespace: Option<String>,
+    pub namespace: String,
 
     /// Check the status of the node at a given namespace
     #[arg(short, long)]
@@ -116,4 +114,48 @@ pub enum NamespaceSubcommands {
     Up(NamespaceUpCommand),
     /// Stop the namespace
     Down(NamespaceDownCommand),
+}
+
+#[derive(Parser)]
+#[command(name = "index")]
+pub struct NamespaceIndexCommand {
+    /// File to index
+    #[arg(short, long, required = true)]
+    pub file: String,
+    
+    /// Server address
+    #[arg(short, long, default_value = "http://127.0.0.1:50051")]
+    pub addr: String,
+}
+
+#[derive(Parser)]
+#[command(name = "search")]
+pub struct NamespaceSearchCommand {
+    /// Search query
+    #[arg(short, long, required = true)]
+    pub query: String,
+    
+    /// Maximum results to return
+    #[arg(short, long, default_value = "10")]
+    pub limit: u32,
+    
+    /// Results offset
+    #[arg(short, long, default_value = "0")]
+    pub offset: u32,
+    
+    /// Server address
+    #[arg(short, long, default_value = "http://127.0.0.1:50051")]
+    pub addr: String,
+}
+
+#[derive(Parser)]
+#[command(name = "delete")]
+pub struct NamespaceDeleteCommand {
+    /// Location to delete
+    #[arg(short, long, required = true)]
+    pub location: String,
+    
+    /// Server address
+    #[arg(short, long, default_value = "http://127.0.0.1:50051")]
+    pub addr: String,
 }
