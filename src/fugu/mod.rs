@@ -11,3 +11,4 @@ pub mod node;
 mod test;
 pub mod wal;
 pub mod index;
+pub mod grpc;

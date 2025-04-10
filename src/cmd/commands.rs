@@ -26,6 +26,10 @@ pub struct InitCommand {
 pub struct StatusCommand {
     /// Namespace to operate on
     pub namespace: Option<String>,
+    
+    /// Path to the PID file (for daemon mode)
+    #[arg(long, default_value = "/tmp/fugu.pid")]
+    pub pid_file: String,
 }
 
 #[derive(Parser)]
@@ -34,6 +38,10 @@ pub struct DownCommand {
     /// Forcefully shuts down the fugu server
     #[arg(short, long)]
     pub force: bool,
+    
+    /// Path to the PID file (for daemon mode)
+    #[arg(long, default_value = "/tmp/fugu.pid")]
+    pub pid_file: String,
 }
 
 #[derive(Parser)]
@@ -42,6 +50,18 @@ pub struct UpCommand {
     /// Start with start the fugu server
     #[arg(short, long)]
     pub config: bool,
+    
+    /// Run server as a daemon in the background
+    #[arg(short, long)]
+    pub daemon: bool,
+    
+    /// Path to the PID file when running as a daemon
+    #[arg(long, default_value = "/tmp/fugu.pid")]
+    pub pid_file: String,
+    
+    /// Path to the log file when running as a daemon
+    #[arg(long, default_value = "/tmp/fugu.log")]
+    pub log_file: String,
 }
 
 // NAMESPACES
