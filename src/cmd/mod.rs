@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use daemonize::Daemonize;
-use std::fs::{OpenOptions};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 
 pub mod commands;
@@ -18,13 +18,13 @@ pub enum Commands {
 
     /// Namespace operations
     Namespace(commands::NamespaceCommand),
-    
+
     /// Index a document in a namespace
     Index(commands::NamespaceIndexCommand),
-    
+
     /// Search in a namespace
     Search(commands::NamespaceSearchCommand),
-    
+
     /// Delete a document from a namespace
     Delete(commands::NamespaceDeleteCommand),
 
@@ -122,7 +122,9 @@ pub async fn start() {
                         // Set up a runtime for the daemon
                         let rt = tokio::runtime::Runtime::new().unwrap();
                         rt.block_on(async {
-                            if let Err(e) = crate::fugu::grpc::start_grpc_server(path, addr, None, None).await {
+                            if let Err(e) =
+                                crate::fugu::grpc::start_grpc_server(path, addr, None, None).await
+                            {
                                 eprintln!("Server error: {}", e);
                             }
                         });
@@ -138,14 +140,21 @@ pub async fn start() {
 
                 // Spawn in a background task so it doesn't block
                 let _server_handle = tokio::spawn(async move {
-                    if let Err(e) = crate::fugu::grpc::start_grpc_server(path, addr, Some(ready_tx), Some(shutdown_rx)).await {
+                    if let Err(e) = crate::fugu::grpc::start_grpc_server(
+                        path,
+                        addr,
+                        Some(ready_tx),
+                        Some(shutdown_rx),
+                    )
+                    .await
+                    {
                         eprintln!("Server error: {}", e);
                     }
                 });
 
                 // Wait for the server to signal it's ready
                 let _ = ready_rx.await;
-                
+
                 // We don't await the handle here, as we want the server to run in the background
                 println!("Fugu node started successfully in foreground mode");
                 println!("Press Ctrl-C to terminate the server");
@@ -154,11 +163,11 @@ pub async fn start() {
                 tokio::signal::ctrl_c()
                     .await
                     .expect("Failed to listen for ctrl-c event");
-                
+
                 // Send shutdown signal to gracefully shutdown the server
                 println!("Shutting down server...");
                 let _ = shutdown_tx.send(());
-                
+
                 // Give server a moment to clean up
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 println!("Server shutdown complete");
