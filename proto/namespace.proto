@@ -1,0 +1,80 @@
+syntax = "proto3";
+package namespace;
+
+service Namespace {
+	// Index a new file
+	rpc Index (IndexRequest) returns (IndexResponse); 
+	rpc Delete (DeleteRequest) returns (DeleteResponse); 
+	rpc Search (SearchRequest) returns (SearchResponse);
+	rpc VectorSearch (VectorSearchRequest) returns (VectorSearchResponse);
+}
+
+message IndexRequest {
+	File file = 1;
+}
+
+message IndexResponse {
+	bool success =	1;
+	string location = 2; 
+}
+
+message DeleteRequest {
+	string location = 1;
+}
+
+message DeleteResponse {
+	bool success = 1;
+	string message = 2;
+}
+
+message SearchRequest {
+	string query = 1;
+	int32 limit = 2;
+	int32 offset = 3;
+}
+
+message SearchResponse {
+	repeated SearchResult results = 1;
+	int32 total = 2;
+	string message = 3;
+}
+
+message SearchResult {
+	string path = 1;
+	float score = 2;
+	Snippet snippet = 3;
+}
+
+message Snippet { 
+	string path = 1;
+	string text = 2;
+	int32 start = 3;
+	int32 end = 4;
+
+}
+message VectorSnippet {}
+
+message VectorSearchRequest {
+	repeated float vector = 1;
+	int32  dim = 2;
+	int32 limit = 3;
+	int32 offset = 4;
+	float min_score = 5;
+}
+
+message VectorSearchResponse {
+	repeated VectorSearchResult results = 1;
+	int32 total = 2;
+	string message = 3;
+}
+
+message VectorSearchResult {
+	string location = 1;
+	float score = 2;
+	repeated float vector = 3;
+}
+
+message File {
+	string name = 1;
+	bytes body = 2;
+}

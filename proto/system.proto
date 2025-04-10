@@ -1,0 +1,13 @@
+syntax = "proto3";
+package namespace;
+
+service HealthCheck {
+	rpc Status (SatusReq) returns (SystemHealth);
+}
+
+message SatusReq {}
+
+message SystemHealth {
+	string status = 1;
+	string mesage = 2;
+}
