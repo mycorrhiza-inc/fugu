@@ -47,7 +47,7 @@ pub enum WALCMD {
     },
 }
 
-#[derive(Archive, Deserialize, Serialize)]
+#[derive(Archive, Deserialize, Serialize, Clone)]
 pub struct WAL {
     path: String,
     log: Vec<WALOP>,

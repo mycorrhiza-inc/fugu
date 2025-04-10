@@ -1,10 +1,12 @@
 use std::path::PathBuf;
-use tokio::sync::mpsc;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 use tonic::{transport::Server, Request, Response, Status};
 
-use crate::fugu::node::Node;
 use crate::fugu::server::FuguServer;
 use crate::fugu::wal::WALCMD;
+use crate::fugu::node::Node;
 
 // Include the generated protobuf code
 pub mod namespace {
@@ -19,17 +21,56 @@ use namespace::{
 };
 
 // The server implementation for handling namespace service requests
+#[derive(Clone)]
 pub struct NamespaceService {
     server: FuguServer,
     wal_sender: mpsc::Sender<WALCMD>,
+    config_path: PathBuf,
+    nodes: Arc<RwLock<HashMap<String, Node>>>,
 }
 
 impl NamespaceService {
     pub fn new(path: PathBuf) -> Self {
-        let server = FuguServer::new(path);
+        let server = FuguServer::new(path.clone());
         let wal_sender = server.get_wal_sender();
+        let config_path = path.clone();
 
-        Self { server, wal_sender }
+        Self { 
+            server, 
+            wal_sender,
+            config_path,
+            nodes: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+    
+    // Get or create a node for the given namespace
+    async fn get_node(&self, namespace: &str) -> Node {
+        let mut nodes = self.nodes.write().await;
+        
+        if let Some(node) = nodes.get(namespace) {
+            return node.clone();
+        }
+        
+        // Node doesn't exist, create a new one
+        let node = crate::fugu::node::new(
+            namespace.to_string(), 
+            Some(self.config_path.clone()),
+            self.wal_sender.clone()
+        );
+        
+        nodes.insert(namespace.to_string(), node.clone());
+        node
+    }
+    
+    // Unload a node from memory
+    async fn unload_node(&self, namespace: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut nodes = self.nodes.write().await;
+        
+        if let Some(mut node) = nodes.remove(namespace) {
+            node.unload_index().await?;
+        }
+        
+        Ok(())
     }
 }
 
@@ -80,13 +121,22 @@ impl Namespace for NamespaceService {
         request: Request<SearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         let req = request.into_inner();
+        let namespace = "default"; // In a real implementation, this might come from the request
 
         println!(
             "Received search request: query='{}', limit={}, offset={}",
             req.query, req.limit, req.offset
         );
 
-        // Here we would implement the actual search logic
+        // Get or create a node for this namespace
+        let mut node = self.get_node(namespace).await;
+        
+        // Load the index (this won't do anything if already loaded)
+        node.load_index().await.map_err(|e| {
+            Status::internal(format!("Failed to load index: {}", e))
+        })?;
+        
+        // Here we would implement the actual search logic using the node's index
         // For now, return a mock response
         let snippet = Snippet {
             path: "example/path".to_string(),
@@ -106,6 +156,13 @@ impl Namespace for NamespaceService {
             total: 1,
             message: "Search completed successfully".to_string(),
         };
+
+        // In a real system with memory constraints, we might unload indices 
+        // that haven't been used for a while
+        // For demonstration, let's not unload after each request
+        // node.unload_index().await.map_err(|e| {
+        //     Status::internal(format!("Failed to unload index: {}", e))
+        // })?;
 
         Ok(Response::new(response))
     }
@@ -144,10 +201,10 @@ pub async fn start_grpc_server(
     path: PathBuf,
     addr: String,
     ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = addr.parse()?;
     let namespace_service = NamespaceService::new(path);
-
     println!("Starting gRPC server on {}", addr);
     
     // Signal that the server is ready
@@ -155,10 +212,34 @@ pub async fn start_grpc_server(
         let _ = tx.send(());
     }
 
-    Server::builder()
-        .add_service(NamespaceServer::new(namespace_service))
-        .serve(addr)
-        .await?;
+    // Use graceful shutdown if a receiver was provided
+    if let Some(shutdown_signal) = shutdown_rx {
+        let namespace_service_clone = namespace_service.clone();
+        let server_fut = Server::builder()
+            .add_service(NamespaceServer::new(namespace_service))
+            .serve_with_shutdown(addr, async move {
+                let _ = shutdown_signal.await;
+                println!("Graceful shutdown signal received, unloading all indices");
+                
+                // Unload all indices on shutdown
+                let nodes = namespace_service_clone.nodes.read().await;
+                for (namespace, _) in nodes.iter() {
+                    if let Err(e) = namespace_service_clone.unload_node(namespace).await {
+                        eprintln!("Error unloading node for namespace {}: {}", namespace, e);
+                    } else {
+                        println!("Successfully unloaded node for namespace {}", namespace);
+                    }
+                }
+            });
+
+        server_fut.await?;
+    } else {
+        // No shutdown signal provided, just run the server
+        Server::builder()
+            .add_service(NamespaceServer::new(namespace_service))
+            .serve(addr)
+            .await?;
+    }
 
     Ok(())
 }

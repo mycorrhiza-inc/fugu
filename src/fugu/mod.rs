@@ -12,3 +12,7 @@ mod test;
 pub mod wal;
 pub mod index;
 pub mod grpc;
+#[cfg(test)]
+mod test_grpc;
+#[cfg(test)]
+mod test_client;

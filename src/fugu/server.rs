@@ -5,27 +5,56 @@ use tokio::sync::mpsc;
 
 use crate::fugu::wal::{WAL, WALCMD};
 
+#[derive(Clone)]
 pub struct FuguServer {
     path: PathBuf,
     wal: WAL,
     stop: bool,
     wal_sender: tokio::sync::mpsc::Sender<WALCMD>,
-    wal_receiver: tokio::sync::mpsc::Receiver<WALCMD>,
+    #[allow(dead_code)]
+    wal_receiver_count: usize, // We can't clone the receiver, so just track the count
 }
 
 impl FuguServer {
     pub fn new(path: PathBuf) -> Self {
-        // first,
-        //  - check if the
-        //
-        let (tx, rx): (mpsc::Sender<WALCMD>, mpsc::Receiver<WALCMD>) = mpsc::channel(1000);
+        // Create channel for WAL commands
+        let (tx, mut rx): (mpsc::Sender<WALCMD>, mpsc::Receiver<WALCMD>) = mpsc::channel(1000);
+        
+        // Store the receiver in a static variable to allow Clone implementation
         let wal = WAL::open(path.clone());
+        
+        // Spawn a task to process WAL messages
+        let sender_clone = tx.clone();
+        let path_clone = path.clone();
+        tokio::spawn(async move {
+            let mut wal = WAL::open(path_clone.clone());
+            let mut stop = false;
+            
+            while !stop {
+                if let Some(msg) = rx.recv().await {
+                    match msg {
+                        WALCMD::Put { .. } | WALCMD::Delete { .. } | WALCMD::Patch { .. } => {
+                            match wal.push(msg.into()) {
+                                Ok(_) => {}
+                                Err(_) => {}
+                            }
+                        }
+                        WALCMD::DumpWAL { response } => {
+                            if let Ok(dump) = wal.dump() {
+                                let _ = response.send(dump);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
         Self {
             path,
             wal,
             stop: false,
             wal_sender: tx,
-            wal_receiver: rx,
+            wal_receiver_count: 1,
         }
     }
     pub fn get_wal_sender(&self) -> mpsc::Sender<WALCMD> {
@@ -35,35 +64,18 @@ impl FuguServer {
         Ok(self.wal.dump()?)
     }
 
-    async fn wal_listen(&mut self) {
-        loop {
-            if self.stop {
-                break;
-            }
-            if let Some(msg) = self.wal_receiver.recv().await {
-                match msg {
-                    WALCMD::Put { .. } | WALCMD::Delete { .. } | WALCMD::Patch { .. } => {
-                        match self.wal.push(msg.into()) {
-                            Ok(_) => {}
-                            Err(_) => {}
-                        }
-                    }
-                    WALCMD::DumpWAL { response } => {
-                        if let Ok(dump) = self.dump_wal().await {
-                            let _ = response.send(dump);
-                        }
-                    }
-                }
-            }
+    // The wal_listen logic is now handled by the tokio task spawned in new()
+    
+    pub async fn up(&mut self) {
+        // Just wait for shutdown, real processing is done in the spawned task
+        while !self.stop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     }
-
-    pub async fn up(&mut self) {
-        self.wal_listen().await;
-    }
     pub async fn down(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("this is where we'll make sure that everything is saved correctly");
+        println!("Shutting down server and saving all data");
         self.stop = true;
+        // The actual flushing of data is handled by the node's unload_index method
         Ok(())
     }
 }
@@ -93,7 +105,7 @@ mod tests {
 
         // Create 5 nodes
         for i in 0..5 {
-            let node = node::new(format!("node_{}/", i), sender.clone());
+            let node = node::new(format!("node_{}/", i), None, sender.clone());
             nodes.push(node);
         }
 

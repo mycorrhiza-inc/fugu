@@ -1,4 +1,4 @@
-use crate::fugu::wal::{WALCMD, WALOP};
+use crate::fugu::wal::WALCMD;
 use rkyv;
 use rkyv::{rancor::Error, Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -83,9 +83,11 @@ pub struct SearchResult {
     pub term_matches: HashMap<String, Vec<u64>>,
 }
 
+#[derive(Clone, Debug)]
 pub struct InvertedIndex {
     db: Arc<RwLock<sled::Db>>,
     wal_chan: mpsc::Sender<WALCMD>,
+    path: String,
 }
 
 impl InvertedIndex {
@@ -94,7 +96,16 @@ impl InvertedIndex {
         InvertedIndex {
             db: Arc::new(RwLock::new(db)),
             wal_chan,
+            path: path.to_string(),
         }
+    }
+    
+    /// Flushes all pending changes to disk
+    pub async fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let db = self.db.read().await;
+        db.flush()?;
+        println!("Flushed index data to {}", self.path);
+        Ok(())
     }
 
     pub async fn add_term(&self, token: Token) -> Result<(), Box<dyn std::error::Error>> {

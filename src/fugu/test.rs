@@ -69,11 +69,11 @@ mod tests {
         let file4_content = "# Fourth document\n\nFinal test document with unique words.";
         let file5_content = "# Empty document\n\nThis has no special keywords.";
 
-        let file1_path = create_markdown_file(temp_path, "file1", file1_content);
-        let file2_path = create_markdown_file(temp_path, "file2", file2_content);
-        let file3_path = create_markdown_file(temp_path, "file3", file3_content);
-        let file4_path = create_markdown_file(temp_path, "file4", file4_content);
-        let file5_path = create_markdown_file(temp_path, "file5", file5_content);
+        let _file1_path = create_markdown_file(temp_path, "file1", file1_content);
+        let _file2_path = create_markdown_file(temp_path, "file2", file2_content);
+        let _file3_path = create_markdown_file(temp_path, "file3", file3_content);
+        let _file4_path = create_markdown_file(temp_path, "file4", file4_content);
+        let _file5_path = create_markdown_file(temp_path, "file5", file5_content);
 
         // Create a WAL channel for the index
         let (tx, _rx) = mpsc::channel::<WALCMD>(100);
@@ -411,7 +411,7 @@ mod tests {
         let (index, tokenizer, docs, _, index_dir) = setup_performance_test().await;
 
         let operations_per_test = 1000;
-        let mut rng = rand::rng();
+        let _rng = rand::rng();
 
         println!("Testing insert performance...");
         let mut insert_durations = Vec::with_capacity(operations_per_test);
@@ -453,7 +453,7 @@ mod tests {
         let (index, tokenizer, docs, sample_words, index_dir) = setup_performance_test().await;
 
         let operations_per_test = 1000;
-        let mut rng = rand::rng();
+        let _rng = rand::rng();
 
         // First index documents for searching
         for (doc_id, content) in &docs {
@@ -547,7 +547,7 @@ mod tests {
         let (index, tokenizer, docs, sample_words, index_dir) = setup_performance_test().await;
 
         let operations_per_test = 1000;
-        let mut rng = rand::rng();
+        let _rng = rand::rng();
 
         // First index documents for deleting
         for (doc_id, content) in &docs {
@@ -581,5 +581,96 @@ mod tests {
 
         // Clean up
         index_dir.close().unwrap();
+    }
+    
+    #[tokio::test]
+    async fn test_index_flush() {
+        // Create temporary directory
+        let temp_dir = tempdir().unwrap();
+        let index_path = temp_dir.path().join("flush_test").to_str().unwrap().to_string();
+        
+        // Create a WAL channel for the index
+        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
+        
+        // Create the inverted index
+        let index = InvertedIndex::new(&index_path, tx).await;
+        
+        // Add some test data
+        for i in 0..10 {
+            let token = Token {
+                term: format!("term{}", i),
+                doc_id: "test_doc".to_string(),
+                position: i,
+            };
+            
+            index.add_term(token).await.unwrap();
+        }
+        
+        // Explicitly flush the index
+        index.flush().await.unwrap();
+        
+        // To verify flush worked, we'll create a new index with the same path
+        // and check if the data is still there
+        let (tx2, _rx2) = mpsc::channel::<WALCMD>(100);
+        let index2 = InvertedIndex::new(&index_path, tx2).await;
+        
+        // Verify data persisted
+        for i in 0..10 {
+            let term = format!("term{}", i);
+            let result = index2.search(&term).await.unwrap();
+            
+            // The term should be found
+            assert!(result.is_some(), "Term {} was not found after flush", term);
+            let term_index = result.unwrap();
+            
+            // The term should be in the test_doc document
+            assert!(term_index.doc_ids.contains_key("test_doc"), 
+                   "Term {} was not associated with test_doc after flush", term);
+        }
+        
+        // Clean up
+        temp_dir.close().unwrap();
+    }
+    
+    #[tokio::test]
+    async fn test_flush_performance() {
+        use std::time::{Duration, Instant};
+        
+        // Setup test environment
+        let temp_dir = tempdir().unwrap();
+        let index_path = temp_dir.path().join("perf_flush_test").to_str().unwrap().to_string();
+        
+        // Create a WAL channel for the index
+        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
+        
+        // Create the inverted index
+        let index = InvertedIndex::new(&index_path, tx).await;
+        
+        // Add a reasonable amount of test data (reduced for faster testing)
+        let num_terms = 500;
+        for i in 0..num_terms {
+            let token = Token {
+                term: format!("performance_term{}", i),
+                doc_id: format!("doc{}", i % 100),
+                position: i % 1000,
+            };
+            
+            index.add_term(token).await.unwrap();
+            
+            // Flush every 100 terms to simulate periodic flushing
+            if i % 100 == 99 {
+                index.flush().await.unwrap();
+            }
+        }
+        
+        // Measure the time to perform a final flush of everything
+        let start = Instant::now();
+        index.flush().await.unwrap();
+        let duration = start.elapsed();
+        
+        println!("Time to flush {} terms: {:?}", num_terms, duration);
+        
+        // Clean up
+        temp_dir.close().unwrap();
     }
 }
