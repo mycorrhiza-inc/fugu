@@ -82,6 +82,10 @@ fi
 if [ "$RUN_PERFORMANCE_TESTS" = true ]; then
   echo "Running performance tests..."
   cargo test --features performance-tests --lib -- test_insert_performance test_search_performance test_text_search_performance test_delete_performance test_flush_performance
+  
+  # Run the hot/cold loading performance test
+  echo "Running hot/cold loading performance tests..."
+  cargo test --test hot_cold_loading_tests test_hot_cold_loading_performance
 
   # Generate performance visualizations if Python is available
   if command -v python3 &>/dev/null; then

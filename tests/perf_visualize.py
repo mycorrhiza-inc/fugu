@@ -647,6 +647,8 @@ def compare_operations(csv_results, output_dir="tests/perf_results"):
         "insert": ["insert_performance", "integration_index"],
         "search": ["search_performance", "text_search_performance", "integration_search"],
         "delete": ["delete_performance", "integration_delete"],
+        # Add hot/cold performance comparison group
+        "hot_cold": ["cold_search_performance", "hot_search_performance"]
     }
     
     print(f"Defined operation groups: {operation_groups}")
@@ -712,10 +714,21 @@ def compare_operations(csv_results, output_dir="tests/perf_results"):
                 ax.bar(x + width/2, p90_values, width, label='p90', color='orange')
                 ax.bar(x + width*1.5, p99_values, width, label='p99', color='red')
 
-                ax.set_title(f'{operation.capitalize()} Performance Comparison')
+                # Set appropriate title based on the operation type
+                title = f'{operation.capitalize()} Performance Comparison'
+                if operation == "hot_cold":
+                    title = "Hot vs Cold Query Performance Comparison"
+                    
+                ax.set_title(title)
                 ax.set_ylabel('Microseconds (μs) - lower is better')
                 ax.set_xticks(x)
-                ax.set_xticklabels(test_names)
+                
+                # Format test names more nicely for hot_cold comparison
+                display_names = test_names
+                if operation == "hot_cold":
+                    display_names = [name.replace("_performance", "").replace("_", " ").title() for name in test_names]
+                
+                ax.set_xticklabels(display_names)
 
                 # Add values on top of bars
                 print("Adding value labels...")
@@ -761,6 +774,69 @@ def compare_operations(csv_results, output_dir="tests/perf_results"):
             print(f"No tests available for operation '{operation}', skipping comparison")
     
     print(f"Operation comparison plot creation complete: {plots_created} created, {plots_failed} failed")
+
+
+def create_server_reload_visualization(csv_results, output_dir="tests/perf_results"):
+    """Create visualization for server reload performance."""
+    print("Creating server reload visualization chart")
+    
+    if "server_reload_performance" not in csv_results:
+        print("No server reload performance data found")
+        return
+    
+    try:
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Get the data
+        reload_data = csv_results["server_reload_performance"]
+        raw_data = reload_data.get("raw_data")
+        
+        if raw_data is None or raw_data.empty:
+            print("No raw data available for server reload performance")
+            return
+            
+        # Create a simple bar chart for reload time
+        plt.figure(figsize=(8, 6))
+        
+        # Extract the duration value (usually just one value)
+        duration_us = raw_data["duration_us"].iloc[0] if len(raw_data) > 0 else 0
+        duration_ms = duration_us / 1000  # Convert to milliseconds for better readability
+        
+        # Create bar chart
+        plt.bar(["Server Reload Time"], [duration_ms], color='blue')
+        
+        # Add labels
+        plt.ylabel('Time (milliseconds)')
+        plt.title('Server Reload Time with Existing Data')
+        
+        # Add value on top of bar
+        plt.text(0, duration_ms, f"{int(duration_ms)} ms", 
+                 ha='center', va='bottom', fontsize=12)
+        
+        # Adjust y-axis to start from 0 and go slightly above the bar
+        plt.ylim(0, duration_ms * 1.2)
+        
+        # Save the figure
+        output_file = f"{output_dir}/server_reload_performance.png"
+        plt.savefig(output_file, dpi=300)
+        
+        # Verify the file was created
+        if os.path.exists(output_file):
+            print(f"Successfully saved server reload chart ({os.path.getsize(output_file)} bytes)")
+        else:
+            print(f"Warning: Failed to save server reload chart")
+            
+        plt.close()
+        
+    except Exception as e:
+        print(f"Error creating server reload visualization: {e}")
+        import traceback
+        print(traceback.format_exc())
+        try:
+            plt.close()
+        except:
+            pass
 
 
 def check_dependencies():
@@ -970,6 +1046,16 @@ def main():
             print(f"Operation comparison plots created in {args.output_dir}")
         except Exception as e:
             print(f"Error creating comparison plots: {e}")
+            import traceback
+            print(traceback.format_exc())
+            
+        # Create server reload visualization (if data available)
+        print("\nCreating server reload visualization...")
+        try:
+            create_server_reload_visualization(csv_results, args.output_dir)
+            print(f"Server reload visualization created in {args.output_dir}")
+        except Exception as e:
+            print(f"Error creating server reload visualization: {e}")
             import traceback
             print(traceback.format_exc())
 
