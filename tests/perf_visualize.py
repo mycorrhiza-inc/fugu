@@ -101,7 +101,8 @@ def create_bar_chart(tests, output_dir="tests/perf_results"):
     x = np.arange(len(test_names))
     width = 0.2
     
-    fig, ax = plt.figure(figsize=(12, 7)), plt.subplot(111)
+    fig = plt.figure(figsize=(12, 7))
+    ax = plt.subplot(111)
     
     ax.bar(x - width*1.5, p10_values, width, label='p10', color='green')
     ax.bar(x - width/2, p50_values, width, label='p50', color='blue')
