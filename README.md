@@ -78,6 +78,25 @@ Run tests using the test script:
 ./tests/run_tests.sh --unit --integration
 ```
 
+#### Performance Test Visualizations
+
+When running performance tests with `--perf`, the system automatically generates visualizations if Python 3 is available:
+
+```bash
+./tests/run_tests.sh --perf
+```
+
+This creates:
+- Bar charts showing p10, p50, p90, and p99 percentiles for each performance test
+- Trend charts tracking performance over time
+- Results are saved to `tests/perf_results/`
+
+You can also generate visualizations from existing test data without running tests:
+
+```bash
+python3 tests/perf_visualize.py --no-run
+```
+
 For more detailed test documentation, see `tests/README.md`.
 
 ## Architecture

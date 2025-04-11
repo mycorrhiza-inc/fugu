@@ -157,15 +157,37 @@ pub async fn start() {
 
                 // We don't await the handle here, as we want the server to run in the background
                 println!("Fugu node started successfully in foreground mode");
-                println!("Press Ctrl-C to terminate the server");
-
-                // Block the main thread to keep the program running until Ctrl-C
-                tokio::signal::ctrl_c()
-                    .await
-                    .expect("Failed to listen for ctrl-c event");
-
+                
+                if let Some(timeout_secs) = args.timeout {
+                    println!("Server will automatically exit after {} seconds", timeout_secs);
+                    
+                    // Create a timeout future
+                    let timeout_fut = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
+                    
+                    // Create a Ctrl-C future
+                    let ctrl_c_fut = tokio::signal::ctrl_c();
+                    
+                    // Wait for either timeout or Ctrl-C
+                    tokio::select! {
+                        _ = timeout_fut => {
+                            println!("Server timeout reached, shutting down...");
+                        }
+                        _ = ctrl_c_fut => {
+                            println!("Received Ctrl-C, shutting down server...");
+                        }
+                    }
+                } else {
+                    println!("Press Ctrl-C to terminate the server");
+                    
+                    // Block the main thread to keep the program running until Ctrl-C
+                    tokio::signal::ctrl_c()
+                        .await
+                        .expect("Failed to listen for ctrl-c event");
+                        
+                    println!("Received Ctrl-C, shutting down server...");
+                }
+                
                 // Send shutdown signal to gracefully shutdown the server
-                println!("Shutting down server...");
                 let _ = shutdown_tx.send(());
 
                 // Give server a moment to clean up

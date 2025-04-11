@@ -61,6 +61,10 @@ pub struct UpCommand {
     /// Path to the log file when running as a daemon
     #[arg(long, default_value = "/tmp/fugu.log")]
     pub log_file: String,
+    
+    /// Timeout in seconds before server automatically exits (useful for tests)
+    #[arg(long)]
+    pub timeout: Option<u64>,
 }
 
 // NAMESPACES
