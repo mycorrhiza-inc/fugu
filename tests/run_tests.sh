@@ -26,34 +26,34 @@ if [ $# -eq 0 ]; then
 else
   for arg in "$@"; do
     case $arg in
-      --all)
-        RUN_ALL=true
-        RUN_UNIT_TESTS=true
-        RUN_INTEGRATION_TESTS=true
-        RUN_PERFORMANCE_TESTS=true
-        RUN_CLIENT_TESTS=true
-        ;;
-      --unit)
-        RUN_UNIT_TESTS=true
-        ;;
-      --integration)
-        RUN_INTEGRATION_TESTS=true
-        ;;
-      --perf)
-        RUN_PERFORMANCE_TESTS=true
-        ;;
-      --client)
-        RUN_CLIENT_TESTS=true
-        ;;
-      --help)
-        print_usage
-        exit 0
-        ;;
-      *)
-        echo "Unknown option: $arg"
-        print_usage
-        exit 1
-        ;;
+    --all)
+      RUN_ALL=true
+      RUN_UNIT_TESTS=true
+      RUN_INTEGRATION_TESTS=true
+      RUN_PERFORMANCE_TESTS=true
+      RUN_CLIENT_TESTS=true
+      ;;
+    --unit)
+      RUN_UNIT_TESTS=true
+      ;;
+    --integration)
+      RUN_INTEGRATION_TESTS=true
+      ;;
+    --perf)
+      RUN_PERFORMANCE_TESTS=true
+      ;;
+    --client)
+      RUN_CLIENT_TESTS=true
+      ;;
+    --help)
+      print_usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $arg"
+      print_usage
+      exit 1
+      ;;
     esac
   done
 fi
@@ -82,11 +82,11 @@ fi
 if [ "$RUN_PERFORMANCE_TESTS" = true ]; then
   echo "Running performance tests..."
   cargo test --features performance-tests --lib -- test_insert_performance test_search_performance test_text_search_performance test_delete_performance test_flush_performance
-  
+
   # Generate performance visualizations if Python is available
-  if command -v python3 &> /dev/null; then
+  if command -v python3 &>/dev/null; then
     echo "Generating performance visualizations..."
-    
+
     # Check if matplotlib is installed
     if ! python3 -c "import matplotlib" 2>/dev/null; then
       echo "Matplotlib not found. Install required dependencies with:"
@@ -115,7 +115,7 @@ if [ "$RUN_CLIENT_TESTS" = true ]; then
 
   echo "Testing client operations..."
   # Create a test file
-  echo "This is a test document for testing the Fugu search engine" > /tmp/test_doc.txt
+  echo "This is a test document for testing the Fugu search engine" >/tmp/test_doc.txt
 
   # Test the index command
   echo "Testing index operation..."
@@ -132,13 +132,13 @@ if [ "$RUN_CLIENT_TESTS" = true ]; then
   # Clean up and verify server exits
   echo "Cleaning up..."
   kill $SERVER_PID
-  
+
   # Wait for the server to exit (max 5 seconds)
   echo "Waiting for server to exit..."
   WAIT_COUNT=0
   while kill -0 $SERVER_PID 2>/dev/null; do
     sleep 0.5
-    WAIT_COUNT=$((WAIT_COUNT+1))
+    WAIT_COUNT=$((WAIT_COUNT + 1))
     if [ $WAIT_COUNT -ge 10 ]; then
       echo "Server didn't exit cleanly, forcing termination..."
       kill -9 $SERVER_PID
@@ -165,3 +165,4 @@ elif [ "$RUN_CLIENT_TESTS" = true ] && [ "$RUN_UNIT_TESTS" = false ] && [ "$RUN_
 else
   echo "Selected test suites completed successfully!"
 fi
+
