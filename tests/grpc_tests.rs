@@ -1,12 +1,37 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::fs::File;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 // End-to-end tests for the GRPC client and server
+
+// Function to save performance data to CSV
+fn save_performance_csv(test_name: &str, durations: &[Duration]) -> std::io::Result<()> {
+    // Create the data directory if it doesn't exist
+    let data_dir = Path::new("tests/data");
+    if !data_dir.exists() {
+        std::fs::create_dir_all(data_dir)?;
+    }
+    
+    // Create CSV file
+    let file_path = data_dir.join(format!("integration_{}.csv", test_name));
+    let mut file = File::create(file_path)?;
+    
+    // Write header
+    writeln!(file, "operation,duration_us")?;
+    
+    // Write each measurement
+    for (i, duration) in durations.iter().enumerate() {
+        writeln!(file, "{},{}", i, duration.as_micros())?;
+    }
+    
+    Ok(())
+}
 
 #[test]
 fn test_grpc_e2e() {
@@ -51,72 +76,124 @@ fn test_grpc_e2e() {
     // Allow server to start
     thread::sleep(Duration::from_secs(2));
 
-    // Use the client to index a file
-    let index_output = Command::new(&binary)
-        .args(&[
-            "index",
-            "--file",
-            &test_file_path.to_string_lossy(),
-            "--addr",
-            &server_url,
-        ])
-        .output()
-        .expect("Failed to execute index command");
+    // Performance measurement arrays
+    let mut index_durations = Vec::new();
+    let mut search_durations = Vec::new();
+    let mut delete_durations = Vec::new();
+    
+    // Run multiple operations for performance measurement
+    let num_operations = 50; // Less than unit tests since these are slower
+    
+    for i in 0..num_operations {
+        // Create a unique test file for each operation
+        let test_file_path_i = temp_dir.path().join(format!("sample_{}.txt", i));
+        let test_content_i = format!("This is sample document {} for testing the fugu search engine", i);
+        fs::write(&test_file_path_i, &test_content_i).expect("Failed to write test file");
+        
+        // Use the client to index a file - measure time
+        let start = Instant::now();
+        let index_output = Command::new(&binary)
+            .args(&[
+                "index",
+                "--file",
+                &test_file_path_i.to_string_lossy(),
+                "--addr",
+                &server_url,
+            ])
+            .output()
+            .expect("Failed to execute index command");
+        let duration = start.elapsed();
+        index_durations.push(duration);
 
-    assert!(index_output.status.success(), "Index command failed");
-    let index_stdout = String::from_utf8_lossy(&index_output.stdout);
-    println!("Index output: {}", index_stdout);
-    assert!(
-        index_stdout.contains("Indexing file in namespace"),
-        "Index was not successful"
-    );
+        assert!(index_output.status.success(), "Index command failed");
+        let index_stdout = String::from_utf8_lossy(&index_output.stdout);
+        if i == 0 {
+            println!("Index output: {}", index_stdout);
+            assert!(
+                index_stdout.contains("Indexing file in namespace"),
+                "Index was not successful"
+            );
+        }
+    }
 
-    // Use the client to search
-    let search_output = Command::new(&binary)
-        .args(&[
-            "search",
-            "--query",
-            "sample",
-            "--limit",
-            "10",
-            "--addr",
-            &server_url,
-        ])
-        .output()
-        .expect("Failed to execute search command");
+    // Save index performance data
+    if let Err(e) = save_performance_csv("index", &index_durations) {
+        eprintln!("Failed to save integration index performance data: {}", e);
+    }
 
-    assert!(search_output.status.success(), "Search command failed");
-    let search_stdout = String::from_utf8_lossy(&search_output.stdout);
-    println!("Search output: {}", search_stdout);
-    assert!(
-        search_stdout.contains("Searching in namespace"),
-        "Search response not found"
-    );
+    // Test search performance with different queries
+    let search_queries = ["sample", "document", "testing", "engine", "fugu"];
+    
+    for i in 0..num_operations {
+        let query = search_queries[i % search_queries.len()];
+        
+        // Use the client to search - measure time
+        let start = Instant::now();
+        let search_output = Command::new(&binary)
+            .args(&[
+                "search",
+                "--query",
+                query,
+                "--limit",
+                "10",
+                "--addr",
+                &server_url,
+            ])
+            .output()
+            .expect("Failed to execute search command");
+        let duration = start.elapsed();
+        search_durations.push(duration);
 
-    // Use the client to delete
-    let file_name = Path::new(&test_file_path)
-        .file_name()
-        .unwrap()
-        .to_string_lossy();
+        assert!(search_output.status.success(), "Search command failed");
+        let search_stdout = String::from_utf8_lossy(&search_output.stdout);
+        if i == 0 {
+            println!("Search output: {}", search_stdout);
+            assert!(
+                search_stdout.contains("Searching in namespace"),
+                "Search response not found"
+            );
+        }
+    }
+    
+    // Save search performance data
+    if let Err(e) = save_performance_csv("search", &search_durations) {
+        eprintln!("Failed to save integration search performance data: {}", e);
+    }
 
-    let delete_output = Command::new(&binary)
-        .args(&[
-            "delete",
-            "--location",
-            &format!("/{}", file_name),
-            "--addr",
-            &server_url,
-        ])
-        .output()
-        .expect("Failed to execute delete command");
-
-    assert!(delete_output.status.success(), "Delete command failed");
-    let delete_stdout = String::from_utf8_lossy(&delete_output.stdout);
-    println!("Delete output: {}", delete_stdout);
-    assert!(
-        delete_stdout.contains("Deleting from namespace"),
-        "Delete was not successful"
-    );
+    // Test delete performance
+    for i in 0..num_operations {
+        let file_name = format!("sample_{}.txt", i);
+        
+        // Use the client to delete - measure time
+        let start = Instant::now();
+        let delete_output = Command::new(&binary)
+            .args(&[
+                "delete",
+                "--location",
+                &format!("/{}", file_name),
+                "--addr",
+                &server_url,
+            ])
+            .output()
+            .expect("Failed to execute delete command");
+        let duration = start.elapsed();
+        delete_durations.push(duration);
+        
+        assert!(delete_output.status.success(), "Delete command failed");
+        let delete_stdout = String::from_utf8_lossy(&delete_output.stdout);
+        if i == 0 {
+            println!("Delete output: {}", delete_stdout);
+            assert!(
+                delete_stdout.contains("Deleting from namespace"),
+                "Delete was not successful"
+            );
+        }
+    }
+    
+    // Save delete performance data
+    if let Err(e) = save_performance_csv("delete", &delete_durations) {
+        eprintln!("Failed to save integration delete performance data: {}", e);
+    }
 
     // Kill the server and verify it exited
     server.kill().expect("Failed to kill server");

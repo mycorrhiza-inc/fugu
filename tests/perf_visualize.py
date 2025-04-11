@@ -4,9 +4,11 @@ import re
 import os
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from datetime import datetime
 import json
 import argparse
+import glob
 
 # Define the pattern to match performance output lines
 PATTERN = r"(\w+) performance \(μs\): p10=(\d+), p50=(\d+), p90=(\d+), p99=(\d+)"
@@ -89,6 +91,38 @@ def save_performance_data(tests, history_file="tests/perf_history.json"):
         json.dump(history, f, indent=2)
     
     return history
+
+def load_csv_data(data_dir="tests/data"):
+    """Load CSV performance data files."""
+    csv_results = {}
+    csv_files = glob.glob(f"{data_dir}/*.csv")
+    
+    for csv_file in csv_files:
+        test_name = os.path.basename(csv_file).replace(".csv", "")
+        try:
+            # Load CSV into pandas DataFrame
+            df = pd.read_csv(csv_file)
+            # Calculate percentiles
+            if not df.empty:
+                duration_micros = df['duration_us']
+                p10 = np.percentile(duration_micros, 10)
+                p50 = np.percentile(duration_micros, 50)
+                p90 = np.percentile(duration_micros, 90)
+                p99 = np.percentile(duration_micros, 99)
+                
+                # Store the results
+                csv_results[test_name] = {
+                    "name": test_name,
+                    "p10": int(p10),
+                    "p50": int(p50),
+                    "p90": int(p90),
+                    "p99": int(p99),
+                    "raw_data": df
+                }
+        except Exception as e:
+            print(f"Error loading CSV file {csv_file}: {e}")
+    
+    return csv_results
 
 def create_bar_chart(tests, output_dir="tests/perf_results"):
     """Create a bar chart visualizing the current performance test results."""
@@ -189,11 +223,109 @@ def create_trend_charts(history, output_dir="tests/perf_results"):
             plt.savefig(f"{output_dir}/{test_name}_trend.png", dpi=300)
             plt.close()
 
+def create_distribution_plot(csv_results, output_dir="tests/perf_results"):
+    """Create distribution plots from raw CSV data."""
+    if not csv_results:
+        print("No CSV data found to create distribution plots")
+        return
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create a distribution plot for each test
+    for test_name, data in csv_results.items():
+        if 'raw_data' in data:
+            plt.figure(figsize=(10, 6))
+            
+            # Create histogram
+            plt.hist(data['raw_data']['duration_us'], bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+            
+            # Add vertical lines for percentiles
+            plt.axvline(data['p10'], color='green', linestyle='dashed', linewidth=1, label=f'p10: {int(data["p10"])}μs')
+            plt.axvline(data['p50'], color='blue', linestyle='dashed', linewidth=1, label=f'p50: {int(data["p50"])}μs')
+            plt.axvline(data['p90'], color='orange', linestyle='dashed', linewidth=1, label=f'p90: {int(data["p90"])}μs')
+            plt.axvline(data['p99'], color='red', linestyle='dashed', linewidth=1, label=f'p99: {int(data["p99"])}μs')
+            
+            plt.title(f'{test_name} Performance Distribution')
+            plt.xlabel('Duration (μs)')
+            plt.ylabel('Frequency')
+            plt.legend()
+            plt.tight_layout()
+            
+            # Save the figure
+            plt.savefig(f"{output_dir}/{test_name}_distribution.png", dpi=300)
+            plt.close()
+
+def compare_operations(csv_results, output_dir="tests/perf_results"):
+    """Create comparison plots between unit tests and integration tests."""
+    if not csv_results:
+        print("No CSV data found to create comparison plots")
+        return
+    
+    # Group the tests by operation type (insert, search, delete)
+    operation_groups = {
+        "insert": ["insert_performance", "integration_index"],
+        "search": ["search_performance", "text_search_performance", "integration_search"],
+        "delete": ["delete_performance", "integration_delete"],
+    }
+    
+    # Create a comparison chart for each operation type
+    for operation, test_group in operation_groups.items():
+        # Collect tests that exist in our data
+        available_tests = [test for test in test_group if test in csv_results]
+        
+        if len(available_tests) > 0:
+            # Prepare the data
+            test_names = []
+            p10_values = []
+            p50_values = []
+            p90_values = []
+            p99_values = []
+            
+            for test in available_tests:
+                test_names.append(test)
+                p10_values.append(csv_results[test]["p10"])
+                p50_values.append(csv_results[test]["p50"])
+                p90_values.append(csv_results[test]["p90"])
+                p99_values.append(csv_results[test]["p99"])
+            
+            # Create the chart
+            x = np.arange(len(test_names))
+            width = 0.2
+            
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            ax.bar(x - width*1.5, p10_values, width, label='p10', color='green')
+            ax.bar(x - width/2, p50_values, width, label='p50', color='blue')
+            ax.bar(x + width/2, p90_values, width, label='p90', color='orange')
+            ax.bar(x + width*1.5, p99_values, width, label='p99', color='red')
+            
+            ax.set_title(f'{operation.capitalize()} Performance Comparison')
+            ax.set_ylabel('Microseconds (μs) - lower is better')
+            ax.set_xticks(x)
+            ax.set_xticklabels(test_names)
+            
+            # Add values on top of bars
+            for i in range(len(test_names)):
+                ax.text(i - width*1.5, p10_values[i], str(p10_values[i]), ha='center', va='bottom', fontsize=9)
+                ax.text(i - width/2, p50_values[i], str(p50_values[i]), ha='center', va='bottom', fontsize=9)
+                ax.text(i + width/2, p90_values[i], str(p90_values[i]), ha='center', va='bottom', fontsize=9)
+                ax.text(i + width*1.5, p99_values[i], str(p99_values[i]), ha='center', va='bottom', fontsize=9)
+            
+            ax.legend()
+            plt.tight_layout()
+            
+            # Save the figure
+            os.makedirs(output_dir, exist_ok=True)
+            plt.savefig(f"{output_dir}/{operation}_comparison.png", dpi=300)
+            plt.close()
+
 def check_dependencies():
     """Check if required dependencies are installed."""
     try:
         import matplotlib
         import numpy
+        import pandas
         return True
     except ImportError as e:
         print(f"Missing dependency: {e}")
@@ -210,6 +342,7 @@ def main():
     parser.add_argument('--no-run', action='store_true', help='Skip running tests and just visualize existing data')
     parser.add_argument('--history-file', default='tests/perf_history.json', help='Path to the performance history file')
     parser.add_argument('--output-dir', default='tests/perf_results', help='Directory to save visualizations')
+    parser.add_argument('--data-dir', default='tests/data', help='Directory with CSV data files')
     
     args = parser.parse_args()
     
@@ -222,30 +355,44 @@ def main():
         tests = parse_performance_data(output)
         
         if not tests:
-            print("No performance test results found. Make sure tests are running correctly.")
-            return
+            print("No performance test results found in logs. Using CSV data for visualization.")
+    
+    # Load and process CSV data
+    csv_results = load_csv_data(args.data_dir)
+    
+    if csv_results:
+        print(f"Loaded performance data for {len(csv_results)} tests from CSV files")
         
+        # If we didn't get tests from the output logs, create them from CSV data
+        if not tests:
+            tests = [data for name, data in csv_results.items() if "raw_data" not in data]
+            
         # Save the performance data
-        history = save_performance_data(tests, args.history_file)
+        if tests:
+            history = save_performance_data(tests, args.history_file)
     else:
-        # Load existing history
-        if os.path.exists(args.history_file):
-            with open(args.history_file, "r") as f:
-                try:
-                    history = json.load(f)
-                    if history and len(history) > 0:
-                        tests = history[-1]["tests"]  # Get the most recent test results
-                    else:
-                        print("No performance data found in history file")
+        print("No CSV performance data files found")
+        if not tests:
+            print("No performance data available from either logs or CSV files")
+            
+            # Load existing history as a fallback
+            if os.path.exists(args.history_file):
+                with open(args.history_file, "r") as f:
+                    try:
+                        history = json.load(f)
+                        if history and len(history) > 0:
+                            tests = history[-1]["tests"]  # Get the most recent test results
+                        else:
+                            print("No performance data found in history file")
+                            return
+                    except json.JSONDecodeError:
+                        print("Error decoding history file")
                         return
-                except json.JSONDecodeError:
-                    print("Error decoding history file")
-                    return
-        else:
-            print(f"History file {args.history_file} not found")
-            print("Run performance tests first with:")
-            print("./tests/run_tests.sh --perf")
-            return
+            else:
+                print(f"History file {args.history_file} not found")
+                print("Run performance tests first with:")
+                print("./tests/run_tests.sh --perf")
+                return
     
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
@@ -261,6 +408,15 @@ def main():
         print(f"Trend charts created in {args.output_dir}")
     elif len(history) == 1:
         print("Only one data point available. Run tests again to generate trend charts.")
+    
+    # Create distribution plots from CSV data
+    if csv_results:
+        create_distribution_plot(csv_results, args.output_dir)
+        print(f"Distribution plots created in {args.output_dir}")
+        
+        # Create comparison plots
+        compare_operations(csv_results, args.output_dir)
+        print(f"Operation comparison plots created in {args.output_dir}")
     
     print(f"Visualizations saved to: {args.output_dir}")
 
