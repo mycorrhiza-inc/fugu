@@ -37,3 +37,41 @@ This document provides performance analysis for the Fugu database operations.
 
 ### Delete Comparison
 ![Delete Comparison](tests/perf_results/delete_comparison.png)
+
+## Hot vs Cold Performance
+
+### Hot vs Cold Search Performance
+![Hot Cold Comparison](tests/perf_results/hot_cold_comparison.png)
+
+This comparison shows the performance difference between:
+- **Cold Search**: Queries performed immediately after server startup with existing data
+- **Hot Search**: Queries performed after the server has been running and processing requests
+
+A significant performance improvement is typically observed in the hot state due to:
+- In-memory caching of data structures
+- JIT compilation optimizations
+- Operating system file caching
+- Preloaded and optimized data structures
+
+### Server Reload Performance
+![Server Reload Performance](tests/perf_results/server_reload_performance.png)
+
+This chart shows the time taken to start the server with existing data. This metric is important for understanding:
+- Cold start latency with production data volumes
+- Recovery time after planned or unplanned restarts
+- Impact of data size on startup performance
+
+## Testing Methodology
+
+The hot/cold loading tests measure:
+
+1. **Cold Start Time**: Time to start the server with existing data
+2. **Cold Query Performance**: Search latency immediately after server startup
+3. **Hot Query Performance**: Search latency after server has processed many queries
+4. **Server Reload Time**: Time to restart the server with existing data
+
+Test parameters:
+- 100 documents indexed before testing
+- 50 search operations for each test phase
+- Multiple search terms to exercise different aspects of the index
+- Server restart between cold and hot phases
