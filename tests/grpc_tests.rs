@@ -39,10 +39,11 @@ fn test_grpc_e2e() {
     let test_content = "This is a sample document for testing the fugu search engine";
     fs::write(&test_file_path, test_content).expect("Failed to write test file");
 
-    // Start the server
+    // Start the server with a timeout
     let mut server = Command::new(&binary)
         .args(&[
             "up",
+            "--timeout", "30", // 30 second timeout
         ])
         .spawn()
         .expect("Failed to start server");
@@ -117,8 +118,25 @@ fn test_grpc_e2e() {
         "Delete was not successful"
     );
 
-    // Kill the server
+    // Kill the server and verify it exited
     server.kill().expect("Failed to kill server");
+    
+    // Wait for server to actually exit with timeout
+    match server.try_wait() {
+        Ok(None) => {
+            println!("Waiting for server to exit...");
+            // Wait up to 5 seconds for the server to exit
+            for _ in 0..10 {
+                thread::sleep(Duration::from_millis(500));
+                if let Ok(Some(status)) = server.try_wait() {
+                    println!("Server exited with status: {}", status);
+                    break;
+                }
+            }
+        }
+        Ok(Some(status)) => println!("Server exited immediately with status: {}", status),
+        Err(e) => println!("Error waiting for server: {}", e),
+    }
 
     // Clean up
     temp_dir.close().expect("Failed to delete temp directory");
@@ -174,10 +192,11 @@ fn test_index_persistence_with_graceful_shutdown() {
         })
         .collect::<Vec<_>>();
 
-    // Start the server
+    // Start the server with a timeout
     let mut server = Command::new(&binary)
         .args(&[
             "up",
+            "--timeout", "30", // 30 second timeout
         ])
         .spawn()
         .expect("Failed to start server");
@@ -221,12 +240,31 @@ fn test_index_persistence_with_graceful_shutdown() {
 
     // Gracefully shut down the server
     server.kill().expect("Failed to kill server");
+    
+    // Wait for server to actually exit with timeout
+    match server.try_wait() {
+        Ok(None) => {
+            println!("Waiting for server to exit...");
+            // Wait up to 5 seconds for the server to exit
+            for _ in 0..10 {
+                thread::sleep(Duration::from_millis(500));
+                if let Ok(Some(status)) = server.try_wait() {
+                    println!("Server exited with status: {}", status);
+                    break;
+                }
+            }
+        }
+        Ok(Some(status)) => println!("Server exited immediately with status: {}", status),
+        Err(e) => println!("Error waiting for server: {}", e),
+    };
+    
     thread::sleep(Duration::from_secs(2));
 
-    // Start the server again
+    // Start the server again with timeout
     let mut server2 = Command::new(&binary)
         .args(&[
             "up",
+            "--timeout", "30", // 30 second timeout
         ])
         .spawn()
         .expect("Failed to start server again");
@@ -259,8 +297,25 @@ fn test_index_persistence_with_graceful_shutdown() {
         "Search results differ after server restart"
     );
 
-    // Kill the second server
+    // Kill the second server and verify it exited
     server2.kill().expect("Failed to kill server");
+    
+    // Wait for server to actually exit with timeout
+    match server2.try_wait() {
+        Ok(None) => {
+            println!("Waiting for server2 to exit...");
+            // Wait up to 5 seconds for the server to exit
+            for _ in 0..10 {
+                thread::sleep(Duration::from_millis(500));
+                if let Ok(Some(status)) = server2.try_wait() {
+                    println!("Server2 exited with status: {}", status);
+                    break;
+                }
+            }
+        }
+        Ok(Some(status)) => println!("Server2 exited immediately with status: {}", status),
+        Err(e) => println!("Error waiting for server2: {}", e),
+    }
 
     // Clean up
     temp_dir.close().expect("Failed to delete temp directory");
@@ -307,10 +362,11 @@ fn test_multiple_namespaces() {
         fs::write(&path, content).expect("Failed to write test file");
     }
 
-    // Start the server
+    // Start the server with a timeout
     let mut server = Command::new(&binary)
         .args(&[
             "up",
+            "--timeout", "30", // 30 second timeout
         ])
         .spawn()
         .expect("Failed to start server");
@@ -380,8 +436,25 @@ fn test_multiple_namespaces() {
             "Common search command failed for namespace {}", namespace);
     }
 
-    // Kill the server
+    // Kill the server and verify it exited
     server.kill().expect("Failed to kill server");
+    
+    // Wait for server to actually exit with timeout
+    match server.try_wait() {
+        Ok(None) => {
+            println!("Waiting for server to exit...");
+            // Wait up to 5 seconds for the server to exit
+            for _ in 0..10 {
+                thread::sleep(Duration::from_millis(500));
+                if let Ok(Some(status)) = server.try_wait() {
+                    println!("Server exited with status: {}", status);
+                    break;
+                }
+            }
+        }
+        Ok(Some(status)) => println!("Server exited immediately with status: {}", status),
+        Err(e) => println!("Error waiting for server: {}", e),
+    }
 
     // Clean up
     temp_dir.close().expect("Failed to delete temp directory");

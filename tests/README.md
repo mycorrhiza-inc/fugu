@@ -56,7 +56,40 @@ cargo test --features integration-tests --test grpc_tests
 cargo test --features performance-tests --lib -- test_insert_performance test_search_performance test_text_search_performance test_delete_performance test_flush_performance
 ```
 
+## Performance Test Visualizations
+
+When running performance tests with the `--perf` flag, the system automatically generates visualizations if Python 3 is available:
+
+```bash
+./tests/run_tests.sh --perf
+```
+
+### Visualization Features
+
+- **Bar Charts**: Shows p10, p50, p90, and p99 percentiles for each performance test
+- **Trend Charts**: Tracks performance changes over time across multiple test runs
+- **Data Storage**: Performance data is stored in JSON format for historical comparisons
+
+### Visualization Options
+
+```bash
+# Generate visualizations without running tests (uses existing data)
+python3 tests/perf_visualize.py --no-run
+
+# Specify a custom history file
+python3 tests/perf_visualize.py --history-file=/path/to/history.json
+
+# Specify a custom output directory
+python3 tests/perf_visualize.py --output-dir=/path/to/output
+
+# For CI/CD pipelines: Run tests and generate visualizations in one step
+./tests/run_perf_viz.sh
+```
+
+Visualization results are saved to `tests/perf_results/` by default. The visualizations are automatically generated whenever you run the performance tests.
+
 ## Test Files
 
 - `grpc_tests.rs`: Integration tests for GRPC functionality
 - `run_tests.sh`: Script to automate running different test suites
+- `perf_visualize.py`: Script to generate performance test visualizations

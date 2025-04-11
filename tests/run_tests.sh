@@ -82,14 +82,32 @@ fi
 if [ "$RUN_PERFORMANCE_TESTS" = true ]; then
   echo "Running performance tests..."
   cargo test --features performance-tests --lib -- test_insert_performance test_search_performance test_text_search_performance test_delete_performance test_flush_performance
+  
+  # Generate performance visualizations if Python is available
+  if command -v python3 &> /dev/null; then
+    echo "Generating performance visualizations..."
+    
+    # Check if matplotlib is installed
+    if ! python3 -c "import matplotlib" 2>/dev/null; then
+      echo "Matplotlib not found. Install required dependencies with:"
+      echo "pip3 install -r tests/requirements.txt"
+    else
+      python3 tests/perf_visualize.py
+      echo "Performance visualizations saved to tests/perf_results/"
+    fi
+  else
+    echo "Python3 not found, skipping performance visualizations"
+    echo "To enable visualizations, install Python 3 and required dependencies:"
+    echo "pip3 install -r tests/requirements.txt"
+  fi
 fi
 
 # Run client operation tests if requested
 if [ "$RUN_CLIENT_TESTS" = true ]; then
   echo "Running client operation tests..."
   echo "Starting the GRPC server in the background..."
-  # Start the GRPC server on port 50053
-  cargo run -- up &
+  # Start the GRPC server on port 50053 with timeout
+  cargo run -- up --timeout 30 &
   SERVER_PID=$!
 
   # Give the server time to start
@@ -111,9 +129,23 @@ if [ "$RUN_CLIENT_TESTS" = true ]; then
   echo "Testing delete operation..."
   cargo run -- namespace delete --addr http://127.0.0.1:50053 --location "/test_doc.txt"
 
-  # Clean up
+  # Clean up and verify server exits
   echo "Cleaning up..."
   kill $SERVER_PID
+  
+  # Wait for the server to exit (max 5 seconds)
+  echo "Waiting for server to exit..."
+  WAIT_COUNT=0
+  while kill -0 $SERVER_PID 2>/dev/null; do
+    sleep 0.5
+    WAIT_COUNT=$((WAIT_COUNT+1))
+    if [ $WAIT_COUNT -ge 10 ]; then
+      echo "Server didn't exit cleanly, forcing termination..."
+      kill -9 $SERVER_PID
+      break
+    fi
+  done
+  echo "Server exited"
   rm -f /tmp/test_doc.txt
 fi
 
