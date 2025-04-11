@@ -99,6 +99,8 @@ python3 tests/perf_visualize.py --no-run
 
 For more detailed test documentation, see `tests/README.md`.
 
+For performance analysis results, see [PERFORMANCE.md](PERFORMANCE.md).
+
 ## Architecture
 
 Fugu consists of several key components:
