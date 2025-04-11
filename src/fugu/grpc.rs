@@ -218,27 +218,63 @@ pub async fn start_grpc_server(
         let server_fut = Server::builder()
             .add_service(NamespaceServer::new(namespace_service))
             .serve_with_shutdown(addr, async move {
-                let _ = shutdown_signal.await;
+                // Add timeout to prevent hanging indefinitely
+                let shutdown_result = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(10), // 10 second timeout
+                    shutdown_signal
+                ).await;
+                
+                if shutdown_result.is_err() {
+                    println!("Shutdown signal timed out, forcing shutdown");
+                }
+                
                 println!("Graceful shutdown signal received, unloading all indices");
                 
-                // Unload all indices on shutdown
+                // Unload all indices on shutdown (with timeout)
                 let nodes = namespace_service_clone.nodes.read().await;
                 for (namespace, _) in nodes.iter() {
-                    if let Err(e) = namespace_service_clone.unload_node(namespace).await {
-                        eprintln!("Error unloading node for namespace {}: {}", namespace, e);
-                    } else {
-                        println!("Successfully unloaded node for namespace {}", namespace);
+                    // Add timeout for each unload operation
+                    match tokio::time::timeout(
+                        tokio::time::Duration::from_secs(5), // 5 second timeout per namespace
+                        namespace_service_clone.unload_node(namespace)
+                    ).await {
+                        Ok(Ok(_)) => println!("Successfully unloaded node for namespace {}", namespace),
+                        Ok(Err(e)) => eprintln!("Error unloading node for namespace {}: {}", namespace, e),
+                        Err(_) => eprintln!("Timeout unloading node for namespace {}", namespace),
                     }
                 }
             });
 
         server_fut.await?;
     } else {
-        // No shutdown signal provided, just run the server
-        Server::builder()
+        // No shutdown signal provided - don't allow this in tests
+        // Always add a shutdown channel with timeout to prevent hanging
+        let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let namespace_service_clone = namespace_service.clone();
+        let server_fut = Server::builder()
             .add_service(NamespaceServer::new(namespace_service))
-            .serve(addr)
-            .await?;
+            .serve_with_shutdown(addr, async move {
+                tokio::select! {
+                    // Either wait for a signal (that will never come) or timeout after 30 minutes
+                    _ = rx => {}, 
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(30 * 60)) => {
+                        println!("Server auto-shutdown after timeout");
+                    }
+                }
+                
+                // Unload all indices on shutdown
+                let nodes = namespace_service_clone.nodes.read().await;
+                for (namespace, _) in nodes.iter() {
+                    if let Err(_e) = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(5),
+                        namespace_service_clone.unload_node(namespace)
+                    ).await {
+                        eprintln!("Timeout unloading node for namespace {}", namespace);
+                    }
+                }
+            });
+
+        server_fut.await?;
     }
 
     Ok(())

@@ -11,7 +11,7 @@ use crate::fugu::grpc::{
 };
 
 #[tokio::test]
-async fn test_grpc_server_client() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_grpc_server_client() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create a temporary directory for the server
     let temp_dir = tempdir()?;
     let server_path = temp_dir.path().to_path_buf();
@@ -46,8 +46,12 @@ async fn test_grpc_server_client() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     
-    // Wait for the server to start
-    rx.await?;
+    // Wait for the server to start with timeout
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(())) => println!("Server started successfully"),
+        Ok(Err(e)) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Server start error: {}", e))) as Box<dyn std::error::Error + Send + Sync>),
+        Err(_) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "Server startup timeout")) as Box<dyn std::error::Error + Send + Sync>),
+    };
     
     // Wait a moment to ensure the server is fully ready
     time::sleep(Duration::from_millis(500)).await;
@@ -62,27 +66,42 @@ async fn test_grpc_server_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("Server started at {}", server_addr);
     
     // Create a client
-    let mut client = NamespaceClient::connect(server_addr).await?;
+    let mut client = match NamespaceClient::connect(server_addr).await {
+        Ok(client) => client,
+        Err(e) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, format!("Failed to connect: {}", e))) as Box<dyn std::error::Error + Send + Sync>),
+    };
     
     // Test the index operation
     let file_name = "test_file.txt".to_string();
-    let index_response = client.index(file_name.clone(), test_content.to_vec()).await?;
+    let index_response = match client.index(file_name.clone(), test_content.to_vec()).await {
+        Ok(response) => response,
+        Err(e) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Index failed: {}", e))) as Box<dyn std::error::Error + Send + Sync>),
+    };
     assert_eq!(index_response.success, true);
     assert_eq!(index_response.location, format!("/{}", file_name));
     
     // Test the search operation
-    let search_response = client.search("test".to_string(), 10, 0).await?;
+    let search_response = match client.search("test".to_string(), 10, 0).await {
+        Ok(response) => response,
+        Err(e) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Search failed: {}", e))) as Box<dyn std::error::Error + Send + Sync>),
+    };
     assert_eq!(search_response.total, 1);
     assert!(!search_response.results.is_empty());
     
     // Test vector search operation
     let test_vector = vec![0.1, 0.2, 0.3, 0.4, 0.5];
-    let vector_search_response = client.vector_search(test_vector.clone(), 5, 10, 0, 0.5).await?;
+    let vector_search_response = match client.vector_search(test_vector.clone(), 5, 10, 0, 0.5).await {
+        Ok(response) => response,
+        Err(e) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Vector search failed: {}", e))) as Box<dyn std::error::Error + Send + Sync>),
+    };
     assert_eq!(vector_search_response.total, 1);
     assert!(!vector_search_response.results.is_empty());
     
     // Test the delete operation
-    let delete_response = client.delete(format!("/{}", file_name)).await?;
+    let delete_response = match client.delete(format!("/{}", file_name)).await {
+        Ok(response) => response,
+        Err(e) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Delete failed: {}", e))) as Box<dyn std::error::Error + Send + Sync>),
+    };
     assert_eq!(delete_response.success, true);
     
     // Clean up

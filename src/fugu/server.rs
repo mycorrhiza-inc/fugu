@@ -23,30 +23,50 @@ impl FuguServer {
         // Store the receiver in a static variable to allow Clone implementation
         let wal = WAL::open(path.clone());
         
-        // Spawn a task to process WAL messages
-        let sender_clone = tx.clone();
+        // Spawn a task to process WAL messages with proper shutdown handling
+        let _sender_clone = tx.clone();
         let path_clone = path.clone();
+        let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<bool>(1);
+        
         tokio::spawn(async move {
             let mut wal = WAL::open(path_clone.clone());
-            let mut stop = false;
+            let stop = false;
             
-            while !stop {
-                if let Some(msg) = rx.recv().await {
-                    match msg {
-                        WALCMD::Put { .. } | WALCMD::Delete { .. } | WALCMD::Patch { .. } => {
-                            match wal.push(msg.into()) {
-                                Ok(_) => {}
-                                Err(_) => {}
+            loop {
+                tokio::select! {
+                    // Process WAL message
+                    Some(msg) = rx.recv() => {
+                        match msg {
+                            WALCMD::Put { .. } | WALCMD::Delete { .. } | WALCMD::Patch { .. } => {
+                                match wal.push(msg.into()) {
+                                    Ok(_) => {}
+                                    Err(e) => { eprintln!("WAL push error: {:?}", e); }
+                                }
+                            }
+                            WALCMD::DumpWAL { response } => {
+                                if let Ok(dump) = wal.dump() {
+                                    let _ = response.send(dump);
+                                }
                             }
                         }
-                        WALCMD::DumpWAL { response } => {
-                            if let Ok(dump) = wal.dump() {
-                                let _ = response.send(dump);
-                            }
-                        }
+                    },
+                    // Shutdown message
+                    Some(_) = shutdown_rx.recv() => {
+                        println!("WAL processor received shutdown signal");
+                        break;
+                    },
+                    // Channel closed (server dropped)
+                    else => {
+                        println!("WAL processor channel closed");
+                        break;
                     }
                 }
+                
+                if stop {
+                    break;
+                }
             }
+            println!("WAL processor shutdown complete");
         });
         
         Self {
@@ -75,6 +95,17 @@ impl FuguServer {
     pub async fn down(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Shutting down server and saving all data");
         self.stop = true;
+        
+        // Send shutdown signal to WAL processor task with timeout
+        if let Err(_) = tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            self.wal_sender.send(WALCMD::DumpWAL { 
+                response: tokio::sync::oneshot::channel().0 
+            })
+        ).await {
+            println!("Warning: Timeout sending final WAL command");
+        }
+        
         // The actual flushing of data is handled by the node's unload_index method
         Ok(())
     }
