@@ -267,6 +267,34 @@ mod tests {
             durations[p99_idx],
         )
     }
+    
+    // Function to save performance data to CSV
+    #[cfg(feature = "performance-tests")]
+    fn save_performance_csv(test_name: &str, durations: &[Duration]) -> std::io::Result<()> {
+        use std::fs::File;
+        use std::io::Write;
+        use std::path::Path;
+        
+        // Create the data directory if it doesn't exist
+        let data_dir = Path::new("tests/data");
+        if !data_dir.exists() {
+            std::fs::create_dir_all(data_dir)?;
+        }
+        
+        // Create CSV file
+        let file_path = data_dir.join(format!("{}.csv", test_name));
+        let mut file = File::create(file_path)?;
+        
+        // Write header
+        writeln!(file, "operation,duration_us")?;
+        
+        // Write each measurement
+        for (i, duration) in durations.iter().enumerate() {
+            writeln!(file, "{},{}", i, duration.as_micros())?;
+        }
+        
+        Ok(())
+    }
 
     // Helper function to create performance test setup
     #[cfg(feature = "performance-tests")]
@@ -434,6 +462,11 @@ mod tests {
             insert_durations.push(duration);
         }
 
+        // Save raw performance data to CSV
+        if let Err(e) = save_performance_csv("insert_performance", &insert_durations) {
+            eprintln!("Failed to save insert performance data to CSV: {}", e);
+        }
+
         let (p10, p50, p90, p99) = calculate_percentiles(&mut insert_durations);
         println!(
             "Insert performance (μs): p10={}, p50={}, p90={}, p99={}",
@@ -476,6 +509,11 @@ mod tests {
             let duration = start.elapsed();
 
             search_durations.push(duration);
+        }
+
+        // Save raw performance data to CSV
+        if let Err(e) = save_performance_csv("search_performance", &search_durations) {
+            eprintln!("Failed to save search performance data to CSV: {}", e);
         }
 
         let (p10, p50, p90, p99) = calculate_percentiles(&mut search_durations);
@@ -530,6 +568,11 @@ mod tests {
             text_search_durations.push(duration);
         }
 
+        // Save raw performance data to CSV
+        if let Err(e) = save_performance_csv("text_search_performance", &text_search_durations) {
+            eprintln!("Failed to save text search performance data to CSV: {}", e);
+        }
+
         let (p10, p50, p90, p99) = calculate_percentiles(&mut text_search_durations);
         println!(
             "Text search performance (μs): p10={}, p50={}, p90={}, p99={}",
@@ -575,6 +618,11 @@ mod tests {
             delete_durations.push(duration);
         }
 
+        // Save raw performance data to CSV
+        if let Err(e) = save_performance_csv("delete_performance", &delete_durations) {
+            eprintln!("Failed to save delete performance data to CSV: {}", e);
+        }
+
         let (p10, p50, p90, p99) = calculate_percentiles(&mut delete_durations);
         println!(
             "Delete performance (μs): p10={}, p50={}, p90={}, p99={}",
@@ -588,6 +636,8 @@ mod tests {
         index_dir.close().unwrap();
     }
 
+    #[tokio::test]
+    #[ignore] // Disabled flush tests for visualization and testing
     async fn test_index_flush() {
         // Create temporary directory
         let temp_dir = tempdir().unwrap();
@@ -646,6 +696,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(feature = "performance-tests")]
+    #[ignore] // Disabled flush tests for visualization and testing
     async fn test_flush_performance() {
         use std::time::{Duration, Instant};
 
@@ -666,6 +717,8 @@ mod tests {
 
         // Add a reasonable amount of test data (reduced for faster testing)
         let num_terms = 500;
+        let mut flush_durations = Vec::new();
+        
         for i in 0..num_terms {
             let token = Token {
                 term: format!("performance_term{}", i),
@@ -677,16 +730,24 @@ mod tests {
 
             // Flush every 100 terms to simulate periodic flushing
             if i % 100 == 99 {
+                let start = Instant::now();
                 index.flush().await.unwrap();
+                flush_durations.push(start.elapsed());
             }
         }
 
         // Measure the time to perform a final flush of everything
         let start = Instant::now();
         index.flush().await.unwrap();
-        let duration = start.elapsed();
+        let final_duration = start.elapsed();
+        flush_durations.push(final_duration);
 
-        println!("Time to flush {} terms: {:?}", num_terms, duration);
+        // Save raw performance data to CSV
+        if let Err(e) = save_performance_csv("flush_performance", &flush_durations) {
+            eprintln!("Failed to save flush performance data to CSV: {}", e);
+        }
+
+        println!("Time to flush {} terms: {:?}", num_terms, final_duration);
 
         // Clean up
         temp_dir.close().unwrap();

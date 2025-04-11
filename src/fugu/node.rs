@@ -1,25 +1,60 @@
+/// Node module provides namespace-specific indexing and search functionality
+///
+/// A Node represents a single namespace in the Fugu search engine and:
+/// - Manages an inverted index for fast text search
+/// - Handles write-ahead logging for data durability
+/// - Provides persistence of indexes to disk
+/// - Supports concurrent operations
 use crate::fugu::index::{InvertedIndex, Token};
 use crate::fugu::wal::{WALCMD, WALOP};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
+/// Job types that a Node can process
+/// 
+/// Currently a placeholder for future job processing functionality
 #[derive(Clone, Debug)]
 pub enum NodeJob {}
 
+/// A Node represents a single namespace in the Fugu search engine
+///
+/// Each Node:
+/// - Has its own namespace identifier
+/// - Manages a dedicated inverted index
+/// - Communicates with the WAL for durability
+/// - Can be loaded/unloaded independently
 #[derive(Clone, Debug)]
 pub struct Node {
+    /// Unique namespace identifier for this node
     namespace: String,
+    /// Path to configuration and index storage
     config_path: PathBuf,
-    frequency: u16, // how often to check
+    /// How often to check for jobs (in milliseconds)
+    frequency: u16,
+    /// Channel for sending WAL commands
     wal_chan: tokio::sync::mpsc::Sender<WALCMD>,
+    /// Flag to signal node shutdown
     // Channel endpoints can't be cloned, so we use a bool to track shutdown state instead
     shutdown: bool,
+    /// Queue of pending jobs
     job_queue: Vec<NodeJob>,
+    /// Optional inverted index (loaded on demand)
     inverted_index: Option<InvertedIndex>,
 }
 
 impl Node {
+    /// Creates a new Node for the specified namespace
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - Unique namespace identifier
+    /// * `config_path` - Optional path for configuration and index storage
+    /// * `wal_chan` - Channel for sending WAL commands
+    ///
+    /// # Returns
+    ///
+    /// A new Node instance
     pub fn new(namespace: String, config_path: Option<PathBuf>, wal_chan: mpsc::Sender<WALCMD>) -> Self {
         // Set default config path if not provided
         let config_path = config_path.unwrap_or_else(|| {
@@ -38,14 +73,29 @@ impl Node {
         }
     }
     
+    /// Returns the path where this node's index is stored
+    ///
+    /// # Returns
+    ///
+    /// Path to the index directory
     fn get_index_path(&self) -> PathBuf {
         self.config_path.join(format!("{}_index", self.namespace))
     }
     
+    /// Returns the index path as a string
+    ///
+    /// # Returns
+    ///
+    /// String representation of the index path
     fn get_index_path_str(&self) -> String {
         self.get_index_path().to_str().unwrap_or_default().to_string()
     }
     
+    /// Initializes the inverted index for this node
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error
     async fn init_index(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let index_path_str = self.get_index_path_str();
         let index = InvertedIndex::new(&index_path_str, self.wal_chan.clone()).await;
@@ -53,6 +103,15 @@ impl Node {
         Ok(())
     }
 
+    /// Adds a term to the inverted index
+    ///
+    /// # Arguments
+    ///
+    /// * `term_token` - Token to add to the index
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error
     async fn index_term(&self, term_token: Token) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(index) = &self.inverted_index {
             index.add_term(term_token).await?;
@@ -61,10 +120,25 @@ impl Node {
     }
     
     // fn new_file(&self) {}
+    
+    /// Indexes a file (placeholder for future implementation)
+    ///
+    /// # Arguments
+    ///
+    /// * `_path` - Path to the file to index
     async fn index_file(&self, _path: PathBuf) {
         let _ = json!({});
     }
     
+    /// Logs a WAL operation
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - WAL operation to log
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error
     pub async fn walog(&self, msg: WALOP) -> Result<(), mpsc::error::SendError<WALCMD>> {
         let msg_clone = msg.clone();
         match self.wal_chan.send(msg.into()).await {
@@ -76,9 +150,19 @@ impl Node {
         }
     }
     
+    /// Deletes a file (placeholder for future implementation)
     fn delete_file(&self) {}
     
     /// Loads the index from the configured path
+    ///
+    /// This method:
+    /// - Ensures the index directory exists
+    /// - Creates a new inverted index or loads an existing one
+    /// - Makes the index available for operations
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error
     pub async fn load_index(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let index_path = self.get_index_path();
         let index_path_str = self.get_index_path_str();
@@ -101,6 +185,15 @@ impl Node {
     }
     
     /// Unloads the index from memory, ensuring all data is flushed to disk
+    ///
+    /// This method:
+    /// - Flushes any pending changes to disk
+    /// - Releases memory resources
+    /// - Ensures data durability
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error
     pub async fn unload_index(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(index) = self.inverted_index.take() {
             // Flush any pending changes to disk
@@ -111,6 +204,19 @@ impl Node {
     }
 }
 
+/// Creates a new Node for the specified namespace
+///
+/// This is a convenience function that calls `Node::new()`
+///
+/// # Arguments
+///
+/// * `namespace` - Unique namespace identifier
+/// * `config_path` - Optional path for configuration and index storage
+/// * `wal_chan` - Channel for sending WAL commands
+///
+/// # Returns
+///
+/// A new Node instance
 pub fn new(namespace: String, config_path: Option<PathBuf>, wal_chan: mpsc::Sender<WALCMD>) -> Node {
     Node::new(namespace, config_path, wal_chan)
 }

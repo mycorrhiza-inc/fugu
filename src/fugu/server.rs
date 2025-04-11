@@ -1,3 +1,10 @@
+/// Server module provides the main Fugu server implementation
+///
+/// This module contains the core server functionality:
+/// - Handles the write-ahead log (WAL) for durability
+/// - Manages a background task for processing WAL commands
+/// - Provides clean shutdown capability
+/// - Supports concurrent client operations
 use std::path::PathBuf;
 
 use rkyv;
@@ -5,17 +12,43 @@ use tokio::sync::mpsc;
 
 use crate::fugu::wal::{WAL, WALCMD};
 
+/// Main server struct that manages the Fugu search engine
+///
+/// The server is responsible for:
+/// - Managing the write-ahead log (WAL) for durability
+/// - Maintaining index data
+/// - Processing client requests
+/// - Ensuring data consistency
 #[derive(Clone)]
 pub struct FuguServer {
+    /// Path where server data and WAL are stored
     path: PathBuf,
+    /// Write-ahead log for durability
     wal: WAL,
+    /// Flag to signal server shutdown
     stop: bool,
+    /// Channel sender for WAL commands
     wal_sender: tokio::sync::mpsc::Sender<WALCMD>,
+    /// Tracks the number of WAL receivers in use
     #[allow(dead_code)]
     wal_receiver_count: usize, // We can't clone the receiver, so just track the count
 }
 
 impl FuguServer {
+    /// Creates a new FuguServer instance
+    ///
+    /// Initializes the server with:
+    /// - A new Write-Ahead Log (WAL)
+    /// - A background task to process WAL commands
+    /// - Proper shutdown handling
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path where the server will store data and WAL
+    ///
+    /// # Returns
+    ///
+    /// A new FuguServer instance
     pub fn new(path: PathBuf) -> Self {
         // Create channel for WAL commands
         let (tx, mut rx): (mpsc::Sender<WALCMD>, mpsc::Receiver<WALCMD>) = mpsc::channel(1000);
@@ -77,21 +110,49 @@ impl FuguServer {
             wal_receiver_count: 1,
         }
     }
+    
+    /// Returns a clone of the WAL sender channel
+    ///
+    /// This allows components like Node to send WAL commands
+    ///
+    /// # Returns
+    ///
+    /// A sender channel for WAL commands
     pub fn get_wal_sender(&self) -> mpsc::Sender<WALCMD> {
         self.wal_sender.clone()
     }
+    
+    /// Dumps the current WAL contents for debugging or inspection
+    ///
+    /// # Returns
+    ///
+    /// A string representation of the WAL or an error
     async fn dump_wal(&self) -> Result<String, rkyv::rancor::Error> {
         Ok(self.wal.dump()?)
     }
 
     // The wal_listen logic is now handled by the tokio task spawned in new()
     
+    /// Starts the server and keeps it running until shutdown
+    ///
+    /// This method blocks until server shutdown is requested
     pub async fn up(&mut self) {
         // Just wait for shutdown, real processing is done in the spawned task
         while !self.stop {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     }
+    
+    /// Gracefully shuts down the server ensuring data is saved
+    ///
+    /// This method:
+    /// - Signals all processing to stop
+    /// - Attempts to flush final WAL commands
+    /// - Ensures data durability
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error during shutdown
     pub async fn down(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Shutting down server and saving all data");
         self.stop = true;

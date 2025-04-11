@@ -1,3 +1,10 @@
+/// Index module provides text search capabilities through an inverted index
+///
+/// This module implements:
+/// - A persistent inverted index for fast text search
+/// - Token-based indexing and retrieval
+/// - Text tokenization and relevancy ranking
+/// - TF-IDF scoring for search results
 use crate::fugu::wal::WALCMD;
 use rkyv;
 use rkyv::{rancor::Error, Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -8,15 +15,29 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
+/// Represents an indexed term with all its document occurrences
+///
+/// This structure maintains:
+/// - The term being indexed
+/// - A mapping of document IDs to position lists
+/// - The overall frequency of the term
 #[derive(Debug, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 // #[rkyv(compare(PartialEq), derive(Debug))]
 pub struct TermIndex {
+    /// The term text being indexed
     pub term: String,
+    /// Mapping from document IDs to positions where the term occurs
     pub doc_ids: HashMap<String, Vec<u64>>, // doc_id -> all positions
+    /// Overall frequency of this term across all documents
     pub term_frequency: u32,
 }
 
 impl TermIndex {
+    /// Returns a list of all document IDs containing this term
+    ///
+    /// # Returns
+    ///
+    /// Vector of document IDs
     fn get_docs(&self) -> Vec<String> {
         let d = self.doc_ids.keys();
         let mut o = vec![];
@@ -25,11 +46,18 @@ impl TermIndex {
         }
         o
     }
+    
+    /// Sets the term frequency
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The new frequency value
     pub fn set_frequency(&mut self, n: u32) {
         self.term_frequency = n;
     }
 }
 
+/// Display formatting for TermIndex
 impl std::fmt::Display for TermIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let t = self.term.as_str();
@@ -38,24 +66,67 @@ impl std::fmt::Display for TermIndex {
         write!(f, "{}", text)
     }
 }
+
+/// Represents a single term occurrence in a document
+///
+/// A token contains:
+/// - The term text
+/// - The document it belongs to
+/// - Its position within the document
 pub struct Token {
+    /// The term text
     pub term: String,
+    /// The document identifier
     pub doc_id: String,
+    /// The position within the document (0-based)
     pub position: u64,
 }
 
+/// Internal structure for document entry processing
 struct DocEntry {
+    /// Document identifier
     id: String,
+    /// Position within the document
     position: u64,
 }
 
+/// Trait for text tokenization strategies
+///
+/// Allows for different tokenization approaches to be implemented
 pub trait Tokenizer {
+    /// Converts text into a sequence of tokens
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The text to tokenize
+    /// * `doc_id` - The document identifier
+    ///
+    /// # Returns
+    ///
+    /// A vector of tokens from the text
     fn tokenize(&self, text: &str, doc_id: &str) -> Vec<Token>;
 }
 
+/// A simple tokenizer that splits text on whitespace
 pub struct WhitespaceTokenizer;
 
 impl Tokenizer for WhitespaceTokenizer {
+    /// Splits text on whitespace and creates tokens
+    ///
+    /// This tokenizer:
+    /// - Splits on whitespace
+    /// - Converts to lowercase
+    /// - Trims whitespace from terms
+    /// - Assigns sequential positions
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The text to tokenize
+    /// * `doc_id` - The document identifier
+    ///
+    /// # Returns
+    ///
+    /// A vector of tokens from the text
     fn tokenize(&self, text: &str, doc_id: &str) -> Vec<Token> {
         let mut tokens = Vec::new();
         let mut position: u64 = 0;
@@ -76,21 +147,50 @@ impl Tokenizer for WhitespaceTokenizer {
     }
 }
 
+/// Represents a search result with relevance scoring
+///
+/// Contains:
+/// - The matching document ID
+/// - A relevance score based on TF-IDF
+/// - Term match positions for highlighting
 #[derive(Debug, Clone)]
 pub struct SearchResult {
+    /// The document identifier
     pub doc_id: String,
+    /// Relevance score (higher is more relevant)
     pub relevance_score: f64,
+    /// Map of terms to their positions in the document
     pub term_matches: HashMap<String, Vec<u64>>,
 }
 
+/// The main inverted index implementation
+///
+/// This structure:
+/// - Provides persistent storage of index data
+/// - Supports concurrent read/write access
+/// - Uses WAL for durability
+/// - Implements TF-IDF relevance scoring
 #[derive(Clone, Debug)]
 pub struct InvertedIndex {
+    /// Underlying database for persistence
     db: Arc<RwLock<sled::Db>>,
+    /// Channel for WAL operations
     wal_chan: mpsc::Sender<WALCMD>,
+    /// Path to the index storage
     path: String,
 }
 
 impl InvertedIndex {
+    /// Creates a new InvertedIndex instance
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the index storage directory
+    /// * `wal_chan` - Channel for WAL operations
+    ///
+    /// # Returns
+    ///
+    /// A new InvertedIndex instance
     pub async fn new(path: &str, wal_chan: mpsc::Sender<WALCMD>) -> Self {
         let db = sled::open(path).expect("Failed to open sled database");
         InvertedIndex {
@@ -101,6 +201,12 @@ impl InvertedIndex {
     }
     
     /// Flushes all pending changes to disk
+    ///
+    /// Ensures that all index changes are written to persistent storage
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error
     pub async fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
         let db = self.db.read().await;
         db.flush()?;

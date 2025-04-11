@@ -1,3 +1,10 @@
+/// gRPC server and client implementation for remote access to Fugu
+///
+/// This module provides:
+/// - A gRPC server exposing Fugu functionality
+/// - A client implementation for remote operations
+/// - Handling of index, delete, search, and vector search operations
+/// - Command-line utilities for interacting with the server
 use std::path::PathBuf;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,15 +28,35 @@ use namespace::{
 };
 
 // The server implementation for handling namespace service requests
+/// Main service implementation for the namespace gRPC API
+///
+/// This service:
+/// - Manages Fugu server and nodes
+/// - Handles client requests for indexing, search, and deletion
+/// - Provides namespace isolation for multi-tenant usage
+/// - Ensures proper cleanup on shutdown
 #[derive(Clone)]
 pub struct NamespaceService {
+    /// The underlying Fugu server
     server: FuguServer,
+    /// Channel for sending WAL commands
     wal_sender: mpsc::Sender<WALCMD>,
+    /// Path for configuration and storage
     config_path: PathBuf,
+    /// Map of namespace identifiers to Node instances
     nodes: Arc<RwLock<HashMap<String, Node>>>,
 }
 
 impl NamespaceService {
+    /// Creates a new NamespaceService
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path for configuration and storage
+    ///
+    /// # Returns
+    ///
+    /// A new NamespaceService instance
     pub fn new(path: PathBuf) -> Self {
         let server = FuguServer::new(path.clone());
         let wal_sender = server.get_wal_sender();
@@ -43,7 +70,20 @@ impl NamespaceService {
         }
     }
     
-    // Get or create a node for the given namespace
+    /// Gets or creates a node for the given namespace
+    ///
+    /// This method:
+    /// - Retrieves an existing node if available
+    /// - Creates a new node if one doesn't exist
+    /// - Ensures namespace isolation
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace identifier
+    ///
+    /// # Returns
+    ///
+    /// A Node instance for the requested namespace
     async fn get_node(&self, namespace: &str) -> Node {
         let mut nodes = self.nodes.write().await;
         
@@ -62,7 +102,20 @@ impl NamespaceService {
         node
     }
     
-    // Unload a node from memory
+    /// Unloads a node from memory
+    ///
+    /// This method:
+    /// - Removes the node from the active nodes map
+    /// - Flushes any pending changes to disk
+    /// - Frees memory resources
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace identifier
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error
     async fn unload_node(&self, namespace: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut nodes = self.nodes.write().await;
         
@@ -196,7 +249,24 @@ impl Namespace for NamespaceService {
     }
 }
 
-// Function to start the gRPC server
+/// Starts the gRPC server for remote access to Fugu
+///
+/// This function:
+/// - Initializes the gRPC server with the namespace service
+/// - Handles graceful shutdown signals
+/// - Provides timeouts to prevent hanging
+/// - Ensures proper cleanup on shutdown
+///
+/// # Arguments
+///
+/// * `path` - Path for configuration and storage
+/// * `addr` - Address to bind the server to (format: "ip:port")
+/// * `ready_tx` - Optional channel to signal when server is ready
+/// * `shutdown_rx` - Optional channel to receive shutdown signal
+///
+/// # Returns
+///
+/// Result indicating success or error
 pub async fn start_grpc_server(
     path: PathBuf,
     addr: String,
@@ -280,8 +350,15 @@ pub async fn start_grpc_server(
     Ok(())
 }
 
-// Client implementation for the namespace service
+/// Client implementation for the namespace service
+///
+/// This client:
+/// - Provides remote access to Fugu functionality
+/// - Handles connection establishment
+/// - Offers methods for all supported operations
+/// - Simplifies gRPC interaction
 pub struct NamespaceClient {
+    /// The underlying gRPC client
     client: namespace::namespace_client::NamespaceClient<tonic::transport::Channel>,
 }
 
