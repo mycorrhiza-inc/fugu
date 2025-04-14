@@ -78,6 +78,10 @@ pub struct UpCommand {
     #[arg(short, long)]
     pub daemon: bool,
     
+    /// Port to use for the server
+    #[arg(short, long, default_value = "50051")]
+    pub port: u16,
+    
     /// Path to the PID file when running as a daemon
     #[arg(long, default_value = "/tmp/fugu.pid")]
     pub pid_file: String,
