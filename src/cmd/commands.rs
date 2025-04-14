@@ -157,6 +157,21 @@ pub struct NamespaceIndexCommand {
 }
 
 #[derive(Parser)]
+#[command(name = "add", about = "Add a file to a namespace and update its index")]
+pub struct AddCommand {
+    /// Namespace to add the file to
+    #[arg(short, long, required = true)]
+    pub namespace: String,
+    
+    /// File path to add
+    pub file_path: String,
+    
+    /// Server address
+    #[arg(short, long, default_value = "http://127.0.0.1:50051")]
+    pub addr: String,
+}
+
+#[derive(Parser)]
 #[command(name = "search")]
 pub struct NamespaceSearchCommand {
     /// Search query

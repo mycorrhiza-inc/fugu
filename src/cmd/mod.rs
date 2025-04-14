@@ -31,6 +31,9 @@ pub enum Commands {
     /// Delete a document from a namespace
     Delete(commands::NamespaceDeleteCommand),
 
+    /// Add a file to a namespace and update its index
+    Add(commands::AddCommand),
+
     /// Gracefully shuts down the fugu process
     Down(commands::DownCommand),
 
@@ -98,6 +101,15 @@ pub async fn start() {
             let namespace = cli.namespace.unwrap_or_else(|| "default".to_string());
             let _ = namespaces::handle_delete_command(args, &namespace).await;
         }
+        Some(Commands::Add(args)) => {
+            // Convert this to a namespace index command to reuse existing logic
+            let index_args = commands::NamespaceIndexCommand {
+                file: args.file_path,
+                addr: args.addr,
+            };
+            println!("Adding file to namespace `{}`...", args.namespace);
+            let _ = namespaces::handle_index_command(index_args, &args.namespace).await;
+        }
         Some(Commands::Up(args)) => {
             // Path for this instance - in a real app, this might come from config
             let path = PathBuf::from("./data");
@@ -125,19 +137,72 @@ pub async fn start() {
                 let daemonize = Daemonize::new()
                     .pid_file(&args.pid_file)
                     .working_directory(".")
-                    .user("nobody")
-                    .group("daemon")
+                    // Removed user and group settings that were causing issues
                     .stdout(stdout)
                     .stderr(stderr);
 
                 match daemonize.start() {
                     Ok(_) => {
                         // We're now in the daemon process
-                        // Set up a runtime for the daemon
-                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        // Create a new PID file after daemonizing
+                        // This ensures we don't inherit a stale file descriptor
+                        let _ = std::fs::remove_file(&args.pid_file);
+                        let pid = std::process::id();
+                        let _ = std::fs::write(&args.pid_file, pid.to_string());
+                        
+                        // Use a single-threaded runtime to avoid file descriptor issues
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+                            
                         rt.block_on(async {
+                            // Create channels for shutdown
+                            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+                            
+                            // Spawn a task to handle termination signals (SIGTERM)
+                            let shutdown_handle = tokio::spawn(async move {
+                                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                                    .expect("Failed to install SIGTERM handler")
+                                    .recv()
+                                    .await;
+                                eprintln!("Received SIGTERM, shutting down...");
+                                let _ = shutdown_tx.send(());
+                            });
+                            
+                            // We need another channel pair for the interrupt signal
+                            let (int_shutdown_tx, int_shutdown_rx) = tokio::sync::oneshot::channel();
+                            
+                            // Spawn a task to handle interrupt signals (SIGINT)
+                            tokio::spawn(async move {
+                                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                                    .expect("Failed to install SIGINT handler")
+                                    .recv()
+                                    .await;
+                                eprintln!("Received SIGINT, shutting down...");
+                                let _ = int_shutdown_tx.send(());
+                                let _ = shutdown_handle.abort(); // Abort the SIGTERM handler
+                            });
+                            
+                            // Combine both shutdown signals
+                            let combined_shutdown = async {
+                                tokio::select! {
+                                    _ = shutdown_rx => {},
+                                    _ = int_shutdown_rx => {},
+                                }
+                            };
+                            
+                            // Create a new oneshot channel for the combined signal
+                            let (combined_tx, combined_rx) = tokio::sync::oneshot::channel();
+                            
+                            // Spawn a task to handle the combined shutdown signal
+                            tokio::spawn(async move {
+                                combined_shutdown.await;
+                                let _ = combined_tx.send(());
+                            });
+                            
                             if let Err(e) =
-                                crate::fugu::grpc::start_grpc_server(path, addr, None, None).await
+                                crate::fugu::grpc::start_grpc_server(path, addr, None, Some(combined_rx)).await
                             {
                                 eprintln!("Server error: {}", e);
                             }

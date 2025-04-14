@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    use crate::cmd::commands::AddCommand;
+    use clap::Parser;
     use crate::fugu::index::{InvertedIndex, Token, Tokenizer, WhitespaceTokenizer};
     use crate::fugu::wal::WALCMD;
     use std::fs::{self, File};
@@ -692,6 +694,25 @@ mod tests {
 
         // Clean up
         temp_dir.close().unwrap();
+    }
+
+    #[test]
+    fn test_add_command_parser() {
+        // Test parsing with minimal required arguments
+        let args = vec!["add", "--namespace", "test_namespace", "path/to/file.txt"];
+        let cmd = AddCommand::parse_from(args);
+        
+        assert_eq!(cmd.namespace, "test_namespace");
+        assert_eq!(cmd.file_path, "path/to/file.txt");
+        assert_eq!(cmd.addr, "http://127.0.0.1:50051"); // Default address
+        
+        // Test parsing with custom server address
+        let args = vec!["add", "--namespace", "custom_ns", "--addr", "http://localhost:8080", "path/to/other.txt"];
+        let cmd = AddCommand::parse_from(args);
+        
+        assert_eq!(cmd.namespace, "custom_ns");
+        assert_eq!(cmd.file_path, "path/to/other.txt");
+        assert_eq!(cmd.addr, "http://localhost:8080");
     }
 
     #[tokio::test]
