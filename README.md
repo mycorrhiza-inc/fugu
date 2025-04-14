@@ -45,8 +45,11 @@ cargo run -- up --daemon
 # Index a document
 cargo run -- namespace index --file /path/to/document.txt
 
+# Add a file to a specific namespace (new command)
+cargo run -- add --namespace my_namespace path/to/file.txt
+
 # Search
-cargo run -- namespace search --query "search term" --limit 10
+cargo run -- search --namespace test/namespace --limit 10 "search term" 
 
 # Delete a document
 cargo run -- namespace delete --location "/document.txt"
