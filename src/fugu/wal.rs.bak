@@ -7,8 +7,7 @@
 use std::fs;
 use std::path::PathBuf;
 // use tokio::time::{sleep, Duration};
-use rkyv::{Archive, Deserialize, Serialize};
-use std::io::Error as IoError;
+use rkyv::{rancor::Error, Archive, Deserialize, Serialize};
 /// WAL operations that can be recorded in the log
 ///
 /// These operations represent the possible mutations to the system:
@@ -110,29 +109,17 @@ impl WAL {
             log: vec![],
         };
     }
-    pub fn save(&self) -> Result<(), IoError> {
-        let path = PathBuf::from(self.path.clone());
-        
-        // Check if the path is a directory
-        if path.is_dir() {
-            // If it's a directory, create a WAL file inside it
-            let wal_file = path.join("wal.bin");
-            let buf = rkyv::to_bytes::<rkyv::rancor::Panic>(&self.log).unwrap();
-            fs::write(wal_file, buf)?;
-        } else {
-            // Otherwise write directly to the specified path
-            let buf = rkyv::to_bytes::<rkyv::rancor::Panic>(&self.log).unwrap();
-            fs::write(path, buf)?;
-        }
-        
+    pub fn save(&self) -> Result<(), Error> {
+        let buf = rkyv::to_bytes::<Error>(&self.log).unwrap();
+        fs::write(PathBuf::from(self.path.clone()), buf).expect("Unable to write file");
         Ok(())
     }
-    pub fn push(&mut self, msg: WALOP) -> Result<(), IoError> {
+    pub fn push(&mut self, msg: WALOP) -> Result<(), Error> {
         self.log.push(msg);
         self.save()
     }
 
-    pub fn dump(&self) -> Result<String, rkyv::rancor::Error> {
+    pub fn dump(&self) -> Result<String, Error> {
         let mut output = String::new();
         for (i, op) in self.log.iter().enumerate() {
             output.push_str(&format!("{}. {:?}\n", i + 1, op));

@@ -25,17 +25,29 @@ async fn test_grpc_client_server_integration() -> Result<(), Box<dyn std::error:
 
     // Start the server process in the background
     println!("Starting server on {}", server_addr);
-    // Get the path to the binary - first try environment variable, then use relative path
+    // Get the path to the binary - first try environment variable, then use project root path
     let binary_path = std::env::var("CARGO_BIN_EXE_fugu").unwrap_or_else(|_| {
-        std::env::current_dir()
-            .unwrap()
+        let current_dir = std::env::current_dir().unwrap();
+        // Navigate to project root (from tests directory if needed)
+        let project_root = if current_dir.ends_with("tests") {
+            current_dir.parent().unwrap().to_path_buf()
+        } else {
+            current_dir
+        };
+        project_root
             .join("target/debug/fugu")
             .to_string_lossy()
             .to_string()
     });
     println!("Using binary at: {}", binary_path);
+    // Create a data directory for the server
+    let data_dir = temp_dir.path().join("data");
+    fs::create_dir_all(&data_dir)?;
+    
+    // Use the server's default directory location
     let mut server_process = Command::new(&binary_path)
-        .args(["up"])
+        .args(["up", "--port", &port.to_string()])
+        .current_dir(&temp_dir.path()) // Set working directory to temp dir
         .spawn()?;
 
     // Give the server time to start
@@ -59,12 +71,13 @@ async fn test_grpc_client_server_integration() -> Result<(), Box<dyn std::error:
     let search_output = Command::new(&binary_path)
         .args([
             "search",
-            "--query",
-            "test",
+            "--namespace",
+            "default",
             "--limit",
             "10",
             "--addr",
             &server_url,
+            "test", // Query as the last argument
         ])
         .output()
         .await?;
