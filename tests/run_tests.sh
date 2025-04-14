@@ -85,7 +85,7 @@ if [ "$RUN_PERFORMANCE_TESTS" = true ]; then
   
   # Run the hot/cold loading performance test
   echo "Running hot/cold loading performance tests..."
-  cargo test --test hot_cold_loading_tests test_hot_cold_loading_performance
+  cargo test --features performance-tests --test hot_cold_loading_tests test_hot_cold_loading_performance
 
   # Generate performance visualizations if Python is available
   if command -v python3 &>/dev/null; then
@@ -110,12 +110,13 @@ fi
 if [ "$RUN_CLIENT_TESTS" = true ]; then
   echo "Running client operation tests..."
   echo "Starting the GRPC server in the background..."
-  # Start the GRPC server on port 50053 with timeout
-  cargo run -- up --timeout 30 &
+  # Start the GRPC server on a fixed port with timeout
+  PORT=50555
+  cargo run -- up --port $PORT --timeout 30 &
   SERVER_PID=$!
 
   # Give the server time to start
-  sleep 2
+  sleep 3
 
   echo "Testing client operations..."
   # Create a test file
@@ -123,15 +124,15 @@ if [ "$RUN_CLIENT_TESTS" = true ]; then
 
   # Test the index command
   echo "Testing index operation..."
-  cargo run -- namespace index --addr http://127.0.0.1:50053 --file /tmp/test_doc.txt
+  cargo run -- namespace index --addr http://127.0.0.1:$PORT --file /tmp/test_doc.txt
 
   # Test the search command
   echo "Testing search operation..."
-  cargo run -- namespace search --addr http://127.0.0.1:50053 --query "test" --limit 10
+  cargo run -- namespace search --addr http://127.0.0.1:$PORT --query "test" --limit 10
 
   # Test the delete command
   echo "Testing delete operation..."
-  cargo run -- namespace delete --addr http://127.0.0.1:50053 --location "/test_doc.txt"
+  cargo run -- namespace delete --addr http://127.0.0.1:$PORT --location "/test_doc.txt"
 
   # Clean up and verify server exits
   echo "Cleaning up..."
@@ -155,6 +156,11 @@ fi
 
 # Clean up temp files
 rm -rf /tmp/fugu_test_data
+
+# Clean up tests/data directory created during tests
+if [ -d "tests/data" ]; then
+  rm -rf tests/data
+fi
 
 if [ "$RUN_ALL" = true ]; then
   echo "All test suites completed successfully!"

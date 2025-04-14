@@ -7,6 +7,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
+use rand::Rng;
 
 // End-to-end tests for the GRPC client and server
 
@@ -33,6 +34,12 @@ fn save_performance_csv(test_name: &str, durations: &[Duration]) -> std::io::Res
     Ok(())
 }
 
+# Returns a randomly chosen port in the range 50100-60000 to avoid hardcoded port conflicts
+fn get_random_port() -> u16 {
+    let mut rng = rand::thread_rng();
+    rng.gen_range(50100..60000)
+}
+
 #[test]
 fn test_grpc_e2e() {
     // Build the binary first
@@ -52,10 +59,10 @@ fn test_grpc_e2e() {
 
     // Create a temporary directory for the server
     let temp_dir = tempdir().expect("Failed to create temp directory");
-    let _server_dir = temp_dir.path().to_string_lossy().to_string();
+    let server_dir = temp_dir.path().to_string_lossy().to_string();
 
-    // Choose a port for the server
-    let port = 50052;
+    // Choose a random port for the server to avoid conflicts
+    let port = get_random_port();
     let server_addr = format!("127.0.0.1:{}", port);
     let server_url = format!("http://{}", server_addr);
 
@@ -221,9 +228,8 @@ fn test_grpc_e2e() {
 
 #[test]
 fn test_grpc_client_error_handling() {
-    // Skip this test as it's redundant with test_grpc_client_connection_error
-    // which already tests this functionality in a more reliable way
-    println!("Skipping test_grpc_client_error_handling as it's covered elsewhere");
+    // Reference the test in src/fugu/test_grpc.rs that handles this case
+    println!("Skipping test_grpc_client_error_handling as it's covered by test_client_connection_error in src/fugu/test_grpc.rs");
 }
 
 // Integration test for graceful shutdown with index persistence
@@ -248,8 +254,8 @@ fn test_index_persistence_with_graceful_shutdown() {
     let temp_dir = tempdir().expect("Failed to create temp directory");
     let server_dir = temp_dir.path().to_string_lossy().to_string();
 
-    // Choose a port for the server
-    let port = 50053;
+    // Choose a random port for the server to avoid conflicts
+    let port = get_random_port();
     let server_addr = format!("127.0.0.1:{}", port);
     let server_url = format!("http://{}", server_addr);
 
@@ -368,10 +374,15 @@ fn test_index_persistence_with_graceful_shutdown() {
     println!("Search output after restart: {}", search_stdout2);
 
     // The search results should be similar before and after restart
-    assert_eq!(
-        search_stdout.contains("Search response:"),
-        search_stdout2.contains("Search response:"),
-        "Search results differ after server restart"
+    assert!(
+        search_stdout.contains("Search response:") && search_stdout2.contains("Search response:"),
+        "Search response missing after server restart"
+    );
+    
+    // Check that search results contain document matches
+    assert!(
+        search_stdout.contains("document") && search_stdout2.contains("document"),
+        "Search results don't contain expected content after server restart"
     );
 
     // Kill the second server and verify it exited
@@ -419,8 +430,8 @@ fn test_add_command() {
     // Create a temporary directory for the server
     let temp_dir = tempdir().expect("Failed to create temp directory");
     
-    // Choose a port for the server
-    let port = 50055;
+    // Choose a random port for the server to avoid conflicts
+    let port = get_random_port();
     let server_addr = format!("127.0.0.1:{}", port);
     let server_url = format!("http://{}", server_addr);
 
@@ -533,8 +544,8 @@ fn test_multiple_namespaces() {
     // Create a temporary directory for the server
     let temp_dir = tempdir().expect("Failed to create temp directory");
     
-    // Choose a port for the server
-    let port = 50054;
+    // Choose a random port for the server to avoid conflicts
+    let port = get_random_port();
     let server_addr = format!("127.0.0.1:{}", port);
     let server_url = format!("http://{}", server_addr);
 
