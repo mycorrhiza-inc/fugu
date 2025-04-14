@@ -5,10 +5,11 @@
 /// - Handles write-ahead logging for data durability
 /// - Provides persistence of indexes to disk
 /// - Supports concurrent operations
-use crate::fugu::index::{InvertedIndex, Token};
+use crate::fugu::index::{InvertedIndex, Token, WhitespaceTokenizer};
 use crate::fugu::wal::{WALCMD, WALOP};
-use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use tokio::fs;
 use tokio::sync::mpsc;
 
 /// Job types that a Node can process
@@ -121,13 +122,45 @@ impl Node {
     
     // fn new_file(&self) {}
     
-    /// Indexes a file (placeholder for future implementation)
+    /// Indexes a file using the BM25 scoring algorithm
     ///
     /// # Arguments
     ///
-    /// * `_path` - Path to the file to index
-    async fn index_file(&self, _path: PathBuf) {
-        let _ = json!({});
+    /// * `path` - Path to the file to index
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error with indexing time
+    pub async fn index_file(&self, path: PathBuf) -> Result<Duration, Box<dyn std::error::Error>> {
+        // Start timing
+        let start_time = Instant::now();
+        
+        // Get the document ID from the filename
+        let doc_id = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Invalid file path")?
+            .to_string();
+        
+        // Read the file content
+        let content = fs::read_to_string(&path).await?;
+        
+        // Index the content if the index is loaded
+        if let Some(index) = &self.inverted_index {
+            // Create a tokenizer
+            let tokenizer = WhitespaceTokenizer;
+            
+            // Index the document
+            index.index_document(&doc_id, &content, &tokenizer).await?;
+            
+            // Get the elapsed time
+            let elapsed = start_time.elapsed();
+            println!("Indexed file '{}' in {:?}", path.display(), elapsed);
+            
+            Ok(elapsed)
+        } else {
+            Err("Index not loaded".into())
+        }
     }
     
     /// Logs a WAL operation
@@ -150,8 +183,68 @@ impl Node {
         }
     }
     
-    /// Deletes a file (placeholder for future implementation)
-    fn delete_file(&self) {}
+    /// Deletes a file from the index
+    ///
+    /// # Arguments
+    ///
+    /// * `doc_id` - ID of the document to delete
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error
+    pub async fn delete_file(&self, doc_id: &str) -> Result<Duration, Box<dyn std::error::Error>> {
+        if let Some(index) = &self.inverted_index {
+            // Use the new delete_document method from InvertedIndex
+            let elapsed = index.delete_document(doc_id).await?;
+            Ok(elapsed)
+        } else {
+            Err("Index not loaded".into())
+        }
+    }
+    
+    /// Searches the index for the given query
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The search query string
+    /// * `limit` - Maximum number of results to return
+    /// * `offset` - Starting position of results
+    ///
+    /// # Returns
+    ///
+    /// Result containing search results and performance metrics
+    pub async fn search_text(&self, query: &str, limit: usize, offset: usize) 
+        -> Result<(Vec<crate::fugu::index::SearchResult>, Duration), Box<dyn std::error::Error>> {
+        
+        // Start timing
+        let start_time = Instant::now();
+        
+        if let Some(index) = &self.inverted_index {
+            // Create a tokenizer
+            let tokenizer = WhitespaceTokenizer;
+            
+            // Perform the search
+            let mut results = index.search_text(query, &tokenizer).await?;
+            
+            // Apply pagination
+            if offset < results.len() {
+                results = results.into_iter()
+                    .skip(offset)
+                    .take(limit)
+                    .collect();
+            } else {
+                results = Vec::new();
+            }
+            
+            // Get the elapsed time
+            let elapsed = start_time.elapsed();
+            
+            // Return both the results and the timing
+            Ok((results, elapsed))
+        } else {
+            Err("Index not loaded".into())
+        }
+    }
     
     /// Loads the index from the configured path
     ///
