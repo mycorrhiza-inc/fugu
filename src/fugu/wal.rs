@@ -7,7 +7,8 @@
 use std::fs;
 use std::path::PathBuf;
 // use tokio::time::{sleep, Duration};
-use rkyv::{rancor::Error, Archive, Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
+use std::io::Error as IoError;
 /// WAL operations that can be recorded in the log
 ///
 /// These operations represent the possible mutations to the system:
@@ -109,17 +110,17 @@ impl WAL {
             log: vec![],
         };
     }
-    pub fn save(&self) -> Result<(), Error> {
-        let buf = rkyv::to_bytes::<Error>(&self.log).unwrap();
-        fs::write(PathBuf::from(self.path.clone()), buf).expect("Unable to write file");
+    pub fn save(&self) -> Result<(), IoError> {
+        let buf = rkyv::to_bytes::<rkyv::rancor::Panic>(&self.log).unwrap();
+        fs::write(PathBuf::from(self.path.clone()), buf)?;
         Ok(())
     }
-    pub fn push(&mut self, msg: WALOP) -> Result<(), Error> {
+    pub fn push(&mut self, msg: WALOP) -> Result<(), IoError> {
         self.log.push(msg);
         self.save()
     }
 
-    pub fn dump(&self) -> Result<String, Error> {
+    pub fn dump(&self) -> Result<String, rkyv::rancor::Error> {
         let mut output = String::new();
         for (i, op) in self.log.iter().enumerate() {
             output.push_str(&format!("{}. {:?}\n", i + 1, op));
