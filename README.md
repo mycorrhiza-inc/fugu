@@ -1,6 +1,10 @@
 # Fugu
 
+<img src="docs/images/Fugu_sashimi.jpg" alt="drawing" width="200"/>
 Fugu is a high-performance search engine built in Rust with a gRPC API.
+
+
+
 
 ## Features
 
