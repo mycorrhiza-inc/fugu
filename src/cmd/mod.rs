@@ -22,8 +22,11 @@ pub enum Commands {
     /// Index a document in a namespace
     Index(commands::NamespaceIndexCommand),
 
-    /// Search in a namespace
-    Search(commands::NamespaceSearchCommand),
+    /// Legacy search command
+    NamespaceSearch(commands::NamespaceSearchCommand),
+    
+    /// Direct search command
+    Search(commands::SearchCommand),
 
     /// Delete a document from a namespace
     Delete(commands::NamespaceDeleteCommand),
@@ -39,6 +42,7 @@ pub enum Commands {
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Namespace to operate on
+    #[arg(global = true)]
     namespace: Option<String>,
 
     /// Sets a custom config file
@@ -74,10 +78,27 @@ pub async fn start() {
             let namespace = cli.namespace.unwrap_or_else(|| "default".to_string());
             let _ = namespaces::handle_index_command(args, &namespace).await;
         }
-        Some(Commands::Search(args)) => {
-            // Handle search command with default namespace if none provided
-            let namespace = cli.namespace.unwrap_or_else(|| "default".to_string());
+        Some(Commands::NamespaceSearch(args)) => {
+            // Use namespace from args first, then from global flag, defaulting to "default"
+            let namespace = args.namespace.clone().unwrap_or_else(|| {
+                cli.namespace.clone().unwrap_or_else(|| "default".to_string())
+            });
             let _ = namespaces::handle_search_command(args, &namespace).await;
+        }
+        Some(Commands::Search(args)) => {
+            // Use namespace from args first, then from global flag, defaulting to "default"
+            let namespace = args.namespace.clone().unwrap_or_else(|| {
+                cli.namespace.clone().unwrap_or_else(|| "default".to_string())
+            });
+            // Convert the new search command to the existing structure to reuse logic
+            let search_args = commands::NamespaceSearchCommand {
+                query: args.query,
+                namespace: Some(namespace.clone()),
+                limit: args.limit,
+                offset: args.offset,
+                addr: args.addr,
+            };
+            let _ = namespaces::handle_search_command(search_args, &namespace).await;
         }
         Some(Commands::Delete(args)) => {
             // Handle delete command with default namespace if none provided

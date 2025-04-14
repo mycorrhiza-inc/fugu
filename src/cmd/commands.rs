@@ -12,6 +12,30 @@ pub struct InitCommand {
     pub force: bool,
 }
 
+#[derive(Parser)]
+#[command(name = "search", about = "search for content")]
+pub struct SearchCommand {
+    /// Search query
+    #[arg(last = true)]
+    pub query: String,
+    
+    /// Namespace to search in
+    #[arg(short, long)]
+    pub namespace: Option<String>,
+    
+    /// Maximum results to return
+    #[arg(short, long, default_value = "10")]
+    pub limit: u32,
+    
+    /// Results offset
+    #[arg(short, long, default_value = "0")]
+    pub offset: u32,
+    
+    /// Server address
+    #[arg(short, long, default_value = "http://127.0.0.1:50051")]
+    pub addr: String,
+}
+
 // #[derive(Parser)]
 // #[command(name = "config")]
 // pub struct ConfigCommand {
@@ -136,8 +160,12 @@ pub struct NamespaceIndexCommand {
 #[command(name = "search")]
 pub struct NamespaceSearchCommand {
     /// Search query
-    #[arg(short, long, required = true)]
+    #[arg(last = true)]
     pub query: String,
+    
+    /// Namespace to search in
+    #[arg(short, long)]
+    pub namespace: Option<String>,
     
     /// Maximum results to return
     #[arg(short, long, default_value = "10")]
