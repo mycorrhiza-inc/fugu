@@ -114,8 +114,8 @@ pub async fn start() {
             // Path for this instance - in a real app, this might come from config
             let path = PathBuf::from("./data");
 
-            // Default gRPC server address
-            let addr = "127.0.0.1:50051".to_string();
+            // Use the port parameter to build the server address
+            let addr = format!("127.0.0.1:{}", args.port);
 
             if args.daemon {
                 println!("Starting the fugu node as a daemon...");
@@ -202,7 +202,7 @@ pub async fn start() {
                             });
                             
                             if let Err(e) =
-                                crate::fugu::grpc::start_grpc_server(path, addr, None, Some(combined_rx)).await
+                                crate::fugu::grpc::start_grpc_server(path, addr.clone(), None, Some(combined_rx)).await
                             {
                                 eprintln!("Server error: {}", e);
                             }
@@ -221,7 +221,7 @@ pub async fn start() {
                 let _server_handle = tokio::spawn(async move {
                     if let Err(e) = crate::fugu::grpc::start_grpc_server(
                         path,
-                        addr,
+                        addr.clone(),
                         Some(ready_tx),
                         Some(shutdown_rx),
                     )
