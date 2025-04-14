@@ -84,6 +84,8 @@ pub async fn handle_search_command(
     namespace: &str
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Searching in namespace `{namespace}`...");
+    let q = cmd.query.clone();
+    println!("query \"{q}\"");
     
     // Perform the search
     client_search(cmd.addr, cmd.query, cmd.limit.try_into().unwrap_or(10), cmd.offset.try_into().unwrap_or(0)).await?;

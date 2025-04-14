@@ -56,13 +56,6 @@ pub struct Cli {
 pub async fn start() {
     let cli = Cli::parse();
 
-    // Handle global namespace first
-    if let Some(namespace) = cli.namespace.as_ref() {
-        println!("operating on namespace: {namespace}");
-        println!("Nothing to do. Exiting");
-        return;
-    }
-
     // Handle subcommands
     match cli.command {
         Some(Commands::Init(args)) => {

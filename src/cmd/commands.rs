@@ -16,7 +16,7 @@ pub struct InitCommand {
 #[command(name = "search", about = "search for content")]
 pub struct SearchCommand {
     /// Search query
-    #[arg(last = true)]
+    // #[arg(last = true)]
     pub query: String,
     
     /// Namespace to search in
