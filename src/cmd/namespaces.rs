@@ -35,12 +35,12 @@ pub async fn run(ns: NamespaceCommand) -> Result<(), Box<dyn std::error::Error>>
             if ns.status {
                 println!("checking status of namespace `{namespace}`...");
                 // Use empty search to check if server is responding
-                client_search(grpc_addr, String::new(), 0, 0).await?;
+                client_search(grpc_addr, String::new(), 0, 0, None).await?;
             } else if ns.init {
                 println!("initializing namespace `{namespace}`...");
                 // TODO: Implement initialization through the gRPC client
                 // For now, just verify the connection
-                client_search(grpc_addr, String::new(), 0, 0).await?;
+                client_search(grpc_addr, String::new(), 0, 0, None).await?;
                 println!("Namespace `{namespace}` initialized successfully");
             } else if ns.reindex {
                 println!("reindexing namespace `{namespace}`...");
@@ -56,7 +56,7 @@ pub async fn run(ns: NamespaceCommand) -> Result<(), Box<dyn std::error::Error>>
             } else {
                 println!("namespace logic at `{namespace}`...");
                 // Default operation: show namespace info
-                client_search(grpc_addr, String::new(), 0, 0).await?;
+                client_search(grpc_addr, String::new(), 0, 0, None).await?;
                 println!("Connected to namespace `{namespace}` successfully");
             }
         }
@@ -72,8 +72,8 @@ pub async fn handle_index_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Indexing file in namespace `{namespace}`...");
     
-    // Index the file using the client
-    client_index(cmd.addr, cmd.file).await?;
+    // Index the file using the client, passing the namespace
+    client_index(cmd.addr, cmd.file, Some(namespace.to_string())).await?;
     
     Ok(())
 }
@@ -87,8 +87,14 @@ pub async fn handle_search_command(
     let q = cmd.query.clone();
     println!("query \"{q}\"");
     
-    // Perform the search
-    client_search(cmd.addr, cmd.query, cmd.limit.try_into().unwrap_or(10), cmd.offset.try_into().unwrap_or(0)).await?;
+    // Perform the search with the namespace
+    client_search(
+        cmd.addr, 
+        cmd.query, 
+        cmd.limit.try_into().unwrap_or(10), 
+        cmd.offset.try_into().unwrap_or(0),
+        Some(namespace.to_string())
+    ).await?;
     
     Ok(())
 }
