@@ -32,6 +32,8 @@ pub struct FuguServer {
     /// Tracks the number of WAL receivers in use
     #[allow(dead_code)]
     wal_receiver_count: usize, // We can't clone the receiver, so just track the count
+    /// Flag to enable shutdown timeout (for testing)
+    use_shutdown_timeout: bool,
 }
 
 impl FuguServer {
@@ -50,6 +52,20 @@ impl FuguServer {
     ///
     /// A new FuguServer instance
     pub fn new(path: PathBuf) -> Self {
+        Self::new_with_options(path, true)
+    }
+
+    /// Creates a new FuguServer instance with optional shutdown timeout
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path where the server will store data and WAL
+    /// * `use_shutdown_timeout` - Whether to use timeout during shutdown (for testing)
+    ///
+    /// # Returns
+    ///
+    /// A new FuguServer instance
+    pub fn new_with_options(path: PathBuf, use_shutdown_timeout: bool) -> Self {
         // Create channel for WAL commands
         let (tx, mut rx): (mpsc::Sender<WALCMD>, mpsc::Receiver<WALCMD>) = mpsc::channel(1000);
         
@@ -108,6 +124,7 @@ impl FuguServer {
             stop: false,
             wal_sender: tx,
             wal_receiver_count: 1,
+            use_shutdown_timeout,
         }
     }
     
@@ -157,14 +174,22 @@ impl FuguServer {
         println!("Shutting down server and saving all data");
         self.stop = true;
         
-        // Send shutdown signal to WAL processor task with timeout
-        if let Err(_) = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            self.wal_sender.send(WALCMD::DumpWAL { 
+        // Send shutdown signal to WAL processor task
+        if self.use_shutdown_timeout {
+            // With timeout (default behavior)
+            if let Err(_) = tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                self.wal_sender.send(WALCMD::DumpWAL { 
+                    response: tokio::sync::oneshot::channel().0 
+                })
+            ).await {
+                println!("Warning: Timeout sending final WAL command");
+            }
+        } else {
+            // Without timeout (for testing)
+            let _ = self.wal_sender.send(WALCMD::DumpWAL { 
                 response: tokio::sync::oneshot::channel().0 
-            })
-        ).await {
-            println!("Warning: Timeout sending final WAL command");
+            }).await;
         }
         
         // The actual flushing of data is handled by the node's unload_index method
@@ -181,7 +206,7 @@ mod tests {
     #[tokio::test]
     pub async fn run_wal_text() -> Result<(), Box<dyn std::error::Error>> {
         let wal_path = PathBuf::from("./test_wal.bin");
-        let mut server = FuguServer::new(wal_path);
+        let mut server = FuguServer::new_with_options(wal_path, false);
         let sender = server.get_wal_sender();
         let (tx_shutdown, rx_shutdown) = tokio::sync::oneshot::channel::<bool>();
 

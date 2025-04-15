@@ -32,3 +32,5 @@ pub mod grpc;
 mod test_grpc;
 #[cfg(test)]
 mod test_client;
+#[cfg(test)]
+mod search_test;

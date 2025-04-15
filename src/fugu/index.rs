@@ -380,7 +380,11 @@ impl InvertedIndex {
             
             if let Some(search_engine) = search_engine_guard.as_mut() {
                 // Create a document with ID and content
-                let document = bm25::Document::new(doc_id.to_string(), text);
+                // Note: We normalize the text to lowercase for consistent case-insensitive indexing
+                let normalized_text = text.to_lowercase();
+                
+                // Create a document with ID and normalized (lowercase) content for consistent search
+                let document = bm25::Document::new(doc_id.to_string(), &normalized_text);
                 
                 // Add or update document in the search engine
                 search_engine.upsert(document);
@@ -583,9 +587,20 @@ impl InvertedIndex {
         let search_engine_guard = self.search_engine.read().await;
         let mut search_results = Vec::new();
         
-        if let Some(search_engine) = search_engine_guard.as_ref() {
+        // We use our TF-IDF implementation for consistent case-insensitive search
+        // This allows us to control the term normalization process
+        let use_tf_idf_scoring = true;
+        
+        // The BM25 search engine implementation has been disabled due to case sensitivity issues
+        // This may be revisited later if the BM25 engine can be further customized
+        if !use_tf_idf_scoring && search_engine_guard.as_ref().is_some() {
+            let search_engine = search_engine_guard.as_ref().unwrap();
+            
+            // Normalize query to lowercase for case-insensitive search
+            let normalized_query = query.to_lowercase();
+            
             // Perform the BM25 search with a limit of 100 results
-            let top_results = search_engine.search(query, 100);
+            let top_results = search_engine.search(&normalized_query, 100);
             
             // Build search results with scores and term positions
             for result in top_results {
@@ -593,7 +608,7 @@ impl InvertedIndex {
                 let score = result.score;
                 
                 // Skip documents with very low scores
-                if score < 0.001 {
+                if score < 0.00001 {
                     continue;
                 }
                 
@@ -615,7 +630,8 @@ impl InvertedIndex {
                 });
             }
         } else {
-            // Fallback to TF-IDF scoring if BM25 engine is not available
+            // Use TF-IDF scoring for case-insensitive search
+            // This is our primary search method for reliable case insensitivity
             let total_docs = *self.total_docs.read().await;
             let total_docs_f64 = total_docs as f64;
             
@@ -626,23 +642,34 @@ impl InvertedIndex {
                 
                 for (term, term_index) in &term_results {
                     if let Some(positions) = term_index.doc_ids.get(&doc_id) {
-                        // TF-IDF scoring
+                        // Calculate TF-IDF score components:
+                        // TF (term frequency) = number of times term appears in document
                         let term_freq = positions.len() as f64;
+                        
+                        // DF (document frequency) = number of documents containing this term
                         let doc_freq = term_index.doc_ids.len() as f64;
+                        
+                        // IDF (inverse document frequency) = log(total_docs / doc_freq)
                         let idf = if doc_freq > 0.0 {
                             (total_docs_f64 / doc_freq).ln()
                         } else {
                             0.0
                         };
                         
+                        // Accumulate stats
                         total_terms += term_freq;
+                        
+                        // Compute term score and add to document relevance
                         let term_score = term_freq * idf;
                         relevance_score += term_score;
+                        
+                        // Save term positions for highlighting
                         doc_term_matches.insert(term.clone(), positions.clone());
                     }
                 }
                 
-                // Normalize by total terms in document
+                // Normalize relevance score by total terms in document
+                // This helps make scores comparable across documents of different lengths
                 if total_terms > 0.0 {
                     relevance_score /= total_terms;
                 }
