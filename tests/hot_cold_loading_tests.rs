@@ -1,21 +1,40 @@
-use rand::Rng;
-use std::env;
-use std::fs;
+#[cfg(feature = "performance-tests")]
 use std::fs::File;
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+#[cfg(feature = "performance-tests")]
+use std::io::Write;
+#[cfg(feature = "performance-tests")]
+use std::path::Path;
+#[cfg(feature = "performance-tests")]
+use std::time::Duration;
+
+#[cfg(feature = "performance-tests")]
+use rand::Rng;
+#[cfg(feature = "performance-tests")]
+use std::env;
+#[cfg(feature = "performance-tests")]
+use std::fs;
+#[cfg(feature = "performance-tests")]
+use std::io::Read;
+#[cfg(feature = "performance-tests")]
+use std::path::PathBuf;
+#[cfg(feature = "performance-tests")]
 use std::process::Command;
+#[cfg(feature = "performance-tests")]
 use std::thread;
-use std::time::{Duration, Instant};
+#[cfg(feature = "performance-tests")]
+use std::time::Instant;
+#[cfg(feature = "performance-tests")]
 use tempfile::tempdir;
 
 // Returns a randomly chosen port in the range 50100-60000 to avoid hardcoded port conflicts
+#[cfg(feature = "performance-tests")]
 fn get_random_port() -> u16 {
-    let mut rng = rand::thread_rng();
-    rng.gen_range(50100..60000)
+    let mut rng = rand::rng();
+    rng.random_range(50100..60000)
 }
 
 // Function to save performance data to CSV
+#[cfg(feature = "performance-tests")]
 fn save_performance_csv(test_name: &str, durations: &[Duration]) -> std::io::Result<()> {
     // Create the data directory if it doesn't exist
     let data_dir = Path::new("tests/data");
@@ -394,6 +413,7 @@ fn test_hot_cold_loading_performance() {
 }
 
 // Helper function to calculate median duration
+#[cfg(feature = "performance-tests")]
 fn median_duration(durations: &[Duration]) -> Duration {
     if durations.is_empty() {
         return Duration::from_secs(0);

@@ -36,8 +36,8 @@ fn save_performance_csv(test_name: &str, durations: &[Duration]) -> std::io::Res
 
 // Returns a randomly chosen port in the range 50100-60000 to avoid hardcoded port conflicts
 fn get_random_port() -> u16 {
-    let mut rng = rand::thread_rng();
-    rng.gen_range(50100..60000)
+    let mut rng = rand::rng();
+    rng.random_range(50100..60000)
 }
 
 #[test]
