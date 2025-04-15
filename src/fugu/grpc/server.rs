@@ -16,69 +16,44 @@ use crate::fugu::config::{ConfigManager, new_config_manager};
 // Use the parallel indexer from the index module
 use crate::fugu::index::ParallelIndexer;
 
-// The server implementation for handling namespace service requests
-/// Main service implementation for the namespace gRPC API
+/// Main service implementation for the Fugu namespace gRPC API
 ///
 /// This service:
-/// - Manages Fugu server and nodes
+/// - Manages Fugu nodes and namespaces
 /// - Handles client requests for indexing, search, and deletion
 /// - Provides namespace isolation for multi-tenant usage
 /// - Ensures proper cleanup on shutdown
-/// Main server struct that manages the Fugu search engine
-///
-/// The server is responsible for:
-/// - Maintaining index data
-/// - Processing client requests
-/// - Ensuring data consistency
-pub struct FuguServer {
-    /// Path where server data is stored
-    path: PathBuf,
+#[derive(Clone)]
+pub struct NamespaceService {
+    /// Path for configuration and storage
+    config_path: PathBuf,
+    /// Map of namespace identifiers to Node instances
+    nodes: Arc<RwLock<HashMap<String, Node>>>,
     /// Configuration manager for file paths
     config: ConfigManager,
-    /// Flag to signal server shutdown
-    stop: bool,
-    /// Flag to enable shutdown timeout (for testing)
-    use_shutdown_timeout: bool,
 }
 
-impl Clone for FuguServer {
-    fn clone(&self) -> Self {
-        Self {
-            path: self.path.clone(),
-            config: self.config.clone(),
-            stop: self.stop,
-            use_shutdown_timeout: self.use_shutdown_timeout,
-        }
-    }
-}
-
-impl FuguServer {
-    /// Creates a new FuguServer instance
-    ///
-    /// Initializes the server with:
-    /// - Proper shutdown handling
+impl NamespaceService {
+    /// Creates a new NamespaceService
     ///
     /// # Arguments
     ///
-    /// * `path` - Path where the server will store data
+    /// * `path` - Path for configuration and storage
     ///
     /// # Returns
     ///
-    /// A new FuguServer instance
+    /// A new NamespaceService instance
     pub fn new(path: PathBuf) -> Self {
-        info!("Creating new FuguServer with path: {:?}", path);
+        info!("Creating new NamespaceService with path: {:?}", path);
         
-        // Validate path
+        // Validate path existence
         if !path.exists() {
-            info!("Server path {:?} does not exist, attempting to create it", path);
+            info!("Path {:?} does not exist, attempting to create it", path);
             if let Err(e) = std::fs::create_dir_all(&path) {
-                error!("Failed to create server directory {:?}: {}", path, e);
-                // Continue anyway, as ConfigManager may handle this
+                error!("Failed to create directory {:?}: {}", path, e);
             } else {
-                info!("Successfully created server directory: {:?}", path);
+                info!("Successfully created directory: {:?}", path);
             }
-        } else {
-            info!("Server path exists: {:?}", path);
         }
         
         // Create configuration manager with detailed logging
@@ -86,30 +61,7 @@ impl FuguServer {
         let config = new_config_manager(Some(path.clone()));
         info!("Configuration manager created successfully");
         
-        info!("Initializing FuguServer with options");
-        Self::new_with_options(path, config, true)
-    }
-
-    /// Creates a new FuguServer instance with optional shutdown timeout
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path where the server will store data
-    /// * `config` - Configuration manager for file paths
-    /// * `use_shutdown_timeout` - Whether to use timeout during shutdown (for testing)
-    ///
-    /// # Returns
-    ///
-    /// A new FuguServer instance
-    pub fn new_with_options(path: PathBuf, config: ConfigManager, use_shutdown_timeout: bool) -> Self {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-            
-        info!("Creating new FuguServer instance at timestamp: {}", timestamp);
-        
-        // Check config paths
+        // Initialize paths
         let base_dir = config.base_dir();
         info!("Config base directory: {:?}", base_dir);
         
@@ -137,97 +89,6 @@ impl FuguServer {
             info!("Default namespace directory setup complete");
         }
         
-        info!("FuguServer initialization complete with:");
-        info!("  path: {:?}", path);
-        info!("  use_shutdown_timeout: {}", use_shutdown_timeout);
-        
-        Self {
-            path,
-            config,
-            stop: false,
-            use_shutdown_timeout,
-        }
-    }
-    
-    /// Helper method to create a channel for testing purposes
-    ///
-    /// # Returns
-    ///
-    /// A sender channel for inter-component communication
-    #[allow(dead_code)]
-    pub fn create_channel<T>() -> mpsc::Sender<T> where T: Send + 'static {
-        let (tx, _rx) = mpsc::channel(1000);
-        tx
-    }
-
-    /// Starts the server and keeps it running until shutdown
-    ///
-    /// This method blocks until server shutdown is requested
-    #[allow(dead_code)]
-    pub async fn up(&mut self) {
-        // Just wait for shutdown
-        while !self.stop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-    }
-    
-    /// Gracefully shuts down the server ensuring data is saved
-    ///
-    /// This method:
-    /// - Signals all processing to stop
-    /// - Ensures data durability
-    ///
-    /// # Returns
-    ///
-    /// Result indicating success or error during shutdown
-    pub async fn down(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        info!("Shutting down server");
-        self.stop = true;
-        
-        // The actual flushing of index data is handled by the node's unload_index method
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-pub struct NamespaceService {
-    /// The underlying Fugu server
-    #[allow(dead_code)]
-    server: FuguServer,
-    /// Path for configuration and storage
-    config_path: PathBuf,
-    /// Map of namespace identifiers to Node instances
-    nodes: Arc<RwLock<HashMap<String, Node>>>,
-}
-
-impl NamespaceService {
-    /// Creates a new NamespaceService
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path for configuration and storage
-    ///
-    /// # Returns
-    ///
-    /// A new NamespaceService instance
-    pub fn new(path: PathBuf) -> Self {
-        info!("Creating new NamespaceService with path: {:?}", path);
-        
-        // Validate path existence
-        if !path.exists() {
-            info!("Path {:?} does not exist, attempting to create it", path);
-            if let Err(e) = std::fs::create_dir_all(&path) {
-                error!("Failed to create directory {:?}: {}", path, e);
-                // Continue anyway as the FuguServer should handle this
-            } else {
-                info!("Successfully created directory: {:?}", path);
-            }
-        }
-        
-        // Create FuguServer with detailed error tracing
-        let server = FuguServer::new(path.clone());
-        let config_path = path.clone();
-        
         // Initialize nodes map
         let nodes = Arc::new(RwLock::new(HashMap::new()));
         
@@ -241,10 +102,38 @@ impl NamespaceService {
         }
         
         Self { 
-            server, 
-            config_path,
+            config_path: path,
+            config,
             nodes,
         }
+    }
+    
+    /// Explicitly shutdown the namespace service
+    ///
+    /// This method ensures that all resources are properly cleaned up
+    pub async fn shutdown(&mut self) -> Result<(), BoxError> {
+        info!("Shutting down NamespaceService");
+        
+        // Clean up and flush all nodes
+        let mut nodes = self.nodes.write().await;
+        for (namespace, mut node) in nodes.drain() {
+            info!(namespace=%namespace, "Shutting down node");
+            if let Err(e) = node.unload_index().await {
+                warn!(namespace=%namespace, "Error unloading node index: {}", e);
+            }
+            
+            // Remove namespace lock
+            if let Err(e) = self.remove_namespace_lock(&namespace).await {
+                warn!(namespace=%namespace, error=%e, "Failed to remove namespace lock during shutdown");
+            }
+        }
+        
+        // Longer sleep to ensure resources are released between tests
+        // This helps avoid database lock contention in test environments
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        info!("NamespaceService shutdown complete");
+        Ok(())
     }
     
     /// Check if a namespace is locked by another process
@@ -475,40 +364,6 @@ impl NamespaceService {
         Ok(())
     }
     
-    /// Explicitly shutdown the namespace service and its server instance
-    ///
-    /// This method ensures that all resources are properly cleaned up
-    pub async fn shutdown(&mut self) -> Result<(), BoxError> {
-        info!("Shutting down NamespaceService");
-        
-        // First shut down the server to ensure WAL commands are processed
-        match self.server.down().await {
-            Ok(_) => info!("FuguServer shut down cleanly"),
-            Err(e) => warn!("Error during FuguServer shutdown: {}", e),
-        }
-        
-        // Clean up and flush all nodes
-        let mut nodes = self.nodes.write().await;
-        for (namespace, mut node) in nodes.drain() {
-            info!(namespace=%namespace, "Shutting down node");
-            if let Err(e) = node.unload_index().await {
-                warn!(namespace=%namespace, "Error unloading node index: {}", e);
-            }
-            
-            // Remove namespace lock
-            if let Err(e) = self.remove_namespace_lock(&namespace).await {
-                warn!(namespace=%namespace, error=%e, "Failed to remove namespace lock during shutdown");
-            }
-        }
-        
-        // Longer sleep to ensure resources are released between tests
-        // This helps avoid database lock contention in test environments
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        
-        info!("NamespaceService shutdown complete");
-        Ok(())
-    }
-    
     /// Gets or creates a node for the given namespace
     ///
     /// This method:
@@ -538,9 +393,6 @@ impl NamespaceService {
             // Try to discover the server that has this namespace
             if let Some(server_info) = self.discover_namespace_server(namespace).await {
                 info!(namespace=%namespace, address=%server_info, "Found server with this namespace");
-                
-                // We don't do proxy nodes anymore
-                error!(namespace=%namespace, address=%server_info, "Namespace locked by another server but proxying is disabled");
                 
                 // Return a node with a shutdown flag set to true to indicate it shouldn't be used
                 let mut error_node = crate::fugu::node::new(

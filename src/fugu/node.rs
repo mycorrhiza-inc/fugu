@@ -74,7 +74,7 @@ impl Node {
             reserved: None,
         }
     }
-    
+
     /// Sets the shutdown flag for this node
     ///
     /// # Arguments
@@ -83,7 +83,7 @@ impl Node {
     pub fn set_shutdown(&mut self, value: bool) {
         self.shutdown = value;
     }
-    
+
     /// Checks if the node is in shutdown state
     ///
     /// # Returns
@@ -101,7 +101,7 @@ impl Node {
     fn get_index_path(&self) -> PathBuf {
         self.config.namespace_index_path(&self.namespace)
     }
-    
+
     /// Returns the path to the namespace directory
     fn get_namespace_path(&self) -> PathBuf {
         self.config.namespace_dir(&self.namespace)
@@ -163,9 +163,11 @@ impl Node {
     pub async fn index_file(&self, path: PathBuf) -> Result<Duration, Box<dyn std::error::Error>> {
         // Check if the node is in shutdown state
         if self.is_shutdown() {
-            return Err("Node is in shutdown state - namespace may be locked by another process".into());
+            return Err(
+                "Node is in shutdown state - namespace may be locked by another process".into(),
+            );
         }
-        
+
         // Start timing
         let start_time = Instant::now();
 
@@ -322,9 +324,11 @@ impl Node {
     pub async fn delete_file(&self, doc_id: &str) -> Result<Duration, Box<dyn std::error::Error>> {
         // Check if the node is in shutdown state
         if self.is_shutdown() {
-            return Err("Node is in shutdown state - namespace may be locked by another process".into());
+            return Err(
+                "Node is in shutdown state - namespace may be locked by another process".into(),
+            );
         }
-        
+
         info!(
             "[NODE] Attempting to delete file: {} in namespace: {}",
             doc_id, self.namespace
@@ -376,9 +380,11 @@ impl Node {
     ) -> Result<(Vec<crate::fugu::index::SearchResult>, Duration), Box<dyn std::error::Error>> {
         // Check if the node is in shutdown state
         if self.is_shutdown() {
-            return Err("Node is in shutdown state - namespace may be locked by another process".into());
+            return Err(
+                "Node is in shutdown state - namespace may be locked by another process".into(),
+            );
         }
-        
+
         // Start timing
         let start_time = Instant::now();
 
@@ -419,9 +425,11 @@ impl Node {
     pub async fn load_index(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Check if the node is in shutdown state
         if self.is_shutdown() {
-            return Err("Node is in shutdown state - namespace may be locked by another process".into());
+            return Err(
+                "Node is in shutdown state - namespace may be locked by another process".into(),
+            );
         }
-        
+
         let index_path = self.get_index_path();
         let index_path_str = self.get_index_path_str();
 
@@ -431,18 +439,18 @@ impl Node {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        
+
         // Check for consolidated rkyv file - this is now the primary loading method
         let consolidated_path = format!("{}/consolidated.rkyv", index_path_str);
         let use_consolidated = std::path::Path::new(&consolidated_path).exists();
-        
+
         // Only create a new InvertedIndex instance if one isn't already loaded
         if self.inverted_index.is_none() {
             // Create the index with minimal setup - primarily using consolidated data
             let index = InvertedIndex::new(&index_path_str).await;
             self.inverted_index = Some(index);
         }
-        
+
         // Always prefer loading directly from consolidated file
         if use_consolidated {
             if let Some(index) = &self.inverted_index {
@@ -454,9 +462,12 @@ impl Node {
                 }
             }
         } else {
-            warn!("No consolidated index found at {}/consolidated.rkyv", index_path_str);
+            warn!(
+                "No consolidated index found at {}/consolidated.rkyv",
+                index_path_str
+            );
         }
-        
+
         info!(path=%index_path.display(), consolidated=%use_consolidated, "Loaded index");
         Ok(())
     }
@@ -475,10 +486,10 @@ impl Node {
         if let Some(index) = self.inverted_index.take() {
             // First flush any pending changes to disk
             index.flush().await?;
-            
+
             // Then explicitly close the index to release all locks
             index.close().await?;
-            
+
             info!(path=%self.get_index_path().display(), namespace=%self.namespace, "Unloaded index and released locks");
         }
         Ok(())
@@ -520,7 +531,6 @@ pub fn new(namespace: String, config_path: Option<PathBuf>) -> Node {
     Node::new(namespace, config_path)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,7 +553,7 @@ mod tests {
     async fn setup_test_node() -> (Node, tempfile::TempDir) {
         // Create temporary directory
         let temp_dir = tempdir().unwrap();
-        
+
         // Create a timestamp-based namespace
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -552,10 +562,7 @@ mod tests {
         let namespace = format!("tests/{}/", timestamp);
 
         // Create a node with the temp dir as config path
-        let node = Node::new(
-            namespace,
-            Some(temp_dir.path().to_path_buf()),
-        );
+        let node = Node::new(namespace, Some(temp_dir.path().to_path_buf()));
 
         (node, temp_dir)
     }
@@ -575,11 +582,14 @@ mod tests {
         // Verify index directory exists
         assert!(index_path.exists());
         assert!(node.inverted_index.is_some());
-        
+
         // Verify .fugu directory structure
         let fugu_dir = node.config.namespace_dir(&node.namespace).join(".fugu");
         assert!(fugu_dir.exists(), ".fugu directory should exist");
-        assert!(fugu_dir.join("index").exists(), ".fugu/index directory should exist");
+        assert!(
+            fugu_dir.join("index").exists(),
+            ".fugu/index directory should exist"
+        );
 
         // Unload the index
         node.unload_index().await.unwrap();
@@ -606,7 +616,7 @@ mod tests {
             index_path.exists(),
             "Index directory should exist after loading"
         );
-        
+
         // Verify the .fugu directory was created
         let namespace_dir = node1.config.namespace_dir(&node1.namespace);
         let fugu_dir = namespace_dir.join(".fugu");
@@ -620,10 +630,7 @@ mod tests {
         node1.unload_index().await.unwrap();
 
         // Create a new node with the same config path and namespace
-        let mut node2 = Node::new(
-            node1.namespace.clone(),
-            Some(temp_dir.path().to_path_buf()),
-        );
+        let mut node2 = Node::new(node1.namespace.clone(), Some(temp_dir.path().to_path_buf()));
 
         // Load the index
         node2.load_index().await.unwrap();
@@ -658,7 +665,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         // Create multiple nodes with different namespaces but same config path
         let mut node1 = Node::new(
             format!("tests/{}/ns1", timestamp),
@@ -691,15 +698,24 @@ mod tests {
         assert_ne!(path1, path2);
         assert_ne!(path2, path3);
         assert_ne!(path1, path3);
-        
+
         // Verify .fugu directories exist for each namespace
         let fugu_dir1 = node1.config.namespace_dir(&node1.namespace).join(".fugu");
         let fugu_dir2 = node2.config.namespace_dir(&node2.namespace).join(".fugu");
         let fugu_dir3 = node3.config.namespace_dir(&node3.namespace).join(".fugu");
-        
-        assert!(fugu_dir1.exists(), ".fugu directory for node1's namespace should exist");
-        assert!(fugu_dir2.exists(), ".fugu directory for node2's namespace should exist");
-        assert!(fugu_dir3.exists(), ".fugu directory for node3's namespace should exist");
+
+        assert!(
+            fugu_dir1.exists(),
+            ".fugu directory for node1's namespace should exist"
+        );
+        assert!(
+            fugu_dir2.exists(),
+            ".fugu directory for node2's namespace should exist"
+        );
+        assert!(
+            fugu_dir3.exists(),
+            ".fugu directory for node3's namespace should exist"
+        );
 
         // Create test documents in the indices
         // Write test files in each index directory that we can index

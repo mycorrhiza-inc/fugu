@@ -251,8 +251,6 @@ pub struct InvertedIndex {
     doc_db: Arc<RwLock<sled::Db>>,
     /// Document-to-terms database for efficient retrieval and deletion
     doc_term_db: Arc<RwLock<sled::Db>>,
-    /// Path to disk cache for text files
-    cache_path: String,
     /// Size threshold for caching (files larger than this won't be cached)
     cache_size_threshold: usize,
     /// Latest search metrics
@@ -305,11 +303,14 @@ impl InvertedIndex {
                 tracing::error!("Failed to open index database: {:?}", e);
                 // Return a temporary in-memory database as fallback during tests
                 if cfg!(test) {
-                    sled::Config::new().temporary(true).open().expect("Failed to open fallback in-memory database")
+                    sled::Config::new()
+                        .temporary(true)
+                        .open()
+                        .expect("Failed to open fallback in-memory database")
                 } else {
                     panic!("Failed to open index database: {:?}", e)
                 }
-            },
+            }
         };
 
         // Document content database - use more reliable config
@@ -325,11 +326,14 @@ impl InvertedIndex {
                 tracing::error!("Failed to open documents database: {:?}", e);
                 // Return a temporary in-memory database as fallback during tests
                 if cfg!(test) {
-                    sled::Config::new().temporary(true).open().expect("Failed to open fallback in-memory database")
+                    sled::Config::new()
+                        .temporary(true)
+                        .open()
+                        .expect("Failed to open fallback in-memory database")
                 } else {
                     panic!("Failed to open documents database: {:?}", e)
                 }
-            },
+            }
         };
 
         // No longer creating cache directory - all files stay in their namespace location
@@ -348,11 +352,14 @@ impl InvertedIndex {
                 tracing::error!("Failed to open document-terms database: {:?}", e);
                 // Return a temporary in-memory database as fallback during tests
                 if cfg!(test) {
-                    sled::Config::new().temporary(true).open().expect("Failed to open fallback in-memory database")
+                    sled::Config::new()
+                        .temporary(true)
+                        .open()
+                        .expect("Failed to open fallback in-memory database")
                 } else {
                     panic!("Failed to open document-terms database: {:?}", e)
                 }
-            },
+            }
         };
 
         // Define a reasonable cache size threshold (2MB)
@@ -363,7 +370,6 @@ impl InvertedIndex {
             path: path.to_string(),
             doc_db: Arc::new(RwLock::new(doc_db)),
             doc_term_db: Arc::new(RwLock::new(doc_term_db)),
-            cache_path: String::new(), // No longer using separate cache directory
             cache_size_threshold: DEFAULT_CACHE_SIZE_THRESHOLD,
             last_metrics: Arc::new(RwLock::new(SearchMetrics::new())),
             total_docs: Arc::new(RwLock::new(0)),
@@ -371,7 +377,7 @@ impl InvertedIndex {
             consolidated_path,
         }
     }
-    
+
     /// Load an index from a consolidated rkyv file
     ///
     /// # Arguments
@@ -386,20 +392,21 @@ impl InvertedIndex {
         let mut file = File::open(file_path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        
+
         // Deserialize the consolidated index
-        let consolidated_index: ConsolidatedIndex = rkyv::from_bytes::<ConsolidatedIndex, Error>(&bytes)?;
-        
+        let consolidated_index: ConsolidatedIndex =
+            rkyv::from_bytes::<ConsolidatedIndex, Error>(&bytes)?;
+
         // Extract the path from the file path
         let path = Path::new(file_path)
             .parent()
             .ok_or("Invalid file path")?
             .to_string_lossy()
             .to_string();
-            
+
         // Create the base directories
         // No longer creating cache directory
-        
+
         // Recreate the sled databases
         let index_path = format!("{}/index", path);
         let db = sled::Config::new()
@@ -407,53 +414,52 @@ impl InvertedIndex {
             .use_compression(false) // Fix compression mismatch issue
             .mode(sled::Mode::LowSpace)
             .open()?;
-            
+
         let docs_path = format!("{}/docs", path);
         let doc_db = sled::Config::new()
             .path(&docs_path)
             .use_compression(false) // Fix compression mismatch issue
             .mode(sled::Mode::LowSpace)
             .open()?;
-            
+
         let doc_term_path = format!("{}/doc_terms", path);
         let doc_term_db = sled::Config::new()
             .path(&doc_term_path)
             .use_compression(false) // Fix compression mismatch issue
             .mode(sled::Mode::LowSpace)
             .open()?;
-        
+
         // Populate the databases from the consolidated data
         for (term, term_index) in &consolidated_index.terms {
             let serialized = rkyv::to_bytes::<rkyv::rancor::Panic>(term_index)?;
             db.insert(term.as_bytes(), serialized.as_slice())?;
         }
-        
+
         for (doc_id, content) in &consolidated_index.documents {
             doc_db.insert(doc_id.as_bytes(), content.as_bytes())?;
         }
-        
+
         for (doc_id, doc_index) in &consolidated_index.doc_terms {
             let serialized = rkyv::to_bytes::<rkyv::rancor::Panic>(doc_index)?;
             doc_term_db.insert(doc_id.as_bytes(), serialized.as_slice())?;
         }
-        
+
         // Define a reasonable cache size threshold (2MB)
         const DEFAULT_CACHE_SIZE_THRESHOLD: usize = 2 * 1024 * 1024;
-        
+
         // Create and return the index
         let index = InvertedIndex {
             db: Arc::new(RwLock::new(db)),
             path,
             doc_db: Arc::new(RwLock::new(doc_db)),
             doc_term_db: Arc::new(RwLock::new(doc_term_db)),
-            cache_path: String::new(), // No longer using separate cache directory
             cache_size_threshold: DEFAULT_CACHE_SIZE_THRESHOLD,
             last_metrics: Arc::new(RwLock::new(SearchMetrics::new())),
             total_docs: Arc::new(RwLock::new(consolidated_index.total_docs)),
             term_cache: Arc::new(RwLock::new(consolidated_index.terms.clone())),
             consolidated_path: file_path.to_string(),
         };
-        
+
         Ok(index)
     }
 
@@ -512,16 +518,16 @@ impl InvertedIndex {
         // with tokio::fs::write which handles proper flushing
 
         println!("Flushed index and document data to {}", self.path);
-        
+
         // Consolidate and save to a single rkyv file
         match self.save_consolidated().await {
             Ok(_) => println!("Consolidated index saved to {}", self.consolidated_path),
             Err(e) => println!("Failed to save consolidated index: {}", e),
         }
-        
+
         Ok(())
     }
-    
+
     /// Consolidates all database files into a single rkyv file
     ///
     /// This method:
@@ -540,7 +546,7 @@ impl InvertedIndex {
             doc_terms: HashMap::new(),
             total_docs: *self.total_docs.read().await,
         };
-        
+
         // Collect all term indices
         let db = self.db.read().await;
         for item in db.iter() {
@@ -552,20 +558,20 @@ impl InvertedIndex {
                 }
             }
         }
-        
+
         // Collect all documents
         let doc_db = self.doc_db.read().await;
         for item in doc_db.iter() {
             if let Ok((key, value)) = item {
                 if let (Ok(doc_id), Ok(content)) = (
                     String::from_utf8(key.to_vec()),
-                    String::from_utf8(value.to_vec())
+                    String::from_utf8(value.to_vec()),
                 ) {
                     consolidated.documents.insert(doc_id, content);
                 }
             }
         }
-        
+
         // Collect all doc-terms mappings
         let doc_term_db = self.doc_term_db.read().await;
         for item in doc_term_db.iter() {
@@ -577,16 +583,16 @@ impl InvertedIndex {
                 }
             }
         }
-        
+
         // Serialize the consolidated data
         let serialized = rkyv::to_bytes::<rkyv::rancor::Panic>(&consolidated)?;
-        
+
         // Write to the consolidated file
         // Use a temporary file and atomic rename for safety
         let temp_path = format!("{}.tmp", self.consolidated_path);
         std::fs::write(&temp_path, serialized)?;
         std::fs::rename(&temp_path, &self.consolidated_path)?;
-        
+
         Ok(())
     }
 
@@ -619,7 +625,7 @@ impl InvertedIndex {
         println!("Closed database connections for {}", self.path);
         Ok(())
     }
-    
+
     /// Loads the index directly from the consolidated file without creating sled databases
     ///
     /// This method is more efficient than load_consolidated as it doesn't recreate the sled databases
@@ -634,18 +640,22 @@ impl InvertedIndex {
             let mut file = File::open(&self.consolidated_path)?;
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
-            
+
             // Deserialize the consolidated index
-            let consolidated_index: ConsolidatedIndex = rkyv::from_bytes::<ConsolidatedIndex, Error>(&bytes)?;
-            
+            let consolidated_index: ConsolidatedIndex =
+                rkyv::from_bytes::<ConsolidatedIndex, Error>(&bytes)?;
+
             // Update the in-memory state
             *self.total_docs.write().await = consolidated_index.total_docs;
             *self.term_cache.write().await = consolidated_index.terms.clone();
-            
+
             // We don't need to load the documents or doc_terms since they will be
             // loaded on demand from the consolidated file when needed
-            
-            info!("Loaded index directly from consolidated file: {}", self.consolidated_path);
+
+            info!(
+                "Loaded index directly from consolidated file: {}",
+                self.consolidated_path
+            );
             Ok(())
         } else {
             Err(format!("Consolidated file not found: {}", self.consolidated_path).into())
@@ -655,7 +665,7 @@ impl InvertedIndex {
     /// Gets cache information including directory and stats
     ///
     /// This is a legacy method. The cache directory is no longer used, as files stay
-    /// in their namespace location. This method now returns information about the 
+    /// in their namespace location. This method now returns information about the
     /// documents stored in the document database.
     ///
     /// # Returns
@@ -664,19 +674,19 @@ impl InvertedIndex {
     pub async fn get_cache_info(&self) -> Result<(String, usize, u64), Box<dyn std::error::Error>> {
         // Use the namespace path instead of the non-existent cache path
         let namespace_path = self.path.clone();
-        
+
         // Count documents in the document database
         let doc_db = self.doc_db.read().await;
         let mut doc_count = 0;
         let mut total_size = 0u64;
-        
+
         for item in doc_db.iter() {
             if let Ok((_, value)) = item {
                 doc_count += 1;
                 total_size += value.len() as u64;
             }
         }
-        
+
         Ok((namespace_path, doc_count, total_size))
     }
 
@@ -857,11 +867,7 @@ impl InvertedIndex {
         };
 
         // No longer using cache directory - files stay in their namespace path
-        debug!(
-            "Document '{}' indexed (size: {})",
-            doc_id,
-            text_bytes.len()
-        );
+        debug!("Document '{}' indexed (size: {})", doc_id, text_bytes.len());
 
         // Tokenize the document for the inverted index
         let tokens = tokenizer.tokenize(text, doc_id);
