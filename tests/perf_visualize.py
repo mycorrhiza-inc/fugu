@@ -634,6 +634,143 @@ def create_distribution_plot(csv_results, output_dir="tests/perf_results"):
     print(f"Distribution plot creation complete: {plots_created} created, {plots_failed} failed")
 
 
+def create_integrated_distribution_plots(csv_results, output_dir="tests/perf_results"):
+    """Create integrated distribution plots from raw CSV data for p-distributions."""
+    print(f"Creating integrated distribution plots")
+    
+    if not csv_results:
+        print("No CSV data found to create integrated distribution plots")
+        return
+
+    # Create output directory if it doesn't exist
+    print(f"Ensuring output directory exists: {output_dir}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Map the standard tests to their corresponding integration tests
+    operation_mapping = {
+        "insert": {
+            "unit": "insert_performance",
+            "integration": "integration_index"
+        },
+        "search": {
+            "unit": "search_performance",
+            "integration": "integration_search"
+        },
+        "delete": {
+            "unit": "delete_performance",
+            "integration": "integration_delete"
+        },
+    }
+
+    # Process each operation type
+    for operation_name, tests in operation_mapping.items():
+        unit_test = tests["unit"]
+        integration_test = tests["integration"]
+        
+        print(f"Processing integrated distribution for {operation_name} operations")
+        print(f"  Unit test: {unit_test}")
+        print(f"  Integration test: {integration_test}")
+        
+        # Check if both tests exist in our data
+        if unit_test not in csv_results:
+            print(f"  Error: Unit test '{unit_test}' not found in data, skipping")
+            continue
+            
+        if integration_test not in csv_results:
+            print(f"  Error: Integration test '{integration_test}' not found in data, skipping")
+            continue
+            
+        # Get the data for both tests
+        unit_data = csv_results[unit_test]
+        integration_data = csv_results[integration_test]
+        
+        # Check for raw data
+        if 'raw_data' not in unit_data:
+            print(f"  Error: No raw data for unit test '{unit_test}', skipping")
+            continue
+            
+        if 'raw_data' not in integration_data:
+            print(f"  Error: No raw data for integration test '{integration_test}', skipping")
+            continue
+            
+        unit_raw = unit_data['raw_data']
+        integration_raw = integration_data['raw_data']
+        
+        # Check for duration column
+        if 'duration_us' not in unit_raw.columns:
+            print(f"  Error: No duration_us column in unit test data, skipping")
+            continue
+            
+        if 'duration_us' not in integration_raw.columns:
+            print(f"  Error: No duration_us column in integration test data, skipping")
+            continue
+            
+        # Create the plot
+        try:
+            plt.figure(figsize=(12, 7))
+            
+            # Create histograms for both tests
+            # Use alpha for transparency to see overlapping areas
+            plt.hist(unit_raw['duration_us'], bins=30, 
+                     alpha=0.6, color='skyblue', edgecolor='black', 
+                     label=f'{unit_test}')
+            plt.hist(integration_raw['duration_us'], bins=30, 
+                     alpha=0.6, color='lightgreen', edgecolor='black', 
+                     label=f'{integration_test}')
+            
+            # Add vertical lines for percentiles from both tests
+            for test_name, data, line_style in [(unit_test, unit_data, 'solid'), 
+                                               (integration_test, integration_data, 'dashed')]:
+                for percentile, color, name in [
+                    ('p10', 'green', 'p10'),
+                    ('p50', 'blue', 'p50'),
+                    ('p90', 'orange', 'p90'),
+                    ('p99', 'red', 'p99')
+                ]:
+                    if percentile in data:
+                        value = int(data[percentile])
+                        if test_name == unit_test:
+                            label = f'{test_name} {name}: {value}μs'
+                        else:
+                            label = f'{test_name} {name}: {value}μs'
+                        print(f"  Adding {label}")
+                        plt.axvline(value, color=color, linestyle=line_style,
+                                    linewidth=1.5, label=label)
+                    else:
+                        print(f"  Warning: Missing {percentile} in {test_name} data")
+            
+            # Set the plot title and labels
+            plt.title(f'Integrated {operation_name.capitalize()} Performance Distribution')
+            plt.xlabel('Duration (μs)')
+            plt.ylabel('Frequency')
+            plt.legend(loc='upper right')
+            plt.tight_layout()
+            
+            # Save the figure
+            output_file = f"{output_dir}/integrated_{operation_name}_distribution.png"
+            print(f"  Saving integrated distribution plot to: {output_file}")
+            plt.savefig(output_file, dpi=300)
+            
+            # Verify the file was created
+            if os.path.exists(output_file):
+                print(f"  Successfully saved integrated distribution plot ({os.path.getsize(output_file)} bytes)")
+            else:
+                print(f"  Warning: Failed to save integrated distribution plot")
+                
+            plt.close()
+            
+        except Exception as e:
+            print(f"  Error creating integrated distribution plot for '{operation_name}': {e}")
+            import traceback
+            print(traceback.format_exc())
+            try:
+                plt.close()
+            except:
+                pass
+
+    print("Integrated distribution plot creation complete")
+
+
 def compare_operations(csv_results, output_dir="tests/perf_results"):
     """Create comparison plots between unit tests and integration tests."""
     print(f"Creating operation comparison plots from {len(csv_results) if csv_results else 0} CSV results")
@@ -911,6 +1048,8 @@ def main():
                         help='Directory to save visualizations')
     parser.add_argument('--data-dir', default='tests/data',
                         help='Directory with CSV data files')
+    parser.add_argument('--integrated-only', action='store_true',
+                        help='Only generate integrated p-distribution charts')
 
     args = parser.parse_args()
     print(f"Command line arguments: {args}")
@@ -1004,60 +1143,84 @@ def main():
     print(f"Creating output directory: {args.output_dir}")
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Create bar chart
-    if tests:
-        print("\nCreating bar chart...")
-        try:
-            create_bar_chart(tests, args.output_dir)
-            print(f"Bar chart created in {args.output_dir}")
-        except Exception as e:
-            print(f"Error creating bar chart: {e}")
-            import traceback
-            print(traceback.format_exc())
+    if args.integrated_only:
+        print("\nGenerating only integrated p-distribution charts as requested")
+        
+        # Create integrated distribution plots
+        if csv_results:
+            print("\nCreating integrated p-distribution plots...")
+            try:
+                create_integrated_distribution_plots(csv_results, args.output_dir)
+                print(f"Integrated p-distribution plots created in {args.output_dir}")
+            except Exception as e:
+                print(f"Error creating integrated p-distribution plots: {e}")
+                import traceback
+                print(traceback.format_exc())
+    else:
+        # Create bar chart
+        if tests:
+            print("\nCreating bar chart...")
+            try:
+                create_bar_chart(tests, args.output_dir)
+                print(f"Bar chart created in {args.output_dir}")
+            except Exception as e:
+                print(f"Error creating bar chart: {e}")
+                import traceback
+                print(traceback.format_exc())
 
-    # Create trend charts if we have enough data
-    if len(history) >= 2:
-        print("\nCreating trend charts...")
-        try:
-            create_trend_charts(history, args.output_dir)
-            print(f"Trend charts created in {args.output_dir}")
-        except Exception as e:
-            print(f"Error creating trend charts: {e}")
-            import traceback
-            print(traceback.format_exc())
-    elif len(history) == 1:
-        print("\nOnly one data point available. Run tests again to generate trend charts.")
+        # Create trend charts if we have enough data
+        if len(history) >= 2:
+            print("\nCreating trend charts...")
+            try:
+                create_trend_charts(history, args.output_dir)
+                print(f"Trend charts created in {args.output_dir}")
+            except Exception as e:
+                print(f"Error creating trend charts: {e}")
+                import traceback
+                print(traceback.format_exc())
+        elif len(history) == 1:
+            print("\nOnly one data point available. Run tests again to generate trend charts.")
 
-    # Create distribution plots from CSV data
-    if csv_results:
-        print("\nCreating distribution plots...")
-        try:
-            create_distribution_plot(csv_results, args.output_dir)
-            print(f"Distribution plots created in {args.output_dir}")
-        except Exception as e:
-            print(f"Error creating distribution plots: {e}")
-            import traceback
-            print(traceback.format_exc())
+        # Create distribution plots from CSV data
+        if csv_results:
+            print("\nCreating distribution plots...")
+            try:
+                create_distribution_plot(csv_results, args.output_dir)
+                print(f"Distribution plots created in {args.output_dir}")
+            except Exception as e:
+                print(f"Error creating distribution plots: {e}")
+                import traceback
+                print(traceback.format_exc())
 
-        # Create comparison plots
-        print("\nCreating operation comparison plots...")
-        try:
-            compare_operations(csv_results, args.output_dir)
-            print(f"Operation comparison plots created in {args.output_dir}")
-        except Exception as e:
-            print(f"Error creating comparison plots: {e}")
-            import traceback
-            print(traceback.format_exc())
-            
-        # Create server reload visualization (if data available)
-        print("\nCreating server reload visualization...")
-        try:
-            create_server_reload_visualization(csv_results, args.output_dir)
-            print(f"Server reload visualization created in {args.output_dir}")
-        except Exception as e:
-            print(f"Error creating server reload visualization: {e}")
-            import traceback
-            print(traceback.format_exc())
+            # Create integrated distribution plots
+            print("\nCreating integrated p-distribution plots...")
+            try:
+                create_integrated_distribution_plots(csv_results, args.output_dir)
+                print(f"Integrated p-distribution plots created in {args.output_dir}")
+            except Exception as e:
+                print(f"Error creating integrated p-distribution plots: {e}")
+                import traceback
+                print(traceback.format_exc())
+
+            # Create comparison plots
+            print("\nCreating operation comparison plots...")
+            try:
+                compare_operations(csv_results, args.output_dir)
+                print(f"Operation comparison plots created in {args.output_dir}")
+            except Exception as e:
+                print(f"Error creating comparison plots: {e}")
+                import traceback
+                print(traceback.format_exc())
+                
+            # Create server reload visualization (if data available)
+            print("\nCreating server reload visualization...")
+            try:
+                create_server_reload_visualization(csv_results, args.output_dir)
+                print(f"Server reload visualization created in {args.output_dir}")
+            except Exception as e:
+                print(f"Error creating server reload visualization: {e}")
+                import traceback
+                print(traceback.format_exc())
 
     print("\n" + "="*80)
     print("PERFORMANCE VISUALIZATION COMPLETE")

@@ -57,30 +57,16 @@ To run the WAL performance benchmark:
 cargo test test_multithreaded_wal_performance -- --nocapture
 ```
 
-## Operation Performance Distributions
+## Integrated Performance Distributions
 
-### Insert Operation
-![Insert Performance Distribution](tests/perf_results/insert_performance_distribution.png)
+### Integrated Insert Performance
+![Integrated Insert Performance Distribution](tests/perf_results/integrated_insert_distribution.png)
 
-### Search Operation
-![Search Performance Distribution](tests/perf_results/search_performance_distribution.png)
+### Integrated Search Performance
+![Integrated Search Performance Distribution](tests/perf_results/integrated_search_distribution.png)
 
-### Delete Operation
-![Delete Performance Distribution](tests/perf_results/delete_performance_distribution.png)
-
-### Text Search Operation
-![Text Search Performance Distribution](tests/perf_results/text_search_performance_distribution.png)
-
-## Integration Performance Distributions
-
-### Integration Index
-![Integration Index Distribution](tests/perf_results/integration_index_distribution.png)
-
-### Integration Search
-![Integration Search Distribution](tests/perf_results/integration_search_distribution.png)
-
-### Integration Delete
-![Integration Delete Distribution](tests/perf_results/integration_delete_distribution.png)
+### Integrated Delete Performance
+![Integrated Delete Performance Distribution](tests/perf_results/integrated_delete_distribution.png)
 
 ## Performance Comparisons
 
