@@ -9,8 +9,10 @@ use std::path::PathBuf;
 
 use rkyv;
 use tokio::sync::mpsc;
+use tracing::{trace, info, warn, error, debug};
 
 use crate::fugu::wal::{WAL, WALCMD};
+use crate::fugu::config::{ConfigManager, new_config_manager};
 
 /// Main server struct that manages the Fugu search engine
 ///
@@ -23,6 +25,8 @@ use crate::fugu::wal::{WAL, WALCMD};
 pub struct FuguServer {
     /// Path where server data and WAL are stored
     path: PathBuf,
+    /// Configuration manager for file paths
+    config: ConfigManager,
     /// Write-ahead log for durability
     wal: WAL,
     /// Flag to signal server shutdown
@@ -52,7 +56,9 @@ impl FuguServer {
     ///
     /// A new FuguServer instance
     pub fn new(path: PathBuf) -> Self {
-        Self::new_with_options(path, true)
+        // Create configuration manager
+        let config = new_config_manager(Some(path.clone()));
+        Self::new_with_options(path, config, true)
     }
 
     /// Creates a new FuguServer instance with optional shutdown timeout
@@ -60,25 +66,29 @@ impl FuguServer {
     /// # Arguments
     ///
     /// * `path` - Path where the server will store data and WAL
+    /// * `config` - Configuration manager for file paths
     /// * `use_shutdown_timeout` - Whether to use timeout during shutdown (for testing)
     ///
     /// # Returns
     ///
     /// A new FuguServer instance
-    pub fn new_with_options(path: PathBuf, use_shutdown_timeout: bool) -> Self {
+    pub fn new_with_options(path: PathBuf, config: ConfigManager, use_shutdown_timeout: bool) -> Self {
         // Create channel for WAL commands
         let (tx, mut rx): (mpsc::Sender<WALCMD>, mpsc::Receiver<WALCMD>) = mpsc::channel(1000);
         
+        // Create WAL file path
+        let wal_path = config.base_dir().join("main.wal");
+        
         // Store the receiver in a static variable to allow Clone implementation
-        let wal = WAL::open(path.clone());
+        let wal = WAL::open(wal_path.clone());
         
         // Spawn a task to process WAL messages with proper shutdown handling
         let _sender_clone = tx.clone();
-        let path_clone = path.clone();
+        let wal_path_clone = wal_path.clone();
         let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<bool>(1);
         
         tokio::spawn(async move {
-            let mut wal = WAL::open(path_clone.clone());
+            let mut wal = WAL::open(wal_path_clone.clone());
             let stop = false;
             
             loop {
@@ -89,7 +99,7 @@ impl FuguServer {
                             WALCMD::Put { .. } | WALCMD::Delete { .. } | WALCMD::Patch { .. } => {
                                 match wal.push(msg.into()) {
                                     Ok(_) => {}
-                                    Err(e) => { eprintln!("WAL push error: {:?}", e); }
+                                    Err(e) => { error!("WAL push error: {:?}", e); }
                                 }
                             }
                             WALCMD::DumpWAL { response } => {
@@ -101,12 +111,12 @@ impl FuguServer {
                     },
                     // Shutdown message
                     Some(_) = shutdown_rx.recv() => {
-                        println!("WAL processor received shutdown signal");
+                        info!("WAL processor received shutdown signal");
                         break;
                     },
                     // Channel closed (server dropped)
                     else => {
-                        println!("WAL processor channel closed");
+                        info!("WAL processor channel closed");
                         break;
                     }
                 }
@@ -115,11 +125,12 @@ impl FuguServer {
                     break;
                 }
             }
-            println!("WAL processor shutdown complete");
+            info!("WAL processor shutdown complete");
         });
         
         Self {
             path,
+            config,
             wal,
             stop: false,
             wal_sender: tx,
@@ -171,7 +182,7 @@ impl FuguServer {
     ///
     /// Result indicating success or error during shutdown
     pub async fn down(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Shutting down server and saving all data");
+        info!("Shutting down server and saving all data");
         self.stop = true;
         
         // Send shutdown signal to WAL processor task
@@ -183,7 +194,7 @@ impl FuguServer {
                     response: tokio::sync::oneshot::channel().0 
                 })
             ).await {
-                println!("Warning: Timeout sending final WAL command");
+                warn!("Timeout sending final WAL command");
             }
         } else {
             // Without timeout (for testing)
@@ -202,11 +213,15 @@ mod tests {
     use super::*;
     use crate::fugu::wal;
     use crate::fugu::{node, node::Node};
+    use tempfile;
 
     #[tokio::test]
     pub async fn run_wal_text() -> Result<(), Box<dyn std::error::Error>> {
-        let wal_path = PathBuf::from("./test_wal.bin");
-        let mut server = FuguServer::new_with_options(wal_path, false);
+        // Use a temporary directory for test instead of hardcoded path
+        let test_dir = tempfile::tempdir()?;
+        let wal_path = test_dir.path().join("test_wal.bin");
+        let config = new_config_manager(Some(test_dir.path().to_path_buf()));
+        let mut server = FuguServer::new_with_options(wal_path, config, false);
         let sender = server.get_wal_sender();
         let (tx_shutdown, rx_shutdown) = tokio::sync::oneshot::channel::<bool>();
 

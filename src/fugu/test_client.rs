@@ -24,22 +24,33 @@ async fn test_grpc_client_server_integration() -> Result<(), Box<dyn std::error:
     fs::write(&test_file_path, test_content)?;
 
     // Start the server process in the background
-    println!("Starting server on {}", server_addr);
-    // Get the path to the binary - first try environment variable, then use project root path
-    let binary_path = std::env::var("CARGO_BIN_EXE_fugu").unwrap_or_else(|_| {
-        let current_dir = std::env::current_dir().unwrap();
-        // Navigate to project root (from tests directory if needed)
-        let project_root = if current_dir.ends_with("tests") {
-            current_dir.parent().unwrap().to_path_buf()
-        } else {
-            current_dir
-        };
-        project_root
-            .join("target/debug/fugu")
-            .to_string_lossy()
-            .to_string()
-    });
-    println!("Using binary at: {}", binary_path);
+    tracing::info!("Starting server on {}", server_addr);
+    
+    // Use the binary at the root of the project
+    let binary_path = "/Users/orchid/mch/fuguverse/fugu/target/debug/fugu";
+    
+    tracing::info!("Using binary at: {}", binary_path);
+    
+    // Ensure the binary exists
+    if !std::path::Path::new(&binary_path).exists() {
+        tracing::warn!("Binary not found at path: {}", binary_path);
+        tracing::info!("Building binary...");
+        
+        // Build the binary with an absolute path reference
+        let build_status = std::process::Command::new("cargo")
+            .current_dir("/Users/orchid/mch/fuguverse/fugu")
+            .args(["build", "--bin", "fugu"])
+            .status()?;
+            
+        if !build_status.success() {
+            return Err("Failed to build binary".into());
+        }
+        
+        // Verify the binary exists after building
+        if !std::path::Path::new(&binary_path).exists() {
+            return Err(format!("Binary still not found at {}", binary_path).into());
+        }
+    }
     // Create a data directory for the server
     let data_dir = temp_dir.path().join("data");
     fs::create_dir_all(&data_dir)?;
@@ -85,7 +96,7 @@ async fn test_grpc_client_server_integration() -> Result<(), Box<dyn std::error:
     assert!(search_output.status.success(), "Search failed");
 
     let search_stdout = String::from_utf8(search_output.stdout)?;
-    println!("Search output: {}", search_stdout);
+    tracing::info!("Search output: {}", search_stdout);
 
     // Verify search results contain expected information
     assert!(

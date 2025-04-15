@@ -112,6 +112,7 @@ pub trait Tokenizer {
 }
 
 /// A simple tokenizer that splits text on whitespace
+#[derive(Clone, Copy)]
 pub struct WhitespaceTokenizer;
 
 impl Tokenizer for WhitespaceTokenizer {
@@ -353,7 +354,104 @@ impl InvertedIndex {
 
         // Update the index
         db.insert(term.as_bytes(), serialized.as_slice())?;
-        println!("just inserted {entry}");
+
+        Ok(())
+    }
+    
+    /// Adds a term with multiple positions at once
+    ///
+    /// This is an optimized version of add_term that can add a term with multiple positions
+    /// in a single operation, which is much more efficient for parallel indexing.
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The token to add
+    /// * `positions` - List of all positions for this term
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or error
+    pub async fn add_term_with_positions(
+        &self, 
+        token: Token, 
+        positions: Vec<u64>
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if positions.is_empty() {
+            return Ok(());
+        }
+        
+        let db = self.db.write().await;
+        let term = token.term;
+        let doc_id = token.doc_id;
+
+        // Create or update index entry
+        let entry = match db.get(term.as_bytes())? {
+            Some(existing) => {
+                let mut entry: TermIndex = rkyv::from_bytes::<TermIndex, Error>(&existing)?;
+                match entry.doc_ids.get(&doc_id.to_string()) {
+                    // If there's already positions for this term in this document,
+                    // merge them with the new positions
+                    Some(existing_positions) => {
+                        let mut merged_positions = existing_positions.clone();
+                        
+                        // Add the new positions
+                        merged_positions.extend_from_slice(&positions);
+                        
+                        // Deduplicate and sort
+                        merged_positions.sort();
+                        merged_positions.dedup();
+                        
+                        let k = doc_id.to_string().clone();
+                        entry.doc_ids.insert(k, merged_positions);
+                    }
+                    // Otherwise, create a new entry
+                    None => {
+                        // Sort positions for efficiency in later operations
+                        let mut sorted_positions = positions.clone();
+                        sorted_positions.sort();
+                        sorted_positions.dedup();
+                        
+                        entry.doc_ids.insert(doc_id.to_string(), sorted_positions);
+                    }
+                }
+                // Update frequency - we don't just add positions.len() as we might be deduplicating
+                let new_term_freq = entry.doc_ids.values()
+                    .fold(0, |acc, pos_vec| acc + pos_vec.len() as u32);
+                
+                entry.set_frequency(new_term_freq);
+                entry
+            }
+            None => {
+                // Create a new entry for this term
+                let mut doc_ids: HashMap<String, Vec<u64>> = HashMap::new();
+                
+                // Sort positions for efficiency
+                let mut sorted_positions = positions.clone();
+                sorted_positions.sort();
+                sorted_positions.dedup();
+                
+                doc_ids.insert(doc_id.to_string(), sorted_positions.clone());
+                
+                TermIndex {
+                    term: term.to_string(),
+                    doc_ids,
+                    term_frequency: sorted_positions.len() as u32,
+                }
+            }
+        };
+
+        let serialized = rkyv::to_bytes::<rkyv::rancor::Panic>(&entry)?;
+        
+        // Log to WAL before making the change
+        self.wal_chan
+            .send(WALCMD::Put {
+                key: term.to_string(),
+                value: serialized.to_vec(),
+            })
+            .await?;
+
+        // Update the index
+        db.insert(term.as_bytes(), serialized.as_slice())?;
 
         Ok(())
     }
@@ -397,9 +495,23 @@ impl InvertedIndex {
             *total_docs += 1;
         }
         
-        // Index all tokens in the inverted index for position-based retrieval
+        // Use the optimized batch indexing method for all tokens
+        // Group tokens by term and document ID for batch insertion
+        let mut term_positions_map: std::collections::HashMap<(String, String), Vec<u64>> = std::collections::HashMap::new();
+        
         for token in tokens {
-            self.add_term(token).await?;
+            let key = (token.term.clone(), token.doc_id.clone());
+            term_positions_map.entry(key).or_default().push(token.position);
+        }
+        
+        // Index terms with their positions
+        for ((term, doc_id), positions) in term_positions_map {
+            let token = Token {
+                term,
+                doc_id,
+                position: 0, // This value doesn't matter for batch insertion
+            };
+            self.add_term_with_positions(token, positions).await?;
         }
         
         // Record indexing performance
@@ -431,7 +543,7 @@ impl InvertedIndex {
                 // Remove the term if no documents reference it
                 db.remove(term.as_bytes())?;
             } else {
-                let serialized = rkyv::to_bytes::<Error>(&entry)?;
+                let serialized = rkyv::to_bytes::<rkyv::rancor::Panic>(&entry)?;
 
                 // Log update to WAL
                 self.wal_chan

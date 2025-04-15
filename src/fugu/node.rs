@@ -7,10 +7,14 @@
 /// - Supports concurrent operations
 use crate::fugu::index::{InvertedIndex, Token, WhitespaceTokenizer};
 use crate::fugu::wal::{WALCMD, WALOP};
+use crate::fugu::config::{ConfigManager, new_config_manager};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use std::io::SeekFrom;
 use tokio::fs;
 use tokio::sync::mpsc;
+use tokio::io::{AsyncSeekExt, AsyncReadExt};
+use tracing::{trace, info, warn, error, debug};
 
 /// Job types that a Node can process
 /// 
@@ -29,8 +33,8 @@ pub enum NodeJob {}
 pub struct Node {
     /// Unique namespace identifier for this node
     namespace: String,
-    /// Path to configuration and index storage
-    config_path: PathBuf,
+    /// Configuration manager for file paths
+    config: ConfigManager,
     /// How often to check for jobs (in milliseconds)
     frequency: u16,
     /// Channel for sending WAL commands
@@ -57,15 +61,15 @@ impl Node {
     ///
     /// A new Node instance
     pub fn new(namespace: String, config_path: Option<PathBuf>, wal_chan: mpsc::Sender<WALCMD>) -> Self {
-        // Set default config path if not provided
-        let config_path = config_path.unwrap_or_else(|| {
-            let home_dir = std::env::var("HOME").unwrap_or_else(|_| String::from("/tmp"));
-            PathBuf::from(home_dir).join(".fugu")
-        });
+        // Create config manager with optional custom path
+        let config = new_config_manager(config_path);
+        
+        // Ensure namespace directory exists
+        let _ = config.ensure_namespace_dir(&namespace);
         
         Node {
             namespace,
-            config_path,
+            config,
             wal_chan,
             frequency: 1000, //check every second
             shutdown: false,
@@ -80,7 +84,7 @@ impl Node {
     ///
     /// Path to the index directory
     fn get_index_path(&self) -> PathBuf {
-        self.config_path.join(format!("{}_index", self.namespace))
+        self.config.namespace_index_path(&self.namespace)
     }
     
     /// Returns the index path as a string
@@ -142,20 +146,118 @@ impl Node {
             .ok_or("Invalid file path")?
             .to_string();
         
-        // Read the file content
-        let content = fs::read_to_string(&path).await?;
-        
         // Index the content if the index is loaded
         if let Some(index) = &self.inverted_index {
+            // Open the file for streaming
+            let file = tokio::fs::File::open(&path).await?;
+            
+            // Create a buffered reader with a 8KB buffer size
+            // This allows us to incrementally read large files without loading them entirely in memory
+            let mut reader = tokio::io::BufReader::with_capacity(8192, file);
+            
             // Create a tokenizer
             let tokenizer = WhitespaceTokenizer;
             
-            // Index the document
-            index.index_document(&doc_id, &content, &tokenizer).await?;
+            // Buffer to accumulate file content as we read it
+            let mut content = String::new();
+            
+            // Stream the file content
+            // For extremely large files, let's process chunks instead of loading everything in memory
+            let file_size = path.metadata()?.len();
+            const MAX_MEMORY_SIZE: u64 = 100 * 1024 * 1024; // 100 MB threshold
+            
+            if file_size > MAX_MEMORY_SIZE {
+                // Process large file in chunks
+                info!("Processing large file in chunks for indexing (size: {} bytes)", file_size);
+                
+                let mut buffer = [0; 8192]; // 8KB buffer
+                let mut chunk = String::new();
+                const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB chunks for processing
+                let mut processed_any = false;
+                
+                loop {
+                    match reader.read(&mut buffer).await {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            // Append bytes to content, handling potential non-UTF8 content
+                            match std::str::from_utf8(&buffer[..n]) {
+                                Ok(s) => {
+                                    chunk.push_str(s);
+                                    processed_any = true;
+                                },
+                                Err(_) => {
+                                    // Try to decode the bytes using a more lenient approach
+                                    let lossy_str = String::from_utf8_lossy(&buffer[..n]);
+                                    chunk.push_str(&lossy_str);
+                                    processed_any = true;
+                                    warn!("Using lossy UTF-8 conversion for non-UTF8 data at position {}", chunk.len());
+                                }
+                            }
+                            
+                            // Process chunk if it's large enough
+                            if chunk.len() >= CHUNK_SIZE {
+                                // Index this chunk
+                                index.index_document(&doc_id, &chunk, &tokenizer).await?;
+                                
+                                // Clear chunk but keep some overlap for term continuity
+                                let overlap = chunk.split_whitespace().take(10).collect::<Vec<_>>().join(" ");
+                                chunk.clear();
+                                chunk.push_str(&overlap);
+                            }
+                        }
+                        Err(e) => return Err(Box::new(e)),
+                    }
+                }
+                
+                // Index final chunk if not empty
+                if !chunk.is_empty() {
+                    index.index_document(&doc_id, &chunk, &tokenizer).await?;
+                }
+                
+                // If we weren't able to process any data (e.g., completely binary file)
+                // create a minimal document record so it's at least searchable by filename
+                if !processed_any {
+                    warn!("File appears to be binary or non-text. Creating minimal document record.");
+                    let minimal_text = format!("Binary file {}", doc_id);
+                    index.index_document(&doc_id, &minimal_text, &tokenizer).await?;
+                }
+            } else {
+                // For smaller files, try to read the entire content at once
+                match reader.read_to_string(&mut content).await {
+                    Ok(_) => {
+                        // Successfully read as string, index it
+                        index.index_document(&doc_id, &content, &tokenizer).await?;
+                    },
+                    Err(_) => {
+                        // If it fails (likely binary content), use a different approach
+                        warn!("Couldn't read file as text, using lossy UTF-8 conversion");
+                        
+                        // Reset the file position to the beginning
+                        reader.seek(SeekFrom::Start(0)).await?;
+                        
+                        // Use a buffer and lossy conversion for binary content
+                        let mut buffer = Vec::with_capacity(file_size as usize);
+                        reader.read_to_end(&mut buffer).await?;
+                        
+                        // Convert bytes to string with lossy conversion
+                        let lossy_content = String::from_utf8_lossy(&buffer).to_string();
+                        
+                        if !lossy_content.trim().is_empty() {
+                            // If we got some usable text, index it
+                            index.index_document(&doc_id, &lossy_content, &tokenizer).await?;
+                        } else {
+                            // If the file is truly binary with no usable text, create a minimal record
+                            warn!("File appears to be binary. Creating minimal document record.");
+                            let minimal_text = format!("Binary file {}", doc_id);
+                            index.index_document(&doc_id, &minimal_text, &tokenizer).await?;
+                        }
+                    }
+                }
+            }
             
             // Get the elapsed time
             let elapsed = start_time.elapsed();
-            println!("Indexed file '{}' in {:?}", path.display(), elapsed);
+            info!(path=%path.display(), elapsed=?elapsed, "Indexed file");
             
             Ok(elapsed)
         } else {
@@ -176,7 +278,7 @@ impl Node {
         let msg_clone = msg.clone();
         match self.wal_chan.send(msg.into()).await {
             Ok(_) => {
-                println!("{:?}", msg_clone);
+                debug!("{:?}", msg_clone);
                 Ok(())
             }
             Err(e) => Err(e),
@@ -273,7 +375,7 @@ impl Node {
         ).await;
         
         self.inverted_index = Some(index);
-        println!("Loaded index from {}", index_path.display());
+        info!(path=%index_path.display(), "Loaded index");
         Ok(())
     }
     
@@ -291,9 +393,27 @@ impl Node {
         if let Some(index) = self.inverted_index.take() {
             // Flush any pending changes to disk
             index.flush().await?;
-            println!("Unloaded index from {}", self.get_index_path().display());
+            info!(path=%self.get_index_path().display(), "Unloaded index");
         }
         Ok(())
+    }
+    
+    /// Checks if the index is loaded
+    ///
+    /// # Returns
+    ///
+    /// Boolean indicating if the index is loaded
+    pub fn has_index(&self) -> bool {
+        self.inverted_index.is_some()
+    }
+    
+    /// Provides access to the inverted index if loaded
+    ///
+    /// # Returns
+    ///
+    /// Option containing a reference to the inverted index if loaded
+    pub fn get_index(&self) -> Option<&InvertedIndex> {
+        self.inverted_index.as_ref()
     }
 }
 
@@ -557,7 +677,7 @@ mod tests {
             if path.is_file() && path.extension().map_or(false, |ext| ext == "txt") {
                 file_count += 1;
                 let filename = path.file_name().unwrap().to_string_lossy();
-                println!("Found file: {}", filename);
+                debug!(filename=%filename, "Found file");
             }
         }
         

@@ -638,17 +638,19 @@ mod tests {
         index_dir.close().unwrap();
     }
 
+    // #[ignore] // Test is failing due to lock conflicts in index DB
     #[tokio::test]
-    #[ignore] // Disabled flush tests for visualization and testing
     async fn test_index_flush() {
-        // Create temporary directory
+        // Create temporary directory using ConfigManager instead of direct path
+        use crate::fugu::config::new_config_manager;
+        
         let temp_dir = tempdir().unwrap();
-        let index_path = temp_dir
-            .path()
-            .join("flush_test")
-            .to_str()
-            .unwrap()
-            .to_string();
+        let config = new_config_manager(Some(temp_dir.path().to_path_buf()));
+        
+        // Create a unique path for the flush test index
+        let flush_dir = temp_dir.path().join("flush_index");
+        std::fs::create_dir_all(&flush_dir).unwrap();
+        let index_path = flush_dir.to_str().unwrap().to_string();
 
         // Create a WAL channel for the index
         let (tx, _rx) = mpsc::channel::<WALCMD>(100);
@@ -669,6 +671,12 @@ mod tests {
 
         // Explicitly flush the index
         index.flush().await.unwrap();
+        
+        // Drop the index to release any locks
+        drop(index);
+        
+        // Wait briefly to ensure resources are released
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // To verify flush worked, we'll create a new index with the same path
         // and check if the data is still there
@@ -693,6 +701,7 @@ mod tests {
         }
 
         // Clean up
+        drop(index2);
         temp_dir.close().unwrap();
     }
 

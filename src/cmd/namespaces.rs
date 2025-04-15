@@ -5,12 +5,11 @@ use crate::cmd::commands::{
 use crate::fugu::grpc::{client_index, client_delete, client_search};
 use std::path::PathBuf;
 use std::convert::TryInto;
-use std::io::{self, Write};
 
 // Default gRPC server address
 const DEFAULT_GRPC_ADDR: &str = "http://127.0.0.1:50051";
 
-pub async fn run(ns: NamespaceCommand) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(ns: NamespaceCommand) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let namespace = ns.namespace;
 
     // Use namespace in the address for future scalability
@@ -70,7 +69,7 @@ pub async fn run(ns: NamespaceCommand) -> Result<(), Box<dyn std::error::Error>>
 pub async fn handle_index_command(
     cmd: NamespaceIndexCommand, 
     namespace: &str
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Indexing file in namespace `{namespace}`...");
     
     // Index the file using the client, passing the namespace
@@ -83,7 +82,7 @@ pub async fn handle_index_command(
 pub async fn handle_search_command(
     cmd: NamespaceSearchCommand,
     namespace: &str
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Searching in namespace `{namespace}`...");
     let q = cmd.query.clone();
     println!("query \"{q}\"");
@@ -104,7 +103,7 @@ pub async fn handle_search_command(
 pub async fn handle_delete_command(
     cmd: NamespaceDeleteCommand,
     namespace: &str
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Deleting from namespace `{namespace}`...");
     
     // Delete the document

@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 pub mod server;
 use server::FuguServer;
+pub mod config;
+use config::ConfigManager;
 
 /// Creates a new Fugu server instance
 ///
@@ -21,6 +23,16 @@ use server::FuguServer;
 /// Returns a new `FuguServer` instance
 pub fn new(path: PathBuf) -> FuguServer {
     FuguServer::new(path)
+}
+
+/// Creates a new Fugu server instance with the default configuration path (~/.fugu)
+///
+/// # Returns
+///
+/// Returns a new `FuguServer` instance
+pub fn new_default() -> FuguServer {
+    let config = ConfigManager::new(None);
+    FuguServer::new(config.base_dir().to_path_buf())
 }
 
 pub mod node;

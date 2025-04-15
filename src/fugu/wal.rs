@@ -104,6 +104,13 @@ impl WAL {
     ///
     /// A new WAL instance
     pub fn open(path: PathBuf) -> WAL {
+        // Ensure parent directories exist
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        
         let s = path.into_os_string().into_string().unwrap();
         return WAL {
             path: s,
@@ -113,10 +120,23 @@ impl WAL {
     pub fn save(&self) -> Result<(), IoError> {
         let path = PathBuf::from(self.path.clone());
         
+        // Ensure the parent directory exists
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        
         // Check if the path is a directory
         if path.is_dir() {
             // If it's a directory, create a WAL file inside it
             let wal_file = path.join("wal.bin");
+            // Ensure directory exists (should already be true from above, but double-checking)
+            if let Some(parent) = wal_file.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
             let buf = rkyv::to_bytes::<rkyv::rancor::Panic>(&self.log).unwrap();
             fs::write(wal_file, buf)?;
         } else {
