@@ -106,8 +106,8 @@ pub async fn handle_delete_command(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Deleting from namespace `{namespace}`...");
     
-    // Delete the document
-    client_delete(cmd.addr, cmd.location).await?;
+    // Delete the document with namespace
+    client_delete(cmd.addr, cmd.location, Some(namespace.to_string())).await?;
     
     Ok(())
 }

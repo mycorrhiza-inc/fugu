@@ -1,10 +1,11 @@
 use clap::ArgMatches;
-use std::{fs::File, path::PathBuf};
+use std::fs::File;
 use tracing;
 use tracing_subscriber::{fmt, prelude::*};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use crate::fugu::config::new_config_manager;
 
+#[allow(dead_code)]
 pub fn cmd_namespace(m: ArgMatches) -> Option<String> {
     m.get_one::<String>("namespace").cloned()
 }
