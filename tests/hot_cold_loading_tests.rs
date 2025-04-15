@@ -2,7 +2,7 @@ use rand::Rng;
 use std::env;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -71,32 +71,90 @@ fn test_hot_cold_loading_performance() {
     let server_addr = format!("127.0.0.1:{}", port);
     let server_url = format!("http://{}", server_addr);
 
-    // Create test files with varying content
-    let num_files = 100; // Higher number to create significant data volume
+    // Use a custom test directory path if provided
+    let test_file_path = env::var("FUGU_TEST_PATH").unwrap_or_default();
     let mut file_paths = Vec::new();
 
-    for i in 0..num_files {
-        // Create file with varied content to exercise index
-        let filename = format!("file_{}.txt", i);
-        let path = temp_dir.path().join(&filename);
-
-        // Vary content to create a realistic index
-        let content = if i % 3 == 0 {
-            format!("Document {} contains technical terms like algorithm, database, and performance testing", i)
-        } else if i % 3 == 1 {
-            format!(
-                "File {} discusses user interfaces, web applications and design patterns",
-                i
-            )
+    if !test_file_path.is_empty() {
+        let path = Path::new(&test_file_path);
+        if path.is_dir() {
+            // If it's a directory, add all text files
+            println!("Using directory for test data: {}", test_file_path);
+            for entry in fs::read_dir(path).expect("Failed to read test directory") {
+                if let Ok(entry) = entry {
+                    let file_path = entry.path();
+                    if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "txt" || ext == "md") {
+                        file_paths.push(file_path);
+                    }
+                }
+            }
+        } else if path.is_file() {
+            // If it's a single file
+            println!("Using single file for test data: {}", test_file_path);
+            file_paths.push(path.to_path_buf());
         } else {
-            format!("Content {} relates to system architecture, networking protocols and security measures", i)
-        };
+            panic!("Provided FUGU_TEST_PATH does not exist or is not accessible");
+        }
+    } else {
+        // Create test files with varying content
+        let num_files = 100; // Higher number to create significant data volume
+        
+        for i in 0..num_files {
+            // Create file with varied content to exercise index
+            let filename = format!("file_{}.txt", i);
+            let path = temp_dir.path().join(&filename);
 
-        fs::write(&path, &content).expect("Failed to write test file");
-        file_paths.push(path);
+            // Vary content to create a realistic index
+            let content = if i % 3 == 0 {
+                format!("Document {} contains technical terms like algorithm, database, and performance testing", i)
+            } else if i % 3 == 1 {
+                format!(
+                    "File {} discusses user interfaces, web applications and design patterns",
+                    i
+                )
+            } else {
+                format!("Content {} relates to system architecture, networking protocols and security measures", i)
+            };
+
+            fs::write(&path, &content).expect("Failed to write test file");
+            file_paths.push(path);
+        }
     }
 
-    println!("Created {} test files", num_files);
+    println!("Using {} test files", file_paths.len());
+
+    // Extract terms for search queries from test files
+    let mut search_terms = Vec::new();
+    let sample_files = file_paths.iter().take(5).collect::<Vec<_>>();
+    for path in sample_files {
+        if let Ok(mut file) = File::open(path) {
+            let mut content = String::new();
+            if file.read_to_string(&mut content).is_ok() {
+                // Extract some significant words for search tests
+                let words: Vec<&str> = content
+                    .split_whitespace()
+                    .filter(|word| word.len() > 4) // Only use words with 5+ chars
+                    .take(5)
+                    .collect();
+                
+                search_terms.extend(words.into_iter().map(String::from));
+            }
+        }
+    }
+
+    // If we couldn't extract enough terms, use these defaults
+    if search_terms.len() < 10 {
+        search_terms.extend(vec![
+            "document", "technical", "algorithm", "database",
+            "performance", "interface", "application", "design",
+            "pattern", "architecture", "network", "protocol", "security"
+        ].into_iter().map(String::from));
+    }
+
+    // Ensure we have unique terms
+    search_terms.sort();
+    search_terms.dedup();
+    println!("Using search terms: {:?}", search_terms);
 
     // ======== PHASE 1: INITIAL SERVER STARTUP AND INDEXING ========
     println!("PHASE 1: Initial server startup and indexing");
@@ -131,7 +189,7 @@ fn test_hot_cold_loading_performance() {
 
         // Print progress only occasionally
         if i % 20 == 0 {
-            println!("Indexed {}/{} files", i, num_files);
+            println!("Indexed {}/{} files", i, file_paths.len());
         }
     }
 
@@ -184,29 +242,14 @@ fn test_hot_cold_loading_performance() {
     let num_operations = 50; // Number of operations to test
     let mut cold_search_durations = Vec::with_capacity(num_operations);
 
-    // Define a variety of search terms to test different aspects of the index
-    let search_terms = [
-        "document",
-        "technical",
-        "algorithm",
-        "database",
-        "performance",
-        "interface",
-        "application",
-        "design",
-        "pattern",
-        "architecture",
-        "network",
-        "protocol",
-        "security",
-    ];
+    // Use the search terms we extracted or generated earlier
 
     // Measure cold search performance
     println!("Measuring cold search performance");
     for i in 0..num_operations {
         // Use different search terms
         let term_index = i % search_terms.len();
-        let query = search_terms[term_index];
+        let query = &search_terms[term_index];
 
         // Measure search time
         let start = Instant::now();
@@ -254,7 +297,7 @@ fn test_hot_cold_loading_performance() {
     for i in 0..num_operations {
         // Use different search terms
         let term_index = i % search_terms.len();
-        let query = search_terms[term_index];
+        let query = &search_terms[term_index];
 
         // Measure search time
         let start = Instant::now();
