@@ -2,7 +2,7 @@ use crate::cmd::commands::{
     NamespaceCommand, NamespaceSubcommands,
     NamespaceIndexCommand, NamespaceSearchCommand, NamespaceDeleteCommand, NamespaceListCommand
 };
-use crate::fugu::grpc::{client_index, client_delete, client_search};
+use crate::fugu::grpc::utils::{client_index, client_delete, client_search};
 use std::path::PathBuf;
 use std::convert::TryInto;
 
@@ -38,12 +38,12 @@ pub async fn run(ns: NamespaceCommand) -> Result<(), Box<dyn std::error::Error +
             if ns.status {
                 println!("checking status of namespace `{namespace}`...");
                 // Use empty search to check if server is responding
-                client_search(grpc_addr, String::new(), 0, 0, None).await?;
+                client_search(grpc_addr, String::new(), 0, 0, namespace.clone()).await?;
             } else if ns.init {
                 println!("initializing namespace `{namespace}`...");
                 // TODO: Implement initialization through the gRPC client
                 // For now, just verify the connection
-                client_search(grpc_addr, String::new(), 0, 0, None).await?;
+                client_search(grpc_addr, String::new(), 0, 0, namespace.clone()).await?;
                 println!("Namespace `{namespace}` initialized successfully");
             } else if ns.reindex {
                 println!("reindexing namespace `{namespace}`...");
@@ -59,7 +59,7 @@ pub async fn run(ns: NamespaceCommand) -> Result<(), Box<dyn std::error::Error +
             } else {
                 println!("namespace logic at `{namespace}`...");
                 // Default operation: show namespace info
-                client_search(grpc_addr, String::new(), 0, 0, None).await?;
+                client_search(grpc_addr, String::new(), 0, 0, namespace.clone()).await?;
                 println!("Connected to namespace `{namespace}` successfully");
             }
         }
@@ -76,7 +76,7 @@ pub async fn handle_index_command(
     println!("Indexing file in namespace `{namespace}`...");
     
     // Index the file using the client, passing the namespace
-    let result = client_index(cmd.addr, cmd.file, Some(namespace.to_string())).await?;
+    let result = client_index(cmd.addr, cmd.file, namespace.to_string()).await?;
     
     // Display indexing status information to the user
     println!("Indexing completed successfully:");
@@ -104,7 +104,7 @@ pub async fn handle_search_command(
         cmd.query, 
         cmd.limit.try_into().unwrap_or(10), 
         cmd.offset.try_into().unwrap_or(0),
-        Some(namespace.to_string())
+        namespace.to_string()
     ).await?;
     
     Ok(())
@@ -118,7 +118,7 @@ pub async fn handle_delete_command(
     println!("Deleting from namespace `{namespace}`...");
     
     // Delete the document with namespace
-    client_delete(cmd.addr, cmd.location, Some(namespace.to_string())).await?;
+    client_delete(cmd.addr, cmd.file, namespace.to_string()).await?;
     
     Ok(())
 }
@@ -128,6 +128,13 @@ pub async fn handle_list_command(
     cmd: NamespaceListCommand,
     namespace: &str
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // If all_namespaces flag is set, list all available namespaces
+    if cmd.all_namespaces {
+        println!("Listing all available namespaces...");
+        list_all_namespaces().await?;
+        return Ok(());
+    }
+    
     println!("Listing documents in namespace `{namespace}`...");
     
     // First try an empty query to list all documents in the namespace
@@ -137,7 +144,7 @@ pub async fn handle_list_command(
         String::new(), 
         cmd.limit.try_into().unwrap_or(100), 
         cmd.offset.try_into().unwrap_or(0),
-        Some(namespace.to_string())
+        namespace.to_string()
     ).await?;
     
     // Then try with a wildcard-like broad search for diagnostic purposes
@@ -147,8 +154,53 @@ pub async fn handle_list_command(
         "a".to_string(), 
         cmd.limit.try_into().unwrap_or(100), 
         cmd.offset.try_into().unwrap_or(0),
-        Some(namespace.to_string())
+        namespace.to_string()
     ).await?;
+    
+    Ok(())
+}
+
+// List all available namespaces
+async fn list_all_namespaces() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::fugu::config::new_config_manager;
+    
+    
+    let config_mgr = new_config_manager(None);
+    let namespaces_dir = config_mgr.base_dir().join("namespaces");
+    
+    if !namespaces_dir.exists() {
+        println!("No namespaces found");
+        return Ok(());
+    }
+    
+    println!("Available namespaces:");
+    let entries = std::fs::read_dir(namespaces_dir)?;
+    
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if path.is_dir() {
+            // Check if it has a .fugu directory (valid namespace)
+            if path.join(".fugu").exists() {
+                let name = path.file_name().unwrap().to_string_lossy();
+                
+                // Check for consolidated file
+                let index_path = path.join(".fugu").join("index");
+                let consolidated_path = index_path.join("consolidated.rkyv");
+                let consolidated = if consolidated_path.exists() { "✓" } else { "✗" };
+                
+                // Check if the namespace has a cache directory - this would indicate old structure
+                let cache_path = index_path.join("cache");
+                let using_old_structure = cache_path.exists();
+                
+                println!("- {} [Consolidated: {}, Direct Documents: {}]", 
+                         name, 
+                         consolidated,
+                         if using_old_structure { "✗" } else { "✓" });
+            }
+        }
+    }
     
     Ok(())
 }

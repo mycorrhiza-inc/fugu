@@ -1,5 +1,4 @@
 use clap::ArgMatches;
-use std::fs::File;
 use tracing;
 use tracing_subscriber::{fmt, prelude::*};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
@@ -14,14 +13,27 @@ pub fn init_logging() {
     let config = new_config_manager(None);
     let log_dir = config.logs_dir();
     
+    eprintln!("Initializing logging system with log directory: {:?}", log_dir);
+    
     // Create the directory if it doesn't exist
-    let _ = std::fs::create_dir_all(&log_dir);
+    match std::fs::create_dir_all(&log_dir) {
+        Ok(_) => eprintln!("Log directory created or already exists: {:?}", log_dir),
+        Err(e) => eprintln!("Warning: Failed to create log directory: {}", e),
+    }
     
-    let log_file_path = log_dir.join(format!("{}.log", 
-        chrono::Local::now().format("%Y-%m-%d")
-    ));
+    // Create log file path with timestamp for uniqueness
+    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+    let log_file_name = format!("fugu_{}.log", timestamp);
+    let log_file_path = log_dir.join(&log_file_name);
     
-    let file = match File::create(&log_file_path) {
+    eprintln!("Using log file: {:?}", log_file_path);
+    
+    // Attempt to open the file with explicit options
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_file_path) {
         Ok(file) => {
             eprintln!("Logging to {}", log_file_path.display());
             file

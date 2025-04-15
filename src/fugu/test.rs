@@ -3,13 +3,11 @@ mod tests {
     use crate::cmd::commands::AddCommand;
     use clap::Parser;
     use crate::fugu::index::{InvertedIndex, Token, WhitespaceTokenizer};
-    use crate::fugu::wal::WALCMD;
     use std::fs::File;
     use std::io::Write;
     use std::path::Path;
     use std::time::Duration;
     use tempfile::tempdir;
-    use tokio::sync::mpsc;
 
     fn tokenize(term: &str, docid: &str, position: u64) -> Token {
         Token {
@@ -19,34 +17,6 @@ mod tests {
         }
     }
     
-    /// Creates a WAL channel with a dedicated consumer task to prevent transport errors
-    /// 
-    /// Returns:
-    /// - The sender handle to pass to components that need to send WAL commands
-    /// - A JoinHandle for the consumer task (should be aborted at the end of the test)
-    /// 
-    /// IMPORTANT: Tests using this must call `abort()` on the returned JoinHandle 
-    /// before completion to avoid transport errors and ensure proper cleanup.
-    async fn create_test_wal_channel() -> (mpsc::Sender<WALCMD>, tokio::task::JoinHandle<()>) {
-        let (tx, mut rx) = mpsc::channel::<WALCMD>(100);
-        
-        // Spawn a background task to consume all WAL messages
-        let task_handle = tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                // Just acknowledge receipt to keep the channel healthy
-                match msg {
-                    WALCMD::Put { .. } => {},
-                    WALCMD::Delete { .. } => {},
-                    WALCMD::Patch { .. } => {},
-                    WALCMD::DumpWAL { .. } => {},
-                    WALCMD::FlushWAL { .. } => {},
-                }
-            }
-        });
-        
-        (tx, task_handle)
-    }
-
     // Helper function to create a temporary markdown file with content
     fn create_markdown_file(dir: &Path, name: &str, content: &str) -> String {
         let file_path = dir.join(format!("{}.md", name));
@@ -104,9 +74,6 @@ mod tests {
         let _file3_path = create_markdown_file(temp_path, "file3", file3_content);
         let _file4_path = create_markdown_file(temp_path, "file4", file4_content);
         let _file5_path = create_markdown_file(temp_path, "file5", file5_content);
-
-        // Create a WAL channel for the index
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
 
         // Create a temporary directory for the index
         let index_dir = tempdir().unwrap();
@@ -207,9 +174,6 @@ mod tests {
         // Create temporary directory for test files
         let temp_dir = tempdir().unwrap();
         let _temp_path = temp_dir.path();
-
-        // Create a WAL channel for the index
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
 
         // Create a temporary directory for the index
         let index_dir = tempdir().unwrap();
@@ -338,9 +302,6 @@ mod tests {
     ) {
         use rand;
         use rand::{rngs::ThreadRng, seq::SliceRandom, Rng};
-
-        // Create a WAL channel for the index
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
 
         // Create a temporary directory for the index
         let index_dir = tempdir().unwrap();
@@ -681,15 +642,6 @@ mod tests {
         std::fs::create_dir_all(&flush_dir).unwrap();
         let index_path = flush_dir.to_str().unwrap().to_string();
 
-        // -----------------------------------------------------------------------
-        // IMPORTANT: Create a WAL channel with a dedicated consumer task
-        // -----------------------------------------------------------------------
-        // Without this consumer, we get "transport error" because WAL messages
-        // sent by the index operations would have no receiver, causing the channel
-        // to close prematurely.
-        // -----------------------------------------------------------------------
-        let (tx, wal_processor) = create_test_wal_channel().await;
-
         // Create the inverted index
         let index = InvertedIndex::new(&index_path).await;
 
@@ -714,14 +666,6 @@ mod tests {
         // This helps avoid potential race conditions between index instances
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // -----------------------------------------------------------------------
-        // Create a second WAL channel for the verification index
-        // -----------------------------------------------------------------------
-        // Again, a dedicated task is needed to consume WAL messages and prevent
-        // "transport error" when we drop the index at the end of the test.
-        // -----------------------------------------------------------------------
-        let (tx2, wal_processor2) = create_test_wal_channel().await;
-        
         // Create a new index instance pointing to the same storage location
         let index2 = InvertedIndex::new(&index_path).await;
 
@@ -744,16 +688,6 @@ mod tests {
 
         // Clean up resources
         drop(index2);
-        
-        // -----------------------------------------------------------------------
-        // IMPORTANT: Properly clean up the WAL processor tasks
-        // -----------------------------------------------------------------------
-        // We must explicitly abort these tasks since they're in an infinite loop
-        // waiting for messages. Without this cleanup, the tasks would continue
-        // running and potentially interfere with other tests.
-        // -----------------------------------------------------------------------
-        wal_processor.abort();
-        wal_processor2.abort();
         
         // Clean up the temporary directory
         temp_dir.close().unwrap();
@@ -792,9 +726,6 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-
-        // Create a WAL channel for the index
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
 
         // Create the inverted index
         let index = InvertedIndex::new(&index_path).await;

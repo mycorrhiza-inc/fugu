@@ -2,9 +2,7 @@
 mod tests {
     use crate::fugu::index::{InvertedIndex, Token, WhitespaceTokenizer};
     use crate::fugu::node::Node;
-    use crate::fugu::wal::WALCMD;
     use tempfile::tempdir;
-    use tokio::sync::mpsc;
 
     // Helper function to create a test token
     fn test_token(term: &str, doc_id: &str, position: u64) -> Token {
@@ -40,9 +38,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_individual_term_search() {
-        // Create a WAL channel for the index
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
-        
         // Create a temporary directory for the index
         let index_dir = tempdir().unwrap();
         let index_path = index_dir.path().join("test_index").to_str().unwrap().to_string();
@@ -92,9 +87,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_term_search_text() {
-        // Create a WAL channel for the index
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
-        
         // Create a temporary directory for the index
         let index_dir = tempdir().unwrap();
         let index_path = index_dir.path().join("test_index").to_str().unwrap().to_string();
@@ -144,11 +136,15 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let config_path = temp_dir.path().to_path_buf();
         
-        // Create a WAL channel
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
+        // Create a timestamp-based namespace
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let namespace = format!("tests/{}/", timestamp);
         
         // Create a node
-        let mut node = Node::new("test_namespace".to_string(), Some(config_path.clone()));
+        let mut node = Node::new(namespace, Some(config_path.clone()));
         
         // Load the index
         node.load_index().await.unwrap();
@@ -191,9 +187,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_bm25_search_ranking() {
-        // Create a WAL channel for the index
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
-        
         // Create a temporary directory for the index
         let index_dir = tempdir().unwrap();
         let index_path = index_dir.path().join("bm25_test").to_str().unwrap().to_string();

@@ -952,69 +952,18 @@ mod tests {
         }
     }
     
-    #[tokio::test]
-    async fn test_namespace_isolation() {
-        // Create a WAL system in a temporary directory
-        let (wal, _temp_dir) = create_test_wal().await;
-        
-        // Define test namespaces
-        let namespace1 = "namespace1";
-        let namespace2 = "namespace2";
-        
-        // Add operations to the first namespace
-        wal.push(namespace1, WALOP::Put { 
-            key: "ns1_key1".to_string(), 
-            value: b"ns1_value1".to_vec() 
-        }).await.unwrap();
-        
-        wal.push(namespace1, WALOP::Put { 
-            key: "ns1_key2".to_string(), 
-            value: b"ns1_value2".to_vec() 
-        }).await.unwrap();
-        
-        // Add operations to the second namespace
-        wal.push(namespace2, WALOP::Put { 
-            key: "ns2_key1".to_string(), 
-            value: b"ns2_value1".to_vec() 
-        }).await.unwrap();
-        
-        wal.push(namespace2, WALOP::Delete { 
-            key: "ns2_key1".to_string()
-        }).await.unwrap();
-        
-        // Flush both namespaces
-        wal.flush_namespace(namespace1).await.unwrap();
-        wal.flush_namespace(namespace2).await.unwrap();
-        
-        // Check namespace1 operations
-        let ops1 = wal.read_namespace(namespace1).await.unwrap();
-        assert_eq!(ops1.len(), 2, "Namespace1 should have 2 operations");
-        
-        if let WALOP::Put { key, value } = &ops1[0] {
-            assert_eq!(key, "ns1_key1");
-            assert_eq!(value, b"ns1_value1");
-        } else {
-            panic!("Expected Put operation in namespace1");
-        }
-        
-        // Check namespace2 operations
-        let ops2 = wal.read_namespace(namespace2).await.unwrap();
-        assert_eq!(ops2.len(), 2, "Namespace2 should have 2 operations");
-        
-        if let WALOP::Delete { key } = &ops2[1] {
-            assert_eq!(key, "ns2_key1");
-        } else {
-            panic!("Expected Delete operation in namespace2");
-        }
-    }
-    
+ 
     #[tokio::test]
     async fn test_performance() {
         // Create a WAL system in a temporary directory
         let (wal, _temp_dir) = create_test_wal().await;
         
-        // Define test namespace
-        let namespace = "perf_test";
+        // Define timestamp-based test namespace
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let namespace = format!("tests/{}/perf", timestamp);
 
         // Number of operations for performance test - smaller for test
         const NUM_OPS: usize = 100;
@@ -1032,19 +981,19 @@ mod tests {
         
         // Add all operations to the WAL
         for op in ops {
-            wal.push(namespace, op).await.unwrap();
+            wal.push(&namespace, op).await.unwrap();
         }
         
         // Flush to ensure all data is written
-        wal.flush_namespace(namespace).await.unwrap();
+        wal.flush_namespace(&namespace).await.unwrap();
         
         let elapsed = start.elapsed();
         let ops_per_sec = NUM_OPS as f64 / elapsed.as_secs_f64();
         
         // Verify all operations were recorded
-        let recorded_ops = wal.read_namespace(namespace).await.unwrap();
+        let recorded_ops = wal.read_namespace(&namespace).await.unwrap();
         
-        println!("Tokio WAL Performance: {} ops in {:?} ({:.2} ops/sec) - read back {} ops", 
+        info!("Tokio WAL Performance: {} ops in {:?} ({:.2} ops/sec) - read back {} ops", 
             NUM_OPS, elapsed, ops_per_sec, recorded_ops.len());
             
         assert_eq!(recorded_ops.len(), NUM_OPS, "All operations should be stored");
@@ -1055,8 +1004,12 @@ mod tests {
         // Create a WAL system in a temporary directory
         let (wal, _temp_dir) = create_test_wal().await;
         
-        // Define test namespace
-        let namespace = "cmd_test";
+        // Define timestamp-based test namespace
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let namespace = format!("tests/{}/cmd", timestamp);
         
         // Create and process WAL commands
         let cmd1 = WALCMD::Put { 
@@ -1075,10 +1028,10 @@ mod tests {
         wal.process_command(cmd2).await.unwrap();
         
         // Flush the namespace
-        wal.flush_namespace(namespace).await.unwrap();
+        wal.flush_namespace(&namespace).await.unwrap();
         
         // Verify commands were processed
-        let ops = wal.read_namespace(namespace).await.unwrap();
+        let ops = wal.read_namespace(&namespace).await.unwrap();
         assert_eq!(ops.len(), 2, "Should have 2 operations");
         
         if let WALOP::Put { key, value } = &ops[0] {

@@ -24,7 +24,7 @@ pub enum Commands {
 
     /// Legacy search command
     NamespaceSearch(commands::NamespaceSearchCommand),
-    
+
     /// Direct search command
     Search(commands::SearchCommand),
 
@@ -59,7 +59,7 @@ pub struct Cli {
 pub async fn start() {
     // Initialize logging
     util::init_logging();
-    
+
     let cli = Cli::parse();
 
     // Handle subcommands
@@ -79,20 +79,15 @@ pub async fn start() {
         }
         Some(Commands::NamespaceSearch(args)) => {
             // Use namespace from args first, then from global flag, defaulting to "default"
-            let namespace = args.namespace.clone().unwrap_or_else(|| {
-                cli.namespace.clone().unwrap_or_else(|| "default".to_string())
-            });
+            let namespace = args.namespace.clone();
             let _ = namespaces::handle_search_command(args, &namespace).await;
         }
         Some(Commands::Search(args)) => {
             // Use namespace from args first, then from global flag, defaulting to "default"
-            let namespace = args.namespace.clone().unwrap_or_else(|| {
-                cli.namespace.clone().unwrap_or_else(|| "default".to_string())
-            });
-            // Convert the new search command to the existing structure to reuse logic
+            let namespace = args.namespace.clone(); // Convert the new search command to the existing structure to reuse logic
             let search_args = commands::NamespaceSearchCommand {
                 query: args.query,
-                namespace: Some(namespace.clone()),
+                namespace: namespace.clone(),
                 limit: args.limit,
                 offset: args.offset,
                 addr: args.addr,
@@ -106,23 +101,27 @@ pub async fn start() {
         }
         Some(Commands::Add(args)) => {
             println!("Adding file to namespace `{}`...", args.namespace);
-            
+
             // Check file size to determine if we should use streaming
             let file_path = std::path::PathBuf::from(&args.file_path);
             if let Ok(file_metadata) = std::fs::metadata(&file_path) {
                 let file_size = file_metadata.len();
-                
+
                 // Define threshold for large files (10MB)
                 const LARGE_FILE_THRESHOLD: u64 = 10 * 1024 * 1024;
-                
+
                 if file_size > LARGE_FILE_THRESHOLD {
-                    println!("File is large ({} bytes). Using streaming for better performance.", file_size);
-                    let _ = crate::fugu::grpc::client_stream_index(
-                        args.addr, 
-                        args.file_path, 
-                        Some(args.namespace),
-                        None  // Use default chunk size
-                    ).await;
+                    println!(
+                        "File is large ({} bytes). Using streaming for better performance.",
+                        file_size
+                    );
+                    let _ = crate::fugu::grpc::utils::client_stream_index(
+                        args.addr,
+                        args.file_path,
+                        args.namespace,
+                        None, // Use default chunk size
+                    )
+                    .await;
                 } else {
                     // For smaller files, convert to a namespace index command to reuse logic
                     let index_args = commands::NamespaceIndexCommand {
@@ -145,8 +144,13 @@ pub async fn start() {
             let config_manager = crate::fugu::config::new_config_manager(None);
             let path = config_manager.base_dir().to_path_buf();
 
-            // Use the port parameter to build the server address
-            let addr = format!("127.0.0.1:{}", args.port);
+            // Use the port parameter to build the server address,
+            // but try different ports if the initial one is in use
+            let mut port = args.port;
+            let max_port = args.port + 10; // Try up to 10 ports
+            let addr = format!("127.0.0.1:{}", port);
+
+            println!("Attempting to start server on port {}", port);
 
             if args.daemon {
                 println!("Starting the fugu node as a daemon...");
@@ -180,41 +184,46 @@ pub async fn start() {
                         let _ = std::fs::remove_file(&args.pid_file);
                         let pid = std::process::id();
                         let _ = std::fs::write(&args.pid_file, pid.to_string());
-                        
+
                         // Use a single-threaded runtime to avoid file descriptor issues
                         let rt = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build()
                             .unwrap();
-                            
+
                         rt.block_on(async {
                             // Create channels for shutdown
                             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-                            
+
                             // Spawn a task to handle termination signals (SIGTERM)
                             let shutdown_handle = tokio::spawn(async move {
-                                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                                    .expect("Failed to install SIGTERM handler")
-                                    .recv()
-                                    .await;
+                                tokio::signal::unix::signal(
+                                    tokio::signal::unix::SignalKind::terminate(),
+                                )
+                                .expect("Failed to install SIGTERM handler")
+                                .recv()
+                                .await;
                                 eprintln!("Received SIGTERM, shutting down...");
                                 let _ = shutdown_tx.send(());
                             });
-                            
+
                             // We need another channel pair for the interrupt signal
-                            let (int_shutdown_tx, int_shutdown_rx) = tokio::sync::oneshot::channel();
-                            
+                            let (int_shutdown_tx, int_shutdown_rx) =
+                                tokio::sync::oneshot::channel();
+
                             // Spawn a task to handle interrupt signals (SIGINT)
                             tokio::spawn(async move {
-                                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                                    .expect("Failed to install SIGINT handler")
-                                    .recv()
-                                    .await;
+                                tokio::signal::unix::signal(
+                                    tokio::signal::unix::SignalKind::interrupt(),
+                                )
+                                .expect("Failed to install SIGINT handler")
+                                .recv()
+                                .await;
                                 eprintln!("Received SIGINT, shutting down...");
                                 let _ = int_shutdown_tx.send(());
                                 let _ = shutdown_handle.abort(); // Abort the SIGTERM handler
                             });
-                            
+
                             // Combine both shutdown signals
                             let combined_shutdown = async {
                                 tokio::select! {
@@ -222,18 +231,23 @@ pub async fn start() {
                                     _ = int_shutdown_rx => {},
                                 }
                             };
-                            
+
                             // Create a new oneshot channel for the combined signal
                             let (combined_tx, combined_rx) = tokio::sync::oneshot::channel();
-                            
+
                             // Spawn a task to handle the combined shutdown signal
                             tokio::spawn(async move {
                                 combined_shutdown.await;
                                 let _ = combined_tx.send(());
                             });
-                            
-                            if let Err(e) =
-                                crate::fugu::grpc::start_grpc_server(path, addr.clone(), None, Some(combined_rx)).await
+
+                            if let Err(e) = crate::fugu::grpc::server::start_grpc_server(
+                                path,
+                                addr.clone(),
+                                None,
+                                Some(combined_rx),
+                            )
+                            .await
                             {
                                 eprintln!("Server error: {}", e);
                             }
@@ -250,7 +264,7 @@ pub async fn start() {
 
                 // Spawn in a background task so it doesn't block
                 let _server_handle = tokio::spawn(async move {
-                    if let Err(e) = crate::fugu::grpc::start_grpc_server(
+                    if let Err(e) = crate::fugu::grpc::server::start_grpc_server(
                         path,
                         addr.clone(),
                         Some(ready_tx),
@@ -267,16 +281,20 @@ pub async fn start() {
 
                 // We don't await the handle here, as we want the server to run in the background
                 println!("Fugu node started successfully in foreground mode");
-                
+
                 if let Some(timeout_secs) = args.timeout {
-                    println!("Server will automatically exit after {} seconds", timeout_secs);
-                    
+                    println!(
+                        "Server will automatically exit after {} seconds",
+                        timeout_secs
+                    );
+
                     // Create a timeout future
-                    let timeout_fut = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
-                    
+                    let timeout_fut =
+                        tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
+
                     // Create a Ctrl-C future
                     let ctrl_c_fut = tokio::signal::ctrl_c();
-                    
+
                     // Wait for either timeout or Ctrl-C
                     tokio::select! {
                         _ = timeout_fut => {
@@ -288,15 +306,15 @@ pub async fn start() {
                     }
                 } else {
                     println!("Press Ctrl-C to terminate the server");
-                    
+
                     // Block the main thread to keep the program running until Ctrl-C
                     tokio::signal::ctrl_c()
                         .await
                         .expect("Failed to listen for ctrl-c event");
-                        
+
                     println!("Received Ctrl-C, shutting down server...");
                 }
-                
+
                 // Send shutdown signal to gracefully shutdown the server
                 let _ = shutdown_tx.send(());
 

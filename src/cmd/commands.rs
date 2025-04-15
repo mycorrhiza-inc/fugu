@@ -19,9 +19,9 @@ pub struct SearchCommand {
     // #[arg(last = true)]
     pub query: String,
     
-    /// Namespace to search in
-    #[arg(short, long)]
-    pub namespace: Option<String>,
+    /// Namespace to search in (required)
+    #[arg(short, long, required = true)]
+    pub namespace: String,
     
     /// Maximum results to return
     #[arg(short, long, default_value = "10")]
@@ -47,8 +47,8 @@ pub struct SearchCommand {
 #[derive(Parser)]
 #[command(name = "status")]
 pub struct StatusCommand {
-    /// Namespace to operate on
-    pub namespace: Option<String>,
+    /// Namespace to operate on (required)
+    pub namespace: String,
     
     /// Path to the PID file (for daemon mode)
     #[arg(long, default_value = "/tmp/fugu.pid")]
@@ -184,9 +184,9 @@ pub struct NamespaceSearchCommand {
     #[arg(last = true)]
     pub query: String,
     
-    /// Namespace to search in
-    #[arg(short, long)]
-    pub namespace: Option<String>,
+    /// Namespace to search in (required)
+    #[arg(short, long, required = true)]
+    pub namespace: String,
     
     /// Maximum results to return
     #[arg(short, long, default_value = "10")]
@@ -204,9 +204,8 @@ pub struct NamespaceSearchCommand {
 #[derive(Parser)]
 #[command(name = "delete")]
 pub struct NamespaceDeleteCommand {
-    /// Location to delete
-    #[arg(short, long, required = true)]
-    pub location: String,
+    /// File to delete
+    pub file: String,
     
     /// Server address
     #[arg(short, long, default_value = "http://127.0.0.1:50051")]
@@ -227,4 +226,8 @@ pub struct NamespaceListCommand {
     /// Server address
     #[arg(short, long, default_value = "http://127.0.0.1:50051")]
     pub addr: String,
+    
+    /// List all available namespaces
+    #[arg(short, long)]
+    pub all_namespaces: bool,
 }

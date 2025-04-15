@@ -1,21 +1,29 @@
 use std::fs;
+use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 use tempfile::tempdir;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 
+// Function to find an available port
+fn get_free_port() -> std::io::Result<u16> {
+    // Binding to port 0 lets the OS assign an available port
+    let socket = TcpListener::bind("127.0.0.1:0")?;
+    let addr = socket.local_addr()?;
+    Ok(addr.port())
+}
+
 // This is an integration test script that tests the gRPC client and server
 // by running actual binaries rather than just testing the library code
 
 #[tokio::test]
-#[ignore] // Mark this test as ignored to avoid conflict with test_grpc_server_client
 async fn test_grpc_client_server_integration() -> Result<(), Box<dyn std::error::Error>> {
     // Create a temporary directory for the server data
     let temp_dir = tempdir()?;
     let _server_dir = temp_dir.path().to_string_lossy().to_string();
 
-    // Pick a random port
-    let port = 50051; // You can make this random if needed
+    // Use a randomly assigned available port
+    let port = get_free_port().expect("Failed to find a free port");
     let server_addr = format!("127.0.0.1:{}", port);
     let server_url = format!("http://{}", server_addr);
 
@@ -109,7 +117,6 @@ async fn test_grpc_client_server_integration() -> Result<(), Box<dyn std::error:
     let delete_status = Command::new(&binary_path)
         .args([
             "delete",
-            "--location",
             &format!(
                 "/{}",
                 Path::new(&test_file_path)

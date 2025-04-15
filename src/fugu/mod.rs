@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 pub mod server;
+pub mod grpc;
 use server::FuguServer;
 pub mod config;
 use config::ConfigManager;
@@ -41,7 +42,6 @@ pub mod node;
 mod test;
 pub mod wal;
 pub mod index;
-pub mod grpc;
 #[cfg(test)]
 mod test_grpc;
 #[cfg(test)]
