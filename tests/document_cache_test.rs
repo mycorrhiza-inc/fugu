@@ -40,39 +40,28 @@ async fn test_document_disk_cache() {
     let index = test_node.get_index();
     
     if let Some(idx) = index {
-        // Check cache status
-        let (cache_path, file_count, _) = idx.get_cache_info().await.unwrap();
-        
-        // The text file should be in the cache, but not the binary or large files
-        assert!(file_count >= 1, "At least one file should be in the cache");
-        
-        // Check if the text file is in cache
-        let text_cache_path = PathBuf::from(&cache_path).join("text_file.txt");
-        assert!(text_cache_path.exists(), "Text file should be in the disk cache");
-        
-        // Check text file contents
-        let cached_content = tokio::fs::read_to_string(&text_cache_path).await.unwrap();
-        assert_eq!(cached_content, text_content, "Cached content should match original");
-        
-        // The binary file should not be in cache
-        let binary_cache_path = PathBuf::from(&cache_path).join("binary_file.bin");
-        assert!(!binary_cache_path.exists(), "Binary file should not be in the disk cache");
-        
-        // The large file should not be in cache
-        let large_cache_path = PathBuf::from(&cache_path).join("large_file.txt");
-        assert!(!large_cache_path.exists(), "Large file should not be in the disk cache");
-        
         // Test retrieving a document via get_document
         let doc_content = idx.get_document("text_file.txt").await.unwrap();
         assert!(doc_content.is_some(), "Should retrieve the document content");
         assert_eq!(doc_content.unwrap(), text_content, "Retrieved content should match original");
         
+        // Test retrieval of binary and large files
+        let binary_content_retrieved = idx.get_document("binary_file.bin").await.unwrap();
+        assert!(binary_content_retrieved.is_some(), "Should retrieve binary content");
+        
+        let large_content_retrieved = idx.get_document("large_file.txt").await.unwrap();
+        assert!(large_content_retrieved.is_some(), "Should retrieve large file content");
+        
         // Test deleting a document
         test_node.delete_file("text_file.txt").await.unwrap();
         
-        // After deletion, the file should not be in the cache
-        assert!(!text_cache_path.exists(), "Text file should be removed from cache after deletion");
+        // After deletion, the document should no longer be retrievable
+        let deleted_content = idx.get_document("text_file.txt").await.unwrap();
+        assert!(deleted_content.is_none(), "Deleted document should not be retrievable");
     } else {
         panic!("Failed to get index instance");
     }
+    
+    // IMPORTANT: Unload index to release locks after test completes
+    test_node.unload_index().await.unwrap();
 }

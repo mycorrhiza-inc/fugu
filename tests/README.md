@@ -2,6 +2,24 @@
 
 This directory contains the test suite for the Fugu search engine.
 
+## New Shared Server Architecture
+
+The Fugu test suite has been updated to use a single shared server instance for all integration tests. This improves test efficiency and resource usage.
+
+### How it works
+
+1. The shared server is managed by code in `shared_test_fixture.rs`.
+2. Tests use the `ensure_server_running()` function to get a server URL.
+3. The server is started only once (using thread-safe initialization).
+4. A cleanup routine ensures the server is shut down when tests complete.
+
+### Benefits
+
+- Faster test execution (no server startup/shutdown for each test)
+- More realistic testing of server state between operations
+- Less resource usage (only one server instance)
+- Simpler test code (server management is centralized)
+
 ## Test Categories
 
 The Fugu test suite is organized into several categories:
@@ -90,6 +108,12 @@ Visualization results are saved to `tests/perf_results/` by default. The visuali
 
 ## Test Files
 
+- `main.rs`: Initializes and cleans up the shared test server
+- `shared_test_fixture.rs`: Contains shared server management code
+- `search_tests.rs`: Tests for search functionality
+- `case_insensitive_search_test.rs`: Tests for case-insensitive search
 - `grpc_tests.rs`: Integration tests for GRPC functionality
+- `document_cache_test.rs`: Tests for document caching
+- `hot_cold_loading_tests.rs`: Performance tests for hot vs cold loading
 - `run_tests.sh`: Script to automate running different test suites
 - `perf_visualize.py`: Script to generate performance test visualizations
