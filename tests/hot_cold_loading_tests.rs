@@ -216,7 +216,7 @@ fn test_hot_cold_loading_performance() {
 
     // Check that search works
     let search_output = Command::new(&binary)
-        .args(&["search", "--query", "document", "--addr", &server_url])
+        .args(&["search", "document", "--addr", &server_url])
         .output()
         .expect("Failed to execute search command");
 
@@ -273,7 +273,7 @@ fn test_hot_cold_loading_performance() {
         // Measure search time
         let start = Instant::now();
         let search_output = Command::new(&binary)
-            .args(&["search", "--query", query, "--addr", &server_url])
+            .args(&["search", query, "--addr", &server_url])
             .output()
             .expect("Failed to execute search command");
         let duration = start.elapsed();
@@ -303,7 +303,7 @@ fn test_hot_cold_loading_performance() {
     for _ in 0..20 {
         for query in &search_terms {
             let _ = Command::new(&binary)
-                .args(&["search", "--query", query, "--addr", &server_url])
+                .args(&["search", query, "--addr", &server_url])
                 .output()
                 .expect("Failed to execute warm-up search");
         }
@@ -321,7 +321,7 @@ fn test_hot_cold_loading_performance() {
         // Measure search time
         let start = Instant::now();
         let search_output = Command::new(&binary)
-            .args(&["search", "--query", query, "--addr", &server_url])
+            .args(&["search", query, "--addr", &server_url])
             .output()
             .expect("Failed to execute search command");
         let duration = start.elapsed();
