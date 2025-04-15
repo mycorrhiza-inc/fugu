@@ -11,25 +11,27 @@ chrono = { version = "0.4.40", features = ["rkyv"] }
 clap = { version = "*", features = ["cargo", "derive"] }
 crdts = "7.3.2"
 daemonize = "0.5.0"
+lazy_static = "1.4.0"
 num_cpus = "1.16.0"
 pretty_assertions = "1.4.1"
 prost = "0.13.5"
-rand = { version = "0.9", features = ["std"] }
+rand = { version = "0.9", features = ["std", "std_rng"] }
 rkyv = "0.8.10"
 rkyv_dyn = "0.7.44"
 rust-s3 = "0.35"
 serde = "1.0.219"
 serde_json = "1.0.140"
-sled = { version = "*" }
-tantivy = { version = "0.22.0" }
+sled = { version = "*", features = ["compression"] }
 tempfile = "3.19.1"
 tokio = { version = "1.44.1", features = ["full"] }
 tokio-stream = "0.1.17"
 tonic = "0.13.0"
 tracing = { version = "0.1.41", features = ["log"] }
 tracing-subscriber = { version = "0.3.19", features = ["json", "env-filter"] }
-bm25 = "2.2.1"
 num-traits = "0.2.19"
+
+[dev-dependencies]
+ctor = "0.2.5"
 
 
 [build-dependencies]
