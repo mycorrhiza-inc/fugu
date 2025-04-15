@@ -5,6 +5,7 @@ use crate::cmd::commands::{
 use crate::fugu::grpc::{client_index, client_delete, client_search};
 use std::path::PathBuf;
 use std::convert::TryInto;
+use std::io::{self, Write};
 
 // Default gRPC server address
 const DEFAULT_GRPC_ADDR: &str = "http://127.0.0.1:50051";

@@ -57,6 +57,9 @@ pub struct Cli {
 }
 
 pub async fn start() {
+    // Initialize logging
+    util::init_logging();
+    
     let cli = Cli::parse();
 
     // Handle subcommands
@@ -102,17 +105,45 @@ pub async fn start() {
             let _ = namespaces::handle_delete_command(args, &namespace).await;
         }
         Some(Commands::Add(args)) => {
-            // Convert this to a namespace index command to reuse existing logic
-            let index_args = commands::NamespaceIndexCommand {
-                file: args.file_path,
-                addr: args.addr,
-            };
             println!("Adding file to namespace `{}`...", args.namespace);
-            let _ = namespaces::handle_index_command(index_args, &args.namespace).await;
+            
+            // Check file size to determine if we should use streaming
+            let file_path = std::path::PathBuf::from(&args.file_path);
+            if let Ok(file_metadata) = std::fs::metadata(&file_path) {
+                let file_size = file_metadata.len();
+                
+                // Define threshold for large files (10MB)
+                const LARGE_FILE_THRESHOLD: u64 = 10 * 1024 * 1024;
+                
+                if file_size > LARGE_FILE_THRESHOLD {
+                    println!("File is large ({} bytes). Using streaming for better performance.", file_size);
+                    let _ = crate::fugu::grpc::client_stream_index(
+                        args.addr, 
+                        args.file_path, 
+                        Some(args.namespace),
+                        None  // Use default chunk size
+                    ).await;
+                } else {
+                    // For smaller files, convert to a namespace index command to reuse logic
+                    let index_args = commands::NamespaceIndexCommand {
+                        file: args.file_path,
+                        addr: args.addr,
+                    };
+                    let _ = namespaces::handle_index_command(index_args, &args.namespace).await;
+                }
+            } else {
+                // If we can't get file size, fall back to regular indexing
+                let index_args = commands::NamespaceIndexCommand {
+                    file: args.file_path,
+                    addr: args.addr,
+                };
+                let _ = namespaces::handle_index_command(index_args, &args.namespace).await;
+            }
         }
         Some(Commands::Up(args)) => {
-            // Path for this instance - in a real app, this might come from config
-            let path = PathBuf::from("./data");
+            // Use the ConfigManager to get the proper path
+            let config_manager = crate::fugu::config::new_config_manager(None);
+            let path = config_manager.base_dir().to_path_buf();
 
             // Use the port parameter to build the server address
             let addr = format!("127.0.0.1:{}", args.port);
