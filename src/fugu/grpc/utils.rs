@@ -110,8 +110,9 @@ pub async fn client_index(
         // Add some searchable metadata for testing with common terms
         add_searchable_metadata(&addr, &file_path, &namespace).await?;
 
-        // Now stream the main file
-        let mut client = NamespaceClient::connect(addr).await?;
+        // Now stream the main file - Clone addr to avoid ownership issues
+        let addr_clone = addr.clone();
+        let mut client = NamespaceClient::connect(addr_clone).await?;
 
         // For large files, optimize chunk size based on file size
         let optimal_chunk_size = client.calculate_optimal_chunk_size(file_size, None);
@@ -121,6 +122,7 @@ pub async fn client_index(
                 PathBuf::from(&file_path),
                 Some(namespace.clone()),
                 Some(optimal_chunk_size),
+                Some(addr.clone()),
             )
             .await?;
 
@@ -214,7 +216,9 @@ pub async fn client_stream_index(
     }
 
     // Connect and stream the file
-    let mut client = NamespaceClient::connect(addr).await?;
+    // Clone addr to avoid ownership issues
+    let addr_clone = addr.clone();
+    let mut client = NamespaceClient::connect(addr_clone).await?;
     let optimal_chunk_size = client.calculate_optimal_chunk_size(file_size, chunk_size);
 
     info!(
@@ -227,6 +231,7 @@ pub async fn client_stream_index(
             PathBuf::from(&file_path),
             Some(namespace.clone()),
             Some(optimal_chunk_size),
+            Some(addr.clone()),
         )
         .await?;
 
@@ -248,6 +253,9 @@ pub async fn client_stream_index(
         parallel="Files >512KB use parallel processing with CRDTs",
         "Streaming index completed"
     );
+    
+    // Explicitly drop the client to close any open connections
+    drop(client);
 
     Ok(())
 }

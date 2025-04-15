@@ -696,7 +696,7 @@ async fn test_stream_index_namespace_isolation() -> Result<(), Box<dyn std::erro
         println!("[TEST] Streaming file {:?} to namespace {}", file_path, namespace);
         let stream_response = match tokio::time::timeout(
             Duration::from_secs(10), // Allow more time for streaming
-            client.stream_index_file(file_path.clone(), Some(namespace.to_string()), Some(8192))
+            client.stream_index_file(file_path.clone(), Some(namespace.to_string()), Some(8192), Some(server_addr.clone()))
         ).await {
             Ok(Ok(response)) => {
                 println!("[TEST] Successfully streamed file to namespace {}: {:?}", namespace, response);

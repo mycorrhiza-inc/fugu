@@ -169,8 +169,11 @@ mod tests {
         let (results, _duration) = node.search_text("hello", 10, 0).await.unwrap();
         assert_eq!(results.len(), 4);  // Should match docs 1, 2, 3, 4 because doc2 has "hello" in "without hello"
         
-        // Extract doc_ids from results for verification
-        let result_docs: Vec<&str> = results.iter().map(|r| r.doc_id.as_str()).collect();
+        // Extract doc_ids from results for verification, handling namespaced IDs
+        let result_docs: Vec<&str> = results.iter()
+            .map(|r| r.doc_id.split('/').last().unwrap_or(r.doc_id.as_str()))
+            .collect();
+        
         assert!(result_docs.contains(&"doc1.txt"));
         assert!(result_docs.contains(&"doc2.txt"));
         assert!(result_docs.contains(&"doc3.txt"));

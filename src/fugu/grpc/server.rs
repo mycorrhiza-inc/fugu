@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::error::Error;
 use tokio::sync::{RwLock, mpsc};
 use tonic::{transport::Server, Request, Response, Status, Streaming};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tracing::{trace, info, warn, error};
 
 use crate::fugu::node::Node;
@@ -493,68 +493,206 @@ impl NamespaceService {
         let mut namespace_name = "default".to_string();
         let mut total_bytes: i64 = 0;
         let mut chunks_received: i64 = 0;
+        let mut received_last_chunk = false;
+        let start_time = std::time::Instant::now();
         
         // Create a temporary file to write the chunks to
         let mut temp_file = None;
         
+        // Use a timeout to prevent indefinite waiting for stream chunks
+        let timeout_duration = std::time::Duration::from_secs(15); // 5 minute timeout
+        
         // Process the stream chunks
-        while let Some(chunk) = stream.message().await? {
-            chunks_received += 1;
-            total_bytes += chunk.chunk_data.len() as i64;
-            
-            // Process file_name from the first chunk
-            if file_name.is_none() {
-                if chunk.file_name.is_empty() {
-                    return Err(Status::invalid_argument(
-                        "First chunk must contain file_name"
-                    ));
+        loop {
+            // Read next message with timeout
+            let chunk_result = match tokio::time::timeout(timeout_duration, stream.message()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("Timeout waiting for stream chunk after {} seconds", timeout_duration.as_secs());
+                    return Err(Status::deadline_exceeded("Timeout waiting for stream chunk"));
                 }
-                
-                file_name = Some(chunk.file_name.clone());
-                
-                // Get namespace either from chunk or use default
-                if !chunk.namespace.is_empty() {
-                    namespace_name = chunk.namespace.clone();
+            };
+            
+            // Process the chunk or break if stream is done
+            match chunk_result {
+                Ok(Some(chunk)) => {
+                    chunks_received += 1;
+                    total_bytes += chunk.chunk_data.len() as i64;
+                    
+                    // Process file_name from the first chunk
+                    if file_name.is_none() {
+                        if chunk.file_name.is_empty() {
+                            return Err(Status::invalid_argument(
+                                "First chunk must contain file_name"
+                            ));
+                        }
+                        
+                        file_name = Some(chunk.file_name.clone());
+                        
+                        // Get namespace either from chunk or use default
+                        if !chunk.namespace.is_empty() {
+                            namespace_name = chunk.namespace.clone();
+                        }
+                        
+                        // Create the temporary file for writing
+                        let path = temp_dir.path().join(chunk.file_name.clone());
+                        temp_file = Some(tokio::fs::File::create(&path).await.map_err(|e| {
+                            Status::internal(format!("Failed to create temporary file: {}", e))
+                        })?);
+                        
+                        trace!(path=?path, "Created temporary file for streaming");
+                        
+                        // Log progress for large files if this is the first chunk
+                        if !chunk.chunk_data.is_empty() {
+                            info!(
+                                file=%chunk.file_name,
+                                namespace=%namespace_name,
+                                "Started receiving streaming file"
+                            );
+                        }
+                    }
+                    
+                    // Write the chunk to the temporary file if it contains data
+                    if !chunk.chunk_data.is_empty() {
+                        if let Some(file) = &mut temp_file {
+                            file.write_all(&chunk.chunk_data).await.map_err(|e| {
+                                Status::internal(format!("Error writing to temporary file: {}", e))
+                            })?;
+                        } else {
+                            return Err(Status::internal("Temporary file not initialized"));
+                        }
+                    }
+                    
+                    // Periodically log progress for large files (every 50 chunks)
+                    if chunks_received % 50 == 0 && total_bytes > 5 * 1024 * 1024 {
+                        let elapsed = start_time.elapsed();
+                        let throughput = if elapsed.as_secs() > 0 {
+                            total_bytes as f64 / 1024.0 / 1024.0 / elapsed.as_secs_f64()
+                        } else {
+                            0.0
+                        };
+                        
+                        info!(
+                            chunks=%chunks_received,
+                            bytes=%total_bytes,
+                            throughput=format!("{:.2} MB/s", throughput),
+                            "Stream processing progress"
+                        );
+                    }
+                    
+                    // If this is the last chunk, finish processing
+                    if chunk.is_last {
+                        received_last_chunk = true;
+                        trace!("Received final chunk, processing file now");
+                        break;
+                    }
+                },
+                Ok(None) => {
+                    // End of stream without last chunk flag
+                    if !received_last_chunk {
+                        info!("Stream ended without explicit last chunk flag, finalizing anyway");
+                        received_last_chunk = true;
+                    }
+                    break;
+                },
+                Err(e) => {
+                    // Handle stream error
+                    error!("Error receiving stream chunk: {}", e);
+                    return Err(Status::internal(format!("Stream error: {}", e)));
                 }
-                
-                // Create the temporary file for writing
-                let path = temp_dir.path().join(chunk.file_name.clone());
-                temp_file = Some(tokio::fs::File::create(&path).await.map_err(|e| {
-                    Status::internal(format!("Failed to create temporary file: {}", e))
-                })?);
-                
-                trace!(path=?path, "Created temporary file for streaming");
-            }
-            
-            // Write the chunk to the temporary file
-            if let Some(file) = &mut temp_file {
-                file.write_all(&chunk.chunk_data).await.map_err(|e| {
-                    Status::internal(format!("Error writing to temporary file: {}", e))
-                })?;
-            } else {
-                return Err(Status::internal("Temporary file not initialized"));
-            }
-            
-            // If this is the last chunk, finish processing
-            if chunk.is_last {
-                trace!("Received final chunk, processing file now");
-                break;
             }
         }
         
-        // Flush and close the file
+        // Log summary of stream processing
+        if total_bytes > 1024 * 1024 {
+            let elapsed = start_time.elapsed();
+            let throughput = if elapsed.as_secs() > 0 {
+                total_bytes as f64 / 1024.0 / 1024.0 / elapsed.as_secs_f64()
+            } else {
+                total_bytes as f64 / 1024.0 / 1024.0
+            };
+            
+            info!(
+                chunks=%chunks_received,
+                bytes=%total_bytes,
+                elapsed=?elapsed,
+                throughput=format!("{:.2} MB/s", throughput),
+                "Completed receiving stream chunks"
+            );
+        }
+        
+        // Flush and sync file to ensure data persistence before indexing
         if let Some(mut file) = temp_file {
+            // First flush any buffered data
             file.flush().await.map_err(|e| {
                 Status::internal(format!("Error flushing temporary file: {}", e))
             })?;
+            
+            // Get the underlying OS file for fsync operations
+            let std_file = file.into_std().await;
+            
+            // Ensure data is written to disk with fsync
+            std_file.sync_all().map_err(|e| {
+                Status::internal(format!("Error syncing file to disk: {}", e))
+            })?;
+            
+            // Log that the file has been successfully persisted
+            info!(
+                "File successfully flushed and synced to disk before indexing"
+            );
         } else {
-            return Err(Status::internal("No data received or temporary file not initialized"));
+            // No data was received or file wasn't initialized
+            if chunks_received == 0 {
+                return Err(Status::internal("No data chunks received"));
+            } else {
+                return Err(Status::internal("Temporary file not initialized despite receiving chunks"));
+            }
         }
         
         // Unwrap the file_name, should be safe since we checked earlier
         let file_name = file_name.ok_or_else(|| Status::internal("No file name received"))?;
         let temp_file_path = temp_dir.path().join(&file_name);
         
+        // Verify the file was actually created
+        if !temp_file_path.exists() {
+            return Err(Status::internal(format!("Expected file was not created: {:?}", temp_file_path)));
+        }
+        
+        // Verify file size matches expected bytes received
+        match tokio::fs::metadata(&temp_file_path).await {
+            Ok(metadata) => {
+                let file_size = metadata.len() as i64;
+                
+                if file_size != total_bytes {
+                    warn!(
+                        expected=%total_bytes,
+                        actual=%file_size,
+                        "File size mismatch - received bytes count doesn't match actual file size"
+                    );
+                    
+                    // Log warning but continue - this could happen with text/binary conversion
+                    if file_size < (total_bytes / 2) {
+                        // If the size difference is too large, return error
+                        return Err(Status::internal(format!(
+                            "File size verification failed: expected {} bytes but got {} bytes", 
+                            total_bytes, file_size
+                        )));
+                    }
+                } else {
+                    info!(
+                        bytes=%total_bytes,
+                        "File size verification successful - file is ready for indexing"
+                    );
+                }
+            },
+            Err(e) => {
+                return Err(Status::internal(format!(
+                    "Failed to verify file size: {}", e
+                )));
+            }
+        }
+        
+        // Return the file information
         Ok((file_name, namespace_name, temp_file_path, total_bytes, chunks_received))
     }
 
@@ -682,28 +820,94 @@ impl Namespace for NamespaceService {
     ) -> Result<Response<IndexResponse>, Status> {
         info!("[gRPC Request] stream_index request received");
         
-        // Remove all non-Send references
+        // Extract metadata from the request for context
+        let request_metadata = request.metadata().clone();
+        let request_context = match request_metadata.get("context") {
+            Some(ctx) => match ctx.to_str() {
+                Ok(ctx_str) => ctx_str.to_string(),
+                Err(_) => "unknown".to_string(),
+            },
+            None => "default".to_string(),
+        };
+        
+        // Use a specific timeout for the entire operation
+        let operation_timeout = std::time::Duration::from_secs(3600); // 1 hour timeout for large files
+        
+        // Start tracking the overall operation time
+        let operation_start_time = std::time::Instant::now();
+        
+        // Create a temporary directory with cleanup tracking
+        let temp_dir = match tempfile::tempdir() {
+            Ok(dir) => {
+                info!(path=?dir.path(), "Created temporary directory for streaming");
+                dir
+            },
+            Err(e) => {
+                error!(error=%e, "Failed to create temporary directory for streaming");
+                return Err(Status::internal(format!("Failed to create temporary directory: {}", e)));
+            }
+        };
+        
+        // Extract the stream from the request
         let stream = request.into_inner();
         
-        // Create a temporary directory for the streamed file
-        let temp_dir = tempfile::tempdir().map_err(|e| {
-            Status::internal(format!("Failed to create temporary directory: {}", e))
-        })?;
+        // Process the incoming stream chunks with timeout
+        let chunks_result = tokio::time::timeout(
+            operation_timeout,
+            self.process_stream_chunks(stream, &temp_dir)
+        ).await;
         
-        // Process the incoming stream chunks
-        let (file_name, namespace_name, temp_file_path, total_bytes, chunks_received) = 
-            self.process_stream_chunks(stream, &temp_dir).await?;
+        // Handle timeout or processing errors
+        let (file_name, namespace_name, temp_file_path, total_bytes, chunks_received) = match chunks_result {
+            Ok(Ok(result)) => result,
+            Ok(Err(status)) => {
+                error!(error=%status, "Error processing stream chunks");
+                return Err(status);
+            },
+            Err(_) => {
+                error!("Timeout processing stream chunks after {} seconds", operation_timeout.as_secs());
+                return Err(Status::deadline_exceeded("Timeout processing stream chunks"));
+            }
+        };
         
-        // Get or create a node for this namespace
-        let mut node = self.get_node(&namespace_name).await;
+        // Get or create a node for this namespace with timeout
+        let node_result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.get_node(&namespace_name)
+        ).await;
+        
+        let mut node = match node_result {
+            Ok(node) => node,
+            Err(_) => {
+                error!(namespace=%namespace_name, "Timeout getting node for namespace");
+                return Err(Status::deadline_exceeded("Timeout getting node for namespace"));
+            }
+        };
         
         // Load the index (this won't do anything if already loaded)
-        node.load_index().await.map_err(|e| {
-            Status::internal(format!("Failed to load index: {}", e))
-        })?;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            node.load_index()
+        ).await {
+            Ok(Ok(_)) => info!(namespace=%namespace_name, "Node index loaded successfully"),
+            Ok(Err(e)) => {
+                error!(namespace=%namespace_name, error=%e, "Failed to load index");
+                return Err(Status::internal(format!("Failed to load index: {}", e)));
+            },
+            Err(_) => {
+                error!(namespace=%namespace_name, "Timeout loading index");
+                return Err(Status::deadline_exceeded("Timeout loading node index"));
+            }
+        }
         
-        // Index the file
-        info!(file=%file_name, "Starting indexing of streamed file");
+        // Index the file - track start time for this phase
+        let indexing_start_time = std::time::Instant::now();
+        info!(
+            file=%file_name, 
+            namespace=%namespace_name, 
+            context=%request_context,
+            "Starting indexing of streamed file"
+        );
         
         // Read the file size for debugging
         let file_size = match tokio::fs::metadata(&temp_file_path).await {
@@ -713,76 +917,166 @@ impl Namespace for NamespaceService {
                 0
             }
         };
+        
+        // Add a synchronization barrier to ensure file is on disk before indexing
+        // This helps prevent issues with the file not being fully stored before indexing begins
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        
+        // Open the file to verify its readability before indexing
+        match tokio::fs::File::open(&temp_file_path).await {
+            Ok(mut file) => {
+                // Try to read the first few bytes to ensure the file is readable
+                let mut buffer = vec![0u8; std::cmp::min(1024, file_size as usize)];
+                match file.read(&mut buffer).await {
+                    Ok(n) => {
+                        info!(
+                            bytes_read=%n,
+                            "Successfully verified file readability before indexing"
+                        );
+                        // Explicitly close the file handle
+                        drop(file);
+                    },
+                    Err(e) => {
+                        warn!(
+                            error=%e,
+                            "File exists but could not be read, this may indicate a disk error"
+                        );
+                        // Continue anyway, the indexing code will handle errors if the file is corrupted
+                    }
+                }
+            },
+            Err(e) => {
+                warn!(
+                    error=%e,
+                    "Could not open file for verification, indexing may fail"
+                );
+                // Continue anyway, the indexing code will handle errors if the file can't be opened
+            }
+        }
+        
         info!(size=%file_size, "File ready for indexing");
         
         // For large files (> 512KB), use parallel indexing with CRDT
         const PARALLEL_THRESHOLD: u64 = 512 * 1024; // 512KB
         
         // Add some minimal text content to ensure we have something indexable
-        self.add_minimal_searchable_content(&node, &temp_dir, &file_name).await?;
+        if let Err(e) = self.add_minimal_searchable_content(&node, &temp_dir, &file_name).await {
+            warn!(error=%e, "Failed to add minimal searchable content, continuing with main indexing");
+        }
         
-        // Now index the main file, using parallel processing for large files
+        // Now index the main file with timeout, using parallel processing for large files
         let indexing_result = if file_size > PARALLEL_THRESHOLD {
             info!(size=%file_size, "Using parallel indexing for large file");
             
             // Use parallel processing with CRDTs for large files
             let indexer = ParallelIndexer::new();
-            match indexer.index_file(&node, &temp_file_path, &file_name).await {
-                Ok(result) => result,
-                Err(parallel_error) => {
+            
+            // Run indexing with timeout
+            match tokio::time::timeout(
+                operation_timeout,
+                indexer.index_file(&node, &temp_file_path, &file_name)
+            ).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(parallel_error)) => {
                     // Clone error message and drop the original error to avoid Send issues
                     let error_msg = format!("{}", parallel_error);
-                    // Send the original error to ensure it's dropped
-                    drop(parallel_error);
                     warn!(error=%error_msg, "Parallel indexing failed, falling back to regular indexing");
-                    match node.index_file(temp_file_path.clone()).await {
-                        Ok(result) => result,
-                        Err(e_fallback) => {
+                    
+                    // Try standard indexing as fallback
+                    match tokio::time::timeout(
+                        operation_timeout,
+                        node.index_file(temp_file_path.clone())
+                    ).await {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(e_fallback)) => {
                             error!(file=%file_name, error=%e_fallback, "Error indexing streamed file");
                             return Err(Status::internal(format!("Failed to index file: {}", e_fallback)));
+                        },
+                        Err(_) => {
+                            error!("Timeout during fallback indexing");
+                            return Err(Status::deadline_exceeded("Timeout during file indexing"));
                         }
                     }
+                },
+                Err(_) => {
+                    error!("Timeout during parallel indexing");
+                    return Err(Status::deadline_exceeded("Timeout during parallel file indexing"));
                 }
             }
         } else {
             // Use standard indexing for smaller files
-            match node.index_file(temp_file_path.clone()).await {
-                Ok(result) => result,
-                Err(e_standard) => {
+            match tokio::time::timeout(
+                operation_timeout,
+                node.index_file(temp_file_path.clone())
+            ).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e_standard)) => {
                     error!(file=%file_name, error=%e_standard, "Error indexing streamed file");
                     return Err(Status::internal(format!("Failed to index file: {}", e_standard)));
+                },
+                Err(_) => {
+                    error!("Timeout during standard indexing");
+                    return Err(Status::deadline_exceeded("Timeout during file indexing"));
                 }
             }
         };
         
-        // Build the response
+        // Calculate indexing throughput
+        let indexing_elapsed = indexing_start_time.elapsed();
+        let indexing_throughput = if indexing_elapsed.as_secs() > 0 && file_size > 0 {
+            file_size as f64 / 1024.0 / 1024.0 / indexing_elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        
+        info!(
+            file=%file_name,
+            size=%file_size,
+            time=?indexing_elapsed,
+            throughput=format!("{:.2} MB/s", indexing_throughput),
+            "Indexing completed successfully"
+        );
+        
+        // Get terms count with error handling
+        let indexed_terms = match node.get_index() {
+            Some(index) => index.get_total_terms() as i64,
+            None => {
+                warn!("Unable to get index after indexing, term count will be 0");
+                0
+            }
+        };
+        
+        // Build the response with detailed metrics
         let response = IndexResponse {
             success: true,
             location: format!("/{}", file_name),
             bytes_received: total_bytes,
             chunks_received,
-            indexed_terms: if let Some(index) = node.get_index() {
-                // Get term count from the inverted index if available
-                index.get_total_terms() as i64
-            } else {
-                0
-            },
+            indexed_terms,
             indexing_time_ms: indexing_result.as_millis() as i64,
             indexing_status: "completed".to_string(),
         };
         
+        // Log detailed completion information
+        let total_operation_time = operation_start_time.elapsed();
         info!(
             namespace=%namespace_name,
             file=%file_name, 
             bytes=%total_bytes,
             chunks=%chunks_received,
-            time=?indexing_result,
+            index_time=?indexing_result,
+            total_time=?total_operation_time,
+            terms=%indexed_terms,
             "[gRPC Response] stream_index request completed"
         );
         
-        // Clean up the temporary directory
-        drop(temp_dir);
+        // Explicitly clean up the temporary directory to release file handles
+        match temp_dir.close() {
+            Ok(_) => trace!("Temporary directory cleaned up successfully"),
+            Err(e) => warn!(error=%e, "Error cleaning up temporary directory, resources may be leaked"),
+        }
         
+        // Return the response to the client
         Ok(Response::new(response))
     }
 

@@ -171,12 +171,14 @@ impl Node {
         // Start timing
         let start_time = Instant::now();
 
-        // Get the document ID from the filename
-        let doc_id = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or("Invalid file path")?
-            .to_string();
+        // Get the document ID from the filename with namespace prefix
+        let doc_id = format!("{}/{}",
+            self.namespace,
+            path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("Invalid file path")?
+        );
 
         // Index the content if the index is loaded
         if let Some(index) = &self.inverted_index {
@@ -207,7 +209,9 @@ impl Node {
 
                 let mut buffer = [0; 8192]; // 8KB buffer
                 let mut chunk = String::new();
-                const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB chunks for processing
+                // Use system page size for chunk processing
+                let page_size = std::mem::size_of::<usize>();
+                const CHUNK_SIZE: usize = 8192; // Default to one page size for processing
                 let mut processed_any = false;
 
                 loop {
@@ -329,26 +333,33 @@ impl Node {
             );
         }
 
+        // Format the document ID with namespace prefix if it doesn't already have it
+        let namespaced_doc_id = if doc_id.starts_with(&format!("{}/", self.namespace)) {
+            doc_id.to_string()
+        } else {
+            format!("{}/{}", self.namespace, doc_id)
+        };
+
         info!(
             "[NODE] Attempting to delete file: {} in namespace: {}",
-            doc_id, self.namespace
+            namespaced_doc_id, self.namespace
         );
 
         if let Some(index) = &self.inverted_index {
             debug!("[NODE] Index is loaded, calling delete_document");
 
             // Use the delete_document method from InvertedIndex
-            match index.delete_document(doc_id).await {
+            match index.delete_document(&namespaced_doc_id).await {
                 Ok(elapsed) => {
                     info!(
                         "[NODE] Successfully deleted document: {} in {}ms",
-                        doc_id,
+                        namespaced_doc_id,
                         elapsed.as_millis()
                     );
                     Ok(elapsed)
                 }
                 Err(e) => {
-                    error!("[NODE] Error deleting document: {}: {}", doc_id, e);
+                    error!("[NODE] Error deleting document: {}: {}", namespaced_doc_id, e);
                     Err(e)
                 }
             }

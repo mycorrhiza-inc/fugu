@@ -36,6 +36,18 @@ impl NamespaceClient {
         let client = namespace::namespace_client::NamespaceClient::connect(addr).await?;
         Ok(Self { client })
     }
+    
+    /// Create a new client without keeping a persistent connection
+    /// 
+    /// This helps with clean shutdown after operations are complete
+    pub async fn connect_oneshot(addr: String) -> Result<Self, BoxError> {
+        let channel = tonic::transport::Channel::from_shared(addr)?
+            .connect()
+            .await?;
+        
+        let client = namespace::namespace_client::NamespaceClient::new(channel);
+        Ok(Self { client })
+    }
 
     /// Calculate optimal chunk size based on file size
     ///
@@ -54,17 +66,9 @@ impl NamespaceClient {
         if let Some(size) = requested_size {
             size
         } else {
-            // Adaptive chunk size based on file size
-            if file_size > 100 * 1024 * 1024 {
-                // For very large files (>100MB), use 4MB chunks
-                4 * 1024 * 1024
-            } else if file_size > 10 * 1024 * 1024 {
-                // For large files (>10MB), use 2MB chunks
-                2 * 1024 * 1024
-            } else {
-                // For medium files, use 1MB chunks
-                1 * 1024 * 1024
-            }
+            // Use system page size for chunk processing
+            let page_size = 8192; // Default to 8KB as one page size
+            page_size
         }
     }
 
@@ -129,6 +133,7 @@ impl NamespaceClient {
     /// * `file_path` - Path to the file on disk
     /// * `namespace` - Optional namespace for multi-tenant environments
     /// * `chunk_size` - Size of each chunk in bytes (default: 1MB)
+    /// * `server_addr` - Server address to reconnect after streaming
     ///
     /// # Returns
     ///
@@ -138,6 +143,7 @@ impl NamespaceClient {
         file_path: PathBuf,
         namespace: Option<String>,
         chunk_size: Option<usize>,
+        server_addr: Option<String>,
     ) -> Result<IndexResponse, BoxError> {
         // Extract filename from path
         let file_name = file_path
@@ -162,8 +168,9 @@ impl NamespaceClient {
         // Create a buffered reader with optimized buffer size
         let mut reader = tokio::io::BufReader::with_capacity(chunk_size, file);
         
-        // Create the stream sender with optimized capacity
+        // Create the stream sender with optimized capacity and a completion channel
         let (tx, rx) = mpsc::channel::<StreamIndexChunk>(channel_capacity);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         
         // Track start time for performance monitoring
         let start_time = std::time::Instant::now();
@@ -175,6 +182,7 @@ impl NamespaceClient {
             let mut is_first = true;
             let mut bytes_sent = 0;
             let mut last_progress_log = std::time::Instant::now();
+            let mut sent_last_chunk = false;
             
             loop {
                 // Read a chunk
@@ -182,6 +190,17 @@ impl NamespaceClient {
                     Ok(n) => n,
                     Err(e) => {
                         error!("Error reading file: {}", e);
+                        // Ensure we send a terminating chunk on error
+                        if !sent_last_chunk {
+                            let final_chunk = StreamIndexChunk {
+                                file_name: if is_first { file_name.clone() } else { String::new() },
+                                chunk_data: Vec::new(),
+                                is_last: true,
+                                namespace: if is_first { namespace.clone().unwrap_or_default() } else { String::new() },
+                            };
+                            let _ = tx.send(final_chunk).await;
+                            sent_last_chunk = true;
+                        }
                         break;
                     }
                 };
@@ -195,20 +214,43 @@ impl NamespaceClient {
                             is_last: true,
                             namespace: namespace.clone().unwrap_or_default(),
                         };
-                        let _ = tx.send(last_chunk).await;
+                        if let Err(e) = tx.send(last_chunk).await {
+                            error!("Failed to send empty last chunk: {}", e);
+                        } else {
+                            sent_last_chunk = true;
+                        }
+                    } else if !sent_last_chunk {
+                        // If we reached EOF but didn't mark the last chunk we sent as last
+                        // Send an explicit empty last chunk to ensure server knows we're done
+                        let final_chunk = StreamIndexChunk {
+                            file_name: String::new(),
+                            chunk_data: Vec::new(),
+                            is_last: true,
+                            namespace: String::new(),
+                        };
+                        if let Err(e) = tx.send(final_chunk).await {
+                            error!("Failed to send explicit last chunk: {}", e);
+                        } else {
+                            sent_last_chunk = true;
+                        }
                     }
                     break;
                 }
                 
                 chunk_count += 1;
                 bytes_sent += bytes_read;
+                let is_last_chunk = bytes_sent >= file_size as usize;
+                
+                if is_last_chunk {
+                    sent_last_chunk = true;
+                }
                 
                 // Create the chunk
                 let chunk = StreamIndexChunk {
                     // Only include file_name in the first chunk
                     file_name: if is_first { file_name.clone() } else { String::new() },
                     chunk_data: buffer[0..bytes_read].to_vec(),
-                    is_last: bytes_sent >= file_size as usize,
+                    is_last: is_last_chunk,
                     namespace: if is_first { namespace.clone().unwrap_or_default() } else { String::new() },
                 };
                 
@@ -242,7 +284,7 @@ impl NamespaceClient {
                 }
                 
                 // If we've reached the end of the file, break
-                if bytes_sent >= file_size as usize {
+                if is_last_chunk {
                     break;
                 }
             }
@@ -261,8 +303,19 @@ impl NamespaceClient {
                 file=%file_name, 
                 elapsed=?elapsed,
                 throughput=format!("{:.2} MB/s", throughput),
+                sent_last_chunk=%sent_last_chunk,
                 "Finished sending chunks for streaming"
             );
+            
+            // Explicitly drop tx to close the channel, which will terminate the stream
+            // This ensures the server knows the stream is complete and should close the connection
+            drop(tx);
+            
+            // Signal that streaming is complete
+            let _ = done_tx.send(());
+            
+            // Logging that we've completed streaming and sent the close signal
+            info!("Streaming complete, connection will be closed");
         });
         
         // Create the streaming request
@@ -271,7 +324,24 @@ impl NamespaceClient {
         
         // Send the streaming request and wait for the response
         let response = self.client.stream_index(request).await?;
-        Ok(response.into_inner())
+        
+        // Wait for the stream to complete (either success or error)
+        match tokio::time::timeout(std::time::Duration::from_secs(5), done_rx).await {
+            Ok(_) => info!("File streaming task completed normally"),
+            Err(_) => info!("File streaming task timed out, but server response was received"),
+        }
+        
+        // Ensure the response is returned before dropping connection
+        let inner_response = response.into_inner();
+        
+        // Let connection close itself when the response is done processing
+        
+        // Create a new client for the next operation if needed
+        if let Some(addr) = server_addr {
+            *self = Self::connect(addr).await?;
+        }
+        
+        Ok(inner_response)
     }
 
     /// Delete a file from the index

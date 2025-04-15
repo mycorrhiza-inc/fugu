@@ -1,13 +1,13 @@
 /// CRDT-based parallel indexing for large files
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 use crdts::{CmRDT, CvRDT, GCounter};
 use num_traits::ToPrimitive;
-use tracing::info;
+use tracing::{info, debug};
 
 use crate::fugu::node::Node;
 use crate::fugu::grpc::BoxError;
@@ -79,6 +79,9 @@ impl ParallelIndexer {
             }
         }
         
+        // Create a shared progress counter
+        let processed_chunks = Arc::new(AtomicUsize::new(0));
+        
         info!(
             file_size=%file_size, 
             chunk_size=%chunk_size, 
@@ -99,6 +102,7 @@ impl ParallelIndexer {
             let doc_id = file_name.to_string();
             // term_positions_map no longer needed in each task as we're returning results
             let worker_idx = chunk_idx as usize; // Use chunk index as worker index
+            let progress_counter = Arc::clone(&processed_chunks);
             
             // Spawn a task to process this chunk
             let task = tokio::spawn(async move {
@@ -147,12 +151,46 @@ impl ParallelIndexer {
                         .push(global_position);
                 }
                 
+                // Update progress counter and log progress
+                let completed = progress_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                let progress_percentage = (completed as f64 / num_chunks as f64) * 100.0;
+                debug!(
+                    worker=%worker_idx,
+                    chunk=%chunk_idx,
+                    progress=format!("{:.1}%", progress_percentage),
+                    completed=%completed,
+                    total=%num_chunks,
+                    "Indexed chunk"
+                );
+                
                 // Return both the counter and positions to avoid needing to write to shared state during processing
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>((worker_counter, local_positions, worker_idx))
             });
             
             tasks.push(task);
         }
+        
+        // Log indexing progress periodically with a separate task
+        let progress_counter_clone = Arc::clone(&processed_chunks);
+        let total_chunks = num_chunks;
+        let progress_logger = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                let current = progress_counter_clone.load(Ordering::SeqCst);
+                let percentage = (current as f64 / total_chunks as f64) * 100.0;
+                
+                if current >= total_chunks as usize {
+                    break;
+                }
+                
+                info!(
+                    progress=format!("{:.1}%", percentage),
+                    completed=%current,
+                    total=%total_chunks,
+                    "Indexing progress"
+                );
+            }
+        });
         
         // Wait for all tasks to complete and collect their results
         let mut worker_counters = Vec::new();
@@ -221,7 +259,15 @@ impl ParallelIndexer {
         // Create token batches for indexing
         // We handle this differently since we need to add the full position list at once
         let tokens_len = tokens_to_index.len();
-        for (term, positions, _frequency) in &tokens_to_index {
+        
+        info!(
+            terms=%tokens_len,
+            "Beginning term indexing phase"
+        );
+        // Create a counter for term indexing progress
+        let indexed_terms = AtomicUsize::new(0);
+        
+        for (i, (term, positions, _frequency)) in tokens_to_index.iter().enumerate() {
             // Use the index directly to add terms with all their positions
             // Access the inverted index to add terms
             if let Some(index) = node.get_index() {
@@ -245,8 +291,23 @@ impl ParallelIndexer {
                         format!("Failed to add term with positions: {}", e)
                     )) as BoxError
                 })?;
+                
+                // Log progress every 5% or for every 100 terms
+                let completed = indexed_terms.fetch_add(1, Ordering::SeqCst) + 1;
+                if completed % 100 == 0 || (i * 100 / tokens_len) != ((i + 1) * 100 / tokens_len) {
+                    let progress_percentage = (completed as f64 / tokens_len as f64) * 100.0;
+                    debug!(
+                        progress=format!("{:.1}%", progress_percentage),
+                        completed=%completed,
+                        total=%tokens_len,
+                        "Term indexing progress"
+                    );
+                }
             }
         }
+        
+        // Make sure the progress logger task is terminated
+        let _ = progress_logger.abort();
         
         // Get the elapsed time
         let elapsed = start_time.elapsed();
