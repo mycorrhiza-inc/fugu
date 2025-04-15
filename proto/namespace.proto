@@ -32,6 +32,10 @@ message IndexResponse {
 	// Additional fields for streaming
 	int64 bytes_received = 3;
 	int64 chunks_received = 4;
+	// Additional indexing status information
+	int64 indexed_terms = 5;
+	int64 indexing_time_ms = 6;
+	string indexing_status = 7;
 }
 
 message DeleteRequest {
