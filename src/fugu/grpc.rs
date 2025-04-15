@@ -47,6 +47,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Clone)]
 pub struct NamespaceService {
     /// The underlying Fugu server
+    #[allow(dead_code)]
     server: FuguServer,
     /// Channel for sending WAL commands
     wal_sender: mpsc::Sender<WALCMD>,
@@ -996,7 +997,7 @@ pub async fn start_grpc_server(
 /// - Simplifies gRPC interaction
 pub struct NamespaceClient {
     /// The underlying gRPC client
-    client: namespace::namespace_client::NamespaceClient<tonic::transport::Channel>,
+    pub client: namespace::namespace_client::NamespaceClient<tonic::transport::Channel>,
 }
 
 impl NamespaceClient {
@@ -1055,6 +1056,7 @@ impl NamespaceClient {
     /// # Returns
     ///
     /// IndexResponse with results
+    #[allow(dead_code)]
     pub async fn index(
         &mut self,
         file_name: String,
@@ -1260,9 +1262,34 @@ impl NamespaceClient {
     /// # Returns
     ///
     /// DeleteResponse with results
+    #[allow(dead_code)]
     pub async fn delete(&mut self, location: String) -> Result<DeleteResponse, Status> {
+        // Default implementation without metadata
+        self.delete_with_metadata(location, tonic::metadata::MetadataMap::new()).await
+    }
+    
+    /// Delete a file from the index with metadata
+    ///
+    /// # Arguments
+    ///
+    /// * `location` - Path to the file to delete
+    /// * `metadata` - Additional metadata for the request
+    ///
+    /// # Returns
+    ///
+    /// DeleteResponse with results
+    pub async fn delete_with_metadata(
+        &mut self,
+        location: String,
+        metadata: tonic::metadata::MetadataMap,
+    ) -> Result<DeleteResponse, Status> {
         let request = DeleteRequest { location };
-        let response = self.client.delete(request).await?;
+        
+        // Create a request with metadata
+        let mut req = tonic::Request::new(request);
+        *req.metadata_mut() = metadata;
+        
+        let response = self.client.delete(req).await?;
         Ok(response.into_inner())
     }
 
@@ -1277,6 +1304,7 @@ impl NamespaceClient {
     /// # Returns
     ///
     /// SearchResponse with results
+    #[allow(dead_code)]
     pub async fn search(
         &mut self,
         query: String,
@@ -1333,6 +1361,7 @@ impl NamespaceClient {
     /// # Returns
     ///
     /// VectorSearchResponse with results
+    #[allow(dead_code)]
     pub async fn vector_search(
         &mut self,
         vector: Vec<f32>,
@@ -1340,6 +1369,34 @@ impl NamespaceClient {
         limit: i32,
         offset: i32,
         min_score: f32,
+    ) -> Result<VectorSearchResponse, Status> {
+        // Default implementation without metadata
+        self.vector_search_with_metadata(vector, dim, limit, offset, min_score, tonic::metadata::MetadataMap::new()).await
+    }
+
+    /// Search the index using vector similarity with metadata
+    ///
+    /// # Arguments
+    ///
+    /// * `vector` - Vector of floating point values
+    /// * `dim` - Vector dimension
+    /// * `limit` - Maximum number of results to return
+    /// * `offset` - Number of results to skip
+    /// * `min_score` - Minimum similarity score threshold
+    /// * `metadata` - Additional metadata for the request
+    ///
+    /// # Returns
+    ///
+    /// VectorSearchResponse with results
+    #[allow(dead_code)]
+    pub async fn vector_search_with_metadata(
+        &mut self,
+        vector: Vec<f32>,
+        dim: i32,
+        limit: i32,
+        offset: i32,
+        min_score: f32,
+        metadata: tonic::metadata::MetadataMap,
     ) -> Result<VectorSearchResponse, Status> {
         let request = VectorSearchRequest {
             vector,
@@ -1349,7 +1406,11 @@ impl NamespaceClient {
             min_score,
         };
 
-        let response = self.client.vector_search(request).await?;
+        // Create a request with metadata
+        let mut req = tonic::Request::new(request);
+        *req.metadata_mut() = metadata;
+
+        let response = self.client.vector_search(req).await?;
         Ok(response.into_inner())
     }
 }
@@ -1599,6 +1660,7 @@ pub async fn client_stream_index(
 ///
 /// * `addr` - Address of the server
 /// * `location` - Path to the file to delete
+/// * `namespace` - Optional namespace for multi-tenant environments
 ///
 /// # Returns
 ///
@@ -1606,9 +1668,18 @@ pub async fn client_stream_index(
 pub async fn client_delete(
     addr: String,
     location: String,
+    namespace: Option<String>,
 ) -> Result<(), BoxError> {
     let mut client = NamespaceClient::connect(addr).await?;
-    let response = client.delete(location).await?;
+    
+    // Create metadata with namespace if provided
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    if let Some(ns) = namespace {
+        metadata.insert("namespace", ns.parse().unwrap());
+        info!(namespace=%ns, "Deleting in namespace");
+    }
+    
+    let response = client.delete_with_metadata(location, metadata).await?;
 
     info!(
         success=%response.success, 
@@ -1683,6 +1754,7 @@ pub async fn client_search(
 /// # Returns
 ///
 /// Result indicating success or error
+#[allow(dead_code)]
 pub async fn client_vector_search(
     addr: String,
     vector: Vec<f32>,

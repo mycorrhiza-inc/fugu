@@ -3,8 +3,6 @@ mod tests {
     use crate::fugu::index::{InvertedIndex, Token, WhitespaceTokenizer};
     use crate::fugu::node::Node;
     use crate::fugu::wal::WALCMD;
-    use std::path::PathBuf;
-    use std::time::Duration;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 

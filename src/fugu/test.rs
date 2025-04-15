@@ -2,9 +2,9 @@
 mod tests {
     use crate::cmd::commands::AddCommand;
     use clap::Parser;
-    use crate::fugu::index::{InvertedIndex, Token, Tokenizer, WhitespaceTokenizer};
+    use crate::fugu::index::{InvertedIndex, Token, WhitespaceTokenizer};
     use crate::fugu::wal::WALCMD;
-    use std::fs::{self, File};
+    use std::fs::File;
     use std::io::Write;
     use std::path::Path;
     use std::time::Duration;
@@ -17,6 +17,34 @@ mod tests {
             doc_id: docid.to_string(),
             position,
         }
+    }
+    
+    /// Creates a WAL channel with a dedicated consumer task to prevent transport errors
+    /// 
+    /// Returns:
+    /// - The sender handle to pass to components that need to send WAL commands
+    /// - A JoinHandle for the consumer task (should be aborted at the end of the test)
+    /// 
+    /// IMPORTANT: Tests using this must call `abort()` on the returned JoinHandle 
+    /// before completion to avoid transport errors and ensure proper cleanup.
+    async fn create_test_wal_channel() -> (mpsc::Sender<WALCMD>, tokio::task::JoinHandle<()>) {
+        let (tx, mut rx) = mpsc::channel::<WALCMD>(100);
+        
+        // Spawn a background task to consume all WAL messages
+        let task_handle = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                // Just acknowledge receipt to keep the channel healthy
+                match msg {
+                    WALCMD::Put { .. } => {},
+                    WALCMD::Delete { .. } => {},
+                    WALCMD::Patch { .. } => {},
+                    WALCMD::DumpWAL { .. } => {},
+                    WALCMD::FlushWAL { .. } => {},
+                }
+            }
+        });
+        
+        (tx, task_handle)
     }
 
     // Helper function to create a temporary markdown file with content
@@ -178,7 +206,7 @@ mod tests {
     async fn test_search_text() {
         // Create temporary directory for test files
         let temp_dir = tempdir().unwrap();
-        let temp_path = temp_dir.path();
+        let _temp_path = temp_dir.path();
 
         // Create a WAL channel for the index
         let (tx, _rx) = mpsc::channel::<WALCMD>(100);
@@ -252,6 +280,7 @@ mod tests {
     }
 
     // Function to collect and calculate percentiles
+    #[allow(dead_code)]
     fn calculate_percentiles(
         durations: &mut Vec<Duration>,
     ) -> (Duration, Duration, Duration, Duration) {
@@ -638,22 +667,28 @@ mod tests {
         index_dir.close().unwrap();
     }
 
-    // #[ignore] // Test is failing due to lock conflicts in index DB
+    // Test for proper index flushing and persistence
     #[tokio::test]
     async fn test_index_flush() {
         // Create temporary directory using ConfigManager instead of direct path
         use crate::fugu::config::new_config_manager;
         
         let temp_dir = tempdir().unwrap();
-        let config = new_config_manager(Some(temp_dir.path().to_path_buf()));
+        let _config = new_config_manager(Some(temp_dir.path().to_path_buf()));
         
         // Create a unique path for the flush test index
         let flush_dir = temp_dir.path().join("flush_index");
         std::fs::create_dir_all(&flush_dir).unwrap();
         let index_path = flush_dir.to_str().unwrap().to_string();
 
-        // Create a WAL channel for the index
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
+        // -----------------------------------------------------------------------
+        // IMPORTANT: Create a WAL channel with a dedicated consumer task
+        // -----------------------------------------------------------------------
+        // Without this consumer, we get "transport error" because WAL messages
+        // sent by the index operations would have no receiver, causing the channel
+        // to close prematurely.
+        // -----------------------------------------------------------------------
+        let (tx, wal_processor) = create_test_wal_channel().await;
 
         // Create the inverted index
         let index = InvertedIndex::new(&index_path, tx).await;
@@ -669,26 +704,33 @@ mod tests {
             index.add_term(token).await.unwrap();
         }
 
-        // Explicitly flush the index
+        // Explicitly flush the index to ensure data is persisted
         index.flush().await.unwrap();
         
         // Drop the index to release any locks
         drop(index);
         
         // Wait briefly to ensure resources are released
+        // This helps avoid potential race conditions between index instances
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // To verify flush worked, we'll create a new index with the same path
-        // and check if the data is still there
-        let (tx2, _rx2) = mpsc::channel::<WALCMD>(100);
+        // -----------------------------------------------------------------------
+        // Create a second WAL channel for the verification index
+        // -----------------------------------------------------------------------
+        // Again, a dedicated task is needed to consume WAL messages and prevent
+        // "transport error" when we drop the index at the end of the test.
+        // -----------------------------------------------------------------------
+        let (tx2, wal_processor2) = create_test_wal_channel().await;
+        
+        // Create a new index instance pointing to the same storage location
         let index2 = InvertedIndex::new(&index_path, tx2).await;
 
-        // Verify data persisted
+        // Verify data persisted after flush
         for i in 0..10 {
             let term = format!("term{}", i);
             let result = index2.search(&term).await.unwrap();
 
-            // The term should be found
+            // The term should be found in the index
             assert!(result.is_some(), "Term {} was not found after flush", term);
             let term_index = result.unwrap();
 
@@ -700,8 +742,20 @@ mod tests {
             );
         }
 
-        // Clean up
+        // Clean up resources
         drop(index2);
+        
+        // -----------------------------------------------------------------------
+        // IMPORTANT: Properly clean up the WAL processor tasks
+        // -----------------------------------------------------------------------
+        // We must explicitly abort these tasks since they're in an infinite loop
+        // waiting for messages. Without this cleanup, the tasks would continue
+        // running and potentially interfere with other tests.
+        // -----------------------------------------------------------------------
+        wal_processor.abort();
+        wal_processor2.abort();
+        
+        // Clean up the temporary directory
         temp_dir.close().unwrap();
     }
 

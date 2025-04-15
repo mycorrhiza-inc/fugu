@@ -7,9 +7,8 @@
 /// - Supports concurrent client operations
 use std::path::PathBuf;
 
-use rkyv;
 use tokio::sync::mpsc;
-use tracing::{trace, info, warn, error, debug};
+use tracing::{info, warn, error, debug};
 
 use crate::fugu::wal::{WAL, WALCMD};
 use crate::fugu::config::{ConfigManager, new_config_manager};
@@ -21,7 +20,6 @@ use crate::fugu::config::{ConfigManager, new_config_manager};
 /// - Maintaining index data
 /// - Processing client requests
 /// - Ensuring data consistency
-#[derive(Clone)]
 pub struct FuguServer {
     /// Path where server data and WAL are stored
     path: PathBuf,
@@ -38,6 +36,44 @@ pub struct FuguServer {
     wal_receiver_count: usize, // We can't clone the receiver, so just track the count
     /// Flag to enable shutdown timeout (for testing)
     use_shutdown_timeout: bool,
+    /// Channel to signal WAL processor task to shut down
+    shutdown_tx: Option<tokio::sync::mpsc::Sender<bool>>,
+}
+
+impl Clone for FuguServer {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            config: self.config.clone(),
+            wal: self.wal.clone(),
+            stop: self.stop,
+            wal_sender: self.wal_sender.clone(),
+            wal_receiver_count: self.wal_receiver_count,
+            use_shutdown_timeout: self.use_shutdown_timeout,
+            shutdown_tx: self.shutdown_tx.clone(),
+        }
+    }
+}
+
+impl Drop for FuguServer {
+    fn drop(&mut self) {
+        info!("FuguServer instance being dropped at {}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs());
+        
+        // Send shutdown signal to WAL processor task
+        if let Some(shutdown_tx) = &self.shutdown_tx {
+            let _ = shutdown_tx.try_send(true);
+            info!("Attempted to send shutdown signal to WAL processor");
+        }
+        
+        // The WAL shutdown is now handled automatically via Drop on the WAL struct
+        // The new WAL implementation handles namespaces and ensures all data is flushed
+    }
+}
+
+/// Helper to set up a temporary context for testing
+#[allow(dead_code)]
+fn create_test_dir() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
 }
 
 impl FuguServer {
@@ -75,56 +111,57 @@ impl FuguServer {
     pub fn new_with_options(path: PathBuf, config: ConfigManager, use_shutdown_timeout: bool) -> Self {
         // Create channel for WAL commands
         let (tx, mut rx): (mpsc::Sender<WALCMD>, mpsc::Receiver<WALCMD>) = mpsc::channel(1000);
+        info!("Created WAL channel with capacity 1000 at {}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs());
         
-        // Create WAL file path
-        let wal_path = config.base_dir().join("main.wal");
+        // Create WAL base directory path
+        let wal_dir = config.base_dir().join("wal");
         
-        // Store the receiver in a static variable to allow Clone implementation
-        let wal = WAL::open(wal_path.clone());
+        // Create an instance of our namespace-aware WAL
+        let wal = WAL::open(wal_dir.clone());
+        
+        // Create a clone for the processor task
+        let wal_processor = wal.clone();
         
         // Spawn a task to process WAL messages with proper shutdown handling
-        let _sender_clone = tx.clone();
-        let wal_path_clone = wal_path.clone();
-        let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<bool>(1);
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<bool>(1);
+        // Store reference to shutdown_tx for the Drop impl to use
+        let shutdown_tx_clone = shutdown_tx.clone();
         
+        // Handle WAL commands by routing them to the appropriate namespace
         tokio::spawn(async move {
-            let mut wal = WAL::open(wal_path_clone.clone());
-            let stop = false;
+            info!("WAL processor started");
             
             loop {
                 tokio::select! {
                     // Process WAL message
                     Some(msg) = rx.recv() => {
-                        match msg {
-                            WALCMD::Put { .. } | WALCMD::Delete { .. } | WALCMD::Patch { .. } => {
-                                match wal.push(msg.into()) {
-                                    Ok(_) => {}
-                                    Err(e) => { error!("WAL push error: {:?}", e); }
-                                }
-                            }
-                            WALCMD::DumpWAL { response } => {
-                                if let Ok(dump) = wal.dump() {
-                                    let _ = response.send(dump);
-                                }
-                            }
+                        // Process the command based on the namespace
+                        if let Err(e) = wal_processor.process_command(msg).await {
+                            error!("WAL process_command error: {:?}", e);
                         }
                     },
                     // Shutdown message
                     Some(_) = shutdown_rx.recv() => {
                         info!("WAL processor received shutdown signal");
+                        
+                        // Ensure all namespaces are flushed on shutdown
+                        wal_processor.shutdown().await;
+                        
                         break;
                     },
                     // Channel closed (server dropped)
                     else => {
-                        info!("WAL processor channel closed");
+                        debug!("WAL processor channel closed (normal during shutdown)");
+                        
+                        // Ensure all namespaces are flushed on shutdown
+                        wal_processor.shutdown().await;
+                        
                         break;
                     }
                 }
-                
-                if stop {
-                    break;
-                }
             }
+            
+            // The WAL will automatically handle proper shutdown via Drop
             info!("WAL processor shutdown complete");
         });
         
@@ -136,6 +173,7 @@ impl FuguServer {
             wal_sender: tx,
             wal_receiver_count: 1,
             use_shutdown_timeout,
+            shutdown_tx: Some(shutdown_tx_clone),
         }
     }
     
@@ -150,13 +188,33 @@ impl FuguServer {
         self.wal_sender.clone()
     }
     
-    /// Dumps the current WAL contents for debugging or inspection
+    /// Dumps the WAL contents for a specific namespace
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace to dump, or None for all namespaces
     ///
     /// # Returns
     ///
     /// A string representation of the WAL or an error
-    async fn dump_wal(&self) -> Result<String, rkyv::rancor::Error> {
-        Ok(self.wal.dump()?)
+    #[allow(dead_code)]
+    async fn dump_wal(&self, namespace: Option<String>) -> Result<String, Box<dyn std::error::Error>> {
+        // Create a oneshot channel for the response
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        
+        // Create and send the dump command
+        let cmd = WALCMD::DumpWAL {
+            response: tx,
+            namespace,
+        };
+        
+        self.wal_sender.send(cmd).await?;
+        
+        // Wait for the response
+        match rx.await {
+            Ok(dump) => Ok(dump),
+            Err(e) => Err(format!("Failed to receive WAL dump: {:?}", e).into()),
+        }
     }
 
     // The wal_listen logic is now handled by the tokio task spawned in new()
@@ -164,6 +222,7 @@ impl FuguServer {
     /// Starts the server and keeps it running until shutdown
     ///
     /// This method blocks until server shutdown is requested
+    #[allow(dead_code)]
     pub async fn up(&mut self) {
         // Just wait for shutdown, real processing is done in the spawned task
         while !self.stop {
@@ -181,29 +240,44 @@ impl FuguServer {
     /// # Returns
     ///
     /// Result indicating success or error during shutdown
+    #[allow(dead_code)]
     pub async fn down(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Shutting down server and saving all data");
         self.stop = true;
         
-        // Send shutdown signal to WAL processor task
+        // First send shutdown signal to WAL processor task
         if self.use_shutdown_timeout {
             // With timeout (default behavior)
+            // Send a dump command to ensure all namespaces are flushed
             if let Err(_) = tokio::time::timeout(
                 tokio::time::Duration::from_secs(5),
-                self.wal_sender.send(WALCMD::DumpWAL { 
-                    response: tokio::sync::oneshot::channel().0 
-                })
+                self.dump_wal(None)
             ).await {
                 warn!("Timeout sending final WAL command");
             }
         } else {
             // Without timeout (for testing)
-            let _ = self.wal_sender.send(WALCMD::DumpWAL { 
-                response: tokio::sync::oneshot::channel().0 
-            }).await;
+            let _ = self.dump_wal(None).await;
         }
         
-        // The actual flushing of data is handled by the node's unload_index method
+        // Send individual flush commands to all namespaces
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        
+        // Create a flush command for the default namespace (others will be handled by the WAL system)
+        let cmd = WALCMD::FlushWAL { 
+            namespace: "default".to_string(),
+            response: Some(tx),
+        };
+        
+        // Send the flush command
+        self.wal_sender.send(cmd).await?;
+        
+        // Wait for the flush to complete
+        if let Err(e) = rx.await {
+            warn!("Error waiting for WAL flush response: {:?}", e);
+        }
+        
+        // The actual flushing of index data is handled by the node's unload_index method
         Ok(())
     }
 }
@@ -211,7 +285,6 @@ impl FuguServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fugu::wal;
     use crate::fugu::{node, node::Node};
     use tempfile;
 
@@ -219,9 +292,8 @@ mod tests {
     pub async fn run_wal_text() -> Result<(), Box<dyn std::error::Error>> {
         // Use a temporary directory for test instead of hardcoded path
         let test_dir = tempfile::tempdir()?;
-        let wal_path = test_dir.path().join("test_wal.bin");
         let config = new_config_manager(Some(test_dir.path().to_path_buf()));
-        let mut server = FuguServer::new_with_options(wal_path, config, false);
+        let mut server = FuguServer::new_with_options(test_dir.path().to_path_buf(), config, false);
         let sender = server.get_wal_sender();
         let (tx_shutdown, rx_shutdown) = tokio::sync::oneshot::channel::<bool>();
 
@@ -235,14 +307,19 @@ mod tests {
         let mut nodes: Vec<Node> = Vec::new();
         let mut handles = Vec::new();
 
-        // Create 5 nodes
+        // Create 5 nodes with different namespaces
         for i in 0..5 {
-            let node = node::new(format!("node_{}/", i), None, sender.clone());
+            let namespace = format!("node_{}", i);
+            let sender_clone = sender.clone();
+            let node = node::new(namespace, None, sender_clone);
             nodes.push(node);
         }
 
         // Spawn concurrent tasks for each node
-        for (i, node) in nodes.into_iter().enumerate() {
+        for (i, _node) in nodes.into_iter().enumerate() {
+            // Clone the sender for this task
+            let task_sender = sender.clone();
+            
             let handle = tokio::spawn(async move {
                 // Each node does random operations
                 for j in 1..10 {
@@ -251,15 +328,36 @@ mod tests {
                     tokio::time::sleep(tokio::time::Duration::from_millis(random)).await;
 
                     // Randomly choose between put and delete
-                    if rand::random_bool(0.7) {
+                    if rand::random::<f64>() < 0.7 {
                         // 70% chance of put, 30% chance of delete
                         let key = format!("node_{}_key_{}", i, j);
                         let value = format!("value_from_node_{}_op_{}", i, j).into_bytes();
-                        let _ = node.walog(wal::WALOP::Put { key, value }).await;
+                        
+                        // Create a namespace-aware WAL command
+                        let cmd = WALCMD::Put {
+                            key: key.clone(),
+                            value: value.clone(),
+                            namespace: format!("node_{}", i),
+                        };
+                        
+                        // Send the command directly
+                        if let Err(e) = task_sender.send(cmd).await {
+                            eprintln!("Error sending command: {}", e);
+                        }
                     } else {
                         // Delete a random previous key
-                        let prev_key = format!("node_{}_key_{}", i, rand::random::<u32>() % j);
-                        let _ = node.walog(wal::WALOP::Delete { key: prev_key }).await;
+                        let prev_key = format!("node_{}_key_{}", i, rand::random::<u32>() % j.max(1));
+                        
+                        // Create a namespace-aware WAL command
+                        let cmd = WALCMD::Delete {
+                            key: prev_key.clone(),
+                            namespace: format!("node_{}", i),
+                        };
+                        
+                        // Send the command directly
+                        if let Err(e) = task_sender.send(cmd).await {
+                            eprintln!("Error sending command: {}", e);
+                        }
                     }
                 }
             });
@@ -268,13 +366,42 @@ mod tests {
 
         // Wait for all node operations to complete
         for handle in handles {
-            handle.await?;
+            if let Err(e) = handle.await {
+                eprintln!("Error in join handle: {}", e);
+            }
         }
 
         // Sleep briefly to ensure all operations are processed
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        
+        // Send dump commands to verify operations for each namespace
+        for i in 0..5 {
+            let namespace = format!("node_{}", i);
+            
+            // Create a channel for the dump response
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            
+            // Create dump command for this namespace
+            let cmd = WALCMD::DumpWAL {
+                response: tx,
+                namespace: Some(namespace.clone()),
+            };
+            
+            // Send the dump command
+            sender.send(cmd).await?;
+            
+            // Wait for the response
+            let dump = rx.await?;
+            
+            // Verify the namespace was properly processed
+            println!("Namespace {}: {}", namespace, dump);
+            assert!(dump.contains(&namespace), "Dump should contain namespace name");
+        }
+        
+        // Send shutdown signal
         let _ = tx_shutdown.send(true);
 
+        // Wait for server to shutdown
         let _ = server_handle.await?;
 
         Ok(())

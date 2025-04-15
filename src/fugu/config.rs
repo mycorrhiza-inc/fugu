@@ -6,7 +6,7 @@
 /// - Path resolution for various Fugu components
 use std::path::{Path, PathBuf};
 use std::fs;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// ConfigManager handles all configuration paths for Fugu
 ///
@@ -66,6 +66,7 @@ impl ConfigManager {
     }
     
     /// Returns the WAL path for a specific namespace
+    #[allow(dead_code)]
     pub fn namespace_wal_path(&self, namespace: &str) -> PathBuf {
         self.namespace_dir(namespace).join("wal.bin")
     }
@@ -76,6 +77,7 @@ impl ConfigManager {
     }
     
     /// Returns the temp directory path
+    #[allow(dead_code)]
     pub fn temp_dir(&self) -> PathBuf {
         self.base_dir.join("tmp")
     }

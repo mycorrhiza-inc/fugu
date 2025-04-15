@@ -21,6 +21,7 @@ use config::ConfigManager;
 /// # Returns
 ///
 /// Returns a new `FuguServer` instance
+#[allow(dead_code)]
 pub fn new(path: PathBuf) -> FuguServer {
     FuguServer::new(path)
 }
@@ -30,6 +31,7 @@ pub fn new(path: PathBuf) -> FuguServer {
 /// # Returns
 ///
 /// Returns a new `FuguServer` instance
+#[allow(dead_code)]
 pub fn new_default() -> FuguServer {
     let config = ConfigManager::new(None);
     FuguServer::new(config.base_dir().to_path_buf())
