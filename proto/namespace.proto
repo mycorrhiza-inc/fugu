@@ -2,9 +2,12 @@ syntax = "proto3";
 package namespace;
 
 service Namespace {
-	// Index a new file
+	// Index operations
 	rpc Index (IndexRequest) returns (IndexResponse); 
+	rpc StreamIndex (stream StreamIndexChunk) returns (IndexResponse);
 	rpc Delete (DeleteRequest) returns (DeleteResponse); 
+	
+	// Search operations
 	rpc Search (SearchRequest) returns (SearchResponse);
 	rpc VectorSearch (VectorSearchRequest) returns (VectorSearchResponse);
 }
@@ -13,9 +16,22 @@ message IndexRequest {
 	File file = 1;
 }
 
+message StreamIndexChunk {
+	// First chunk must contain file_name
+	string file_name = 1;
+	bytes chunk_data = 2;
+	// Set to true when this is the last chunk
+	bool is_last = 3;
+	// Optional namespace for multi-tenant environments
+	string namespace = 4;
+}
+
 message IndexResponse {
 	bool success =	1;
 	string location = 2; 
+	// Additional fields for streaming
+	int64 bytes_received = 3;
+	int64 chunks_received = 4;
 }
 
 message DeleteRequest {
@@ -50,8 +66,8 @@ message Snippet {
 	string text = 2;
 	int32 start = 3;
 	int32 end = 4;
-
 }
+
 message VectorSnippet {}
 
 message VectorSearchRequest {
