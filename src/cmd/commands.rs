@@ -146,6 +146,8 @@ pub enum NamespaceSubcommands {
     Up(NamespaceUpCommand),
     /// Stop the namespace
     Down(NamespaceDownCommand),
+    /// List all documents in the namespace
+    List(NamespaceListCommand),
 }
 
 #[derive(Parser)]
@@ -205,6 +207,22 @@ pub struct NamespaceDeleteCommand {
     /// Location to delete
     #[arg(short, long, required = true)]
     pub location: String,
+    
+    /// Server address
+    #[arg(short, long, default_value = "http://127.0.0.1:50051")]
+    pub addr: String,
+}
+
+#[derive(Parser)]
+#[command(name = "list", about = "List all documents in the namespace")]
+pub struct NamespaceListCommand {
+    /// Maximum results to return
+    #[arg(short, long, default_value = "100")]
+    pub limit: u32,
+    
+    /// Results offset
+    #[arg(short, long, default_value = "0")]
+    pub offset: u32,
     
     /// Server address
     #[arg(short, long, default_value = "http://127.0.0.1:50051")]

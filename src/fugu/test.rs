@@ -113,7 +113,7 @@ mod tests {
         let index_path = index_dir.path().join("index").to_str().unwrap().to_string();
 
         // Create the inverted index
-        let index = InvertedIndex::new(&index_path, tx).await;
+        let index = InvertedIndex::new(&index_path).await;
 
         // Tokenize and add terms from all files
         let files = [
@@ -216,7 +216,7 @@ mod tests {
         let index_path = index_dir.path().join("index").to_str().unwrap().to_string();
 
         // Create the inverted index
-        let index = InvertedIndex::new(&index_path, tx).await;
+        let index = InvertedIndex::new(&index_path).await;
 
         // Create a tokenizer
         let tokenizer = WhitespaceTokenizer;
@@ -352,7 +352,7 @@ mod tests {
             .to_string();
 
         // Create the inverted index
-        let index = InvertedIndex::new(&index_path, tx).await;
+        let index = InvertedIndex::new(&index_path).await;
 
         // Create a tokenizer
         let tokenizer = WhitespaceTokenizer;
@@ -691,7 +691,7 @@ mod tests {
         let (tx, wal_processor) = create_test_wal_channel().await;
 
         // Create the inverted index
-        let index = InvertedIndex::new(&index_path, tx).await;
+        let index = InvertedIndex::new(&index_path).await;
 
         // Add some test data
         for i in 0..10 {
@@ -723,7 +723,7 @@ mod tests {
         let (tx2, wal_processor2) = create_test_wal_channel().await;
         
         // Create a new index instance pointing to the same storage location
-        let index2 = InvertedIndex::new(&index_path, tx2).await;
+        let index2 = InvertedIndex::new(&index_path).await;
 
         // Verify data persisted after flush
         for i in 0..10 {
@@ -797,7 +797,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<WALCMD>(100);
 
         // Create the inverted index
-        let index = InvertedIndex::new(&index_path, tx).await;
+        let index = InvertedIndex::new(&index_path).await;
 
         // Add a reasonable amount of test data (reduced for faster testing)
         let num_terms = 500;

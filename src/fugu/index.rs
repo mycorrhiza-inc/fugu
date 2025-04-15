@@ -6,7 +6,6 @@
 /// - Text tokenization and relevancy ranking
 /// - BM25 scoring for search results
 /// - Performance metrics collection for search operations
-use crate::fugu::wal::WALCMD;
 use rkyv;
 use rkyv::{rancor::Error, Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -14,10 +13,10 @@ use sled;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use bm25::{SearchEngine, SearchEngineBuilder, Embedder, EmbedderBuilder, Language};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tracing::{debug, warn, info};
 
 /// Represents an indexed term with all its document occurrences
 ///
@@ -220,7 +219,6 @@ pub struct DocIndex {
 /// This structure:
 /// - Provides persistent storage of index data using sled
 /// - Supports concurrent read/write access
-/// - Uses WAL for durability
 /// - Implements BM25 relevance scoring
 /// - Tracks search performance metrics
 /// - Persistently stores document contents in a dedicated sled DB
@@ -229,8 +227,6 @@ pub struct DocIndex {
 pub struct InvertedIndex {
     /// Main index database for term-to-document mappings
     db: Arc<RwLock<sled::Db>>,
-    /// Channel for WAL operations
-    wal_chan: mpsc::Sender<WALCMD>,
     /// Path to the index storage
     path: String,
     /// BM25 search engine for ranking search results
@@ -242,6 +238,10 @@ pub struct InvertedIndex {
     doc_db: Arc<RwLock<sled::Db>>,
     /// Document-to-terms database for efficient deletion
     doc_term_db: Arc<RwLock<sled::Db>>,
+    /// Path to disk cache for text files
+    cache_path: String,
+    /// Size threshold for caching (files larger than this won't be cached)
+    cache_size_threshold: usize,
     /// Latest search metrics
     last_metrics: Arc<RwLock<SearchMetrics>>,
     /// Total documents in the index
@@ -254,12 +254,11 @@ impl InvertedIndex {
     /// # Arguments
     ///
     /// * `path` - Path to the index storage directory
-    /// * `wal_chan` - Channel for WAL operations
     ///
     /// # Returns
     ///
     /// A new InvertedIndex instance
-    pub async fn new(path: &str, wal_chan: mpsc::Sender<WALCMD>) -> Self {
+    pub async fn new(path: &str) -> Self {
         // Create the base path if it doesn't exist
         if !Path::new(path).exists() {
             std::fs::create_dir_all(path).expect("Failed to create index directory");
@@ -272,6 +271,12 @@ impl InvertedIndex {
         // Document content database
         let docs_path = format!("{}/docs", path);
         let doc_db = sled::open(&docs_path).expect("Failed to open documents database");
+        
+        // Create disk cache directory for text files
+        let cache_path = format!("{}/cache", path);
+        if !Path::new(&cache_path).exists() {
+            std::fs::create_dir_all(&cache_path).expect("Failed to create cache directory");
+        }
         
         // Initialize an empty search engine with default parameters
         // We're using String type for document IDs
@@ -291,14 +296,18 @@ impl InvertedIndex {
         let doc_term_path = format!("{}/doc_terms", path);
         let doc_term_db = sled::open(&doc_term_path).expect("Failed to open document-terms database");
         
+        // Define a reasonable cache size threshold (2MB)
+        const DEFAULT_CACHE_SIZE_THRESHOLD: usize = 2 * 1024 * 1024;
+        
         InvertedIndex {
             db: Arc::new(RwLock::new(db)),
-            wal_chan,
             path: path.to_string(),
             search_engine: Arc::new(RwLock::new(Some(search_engine))),
             embedder: Arc::new(RwLock::new(Some(embedder))),
             doc_db: Arc::new(RwLock::new(doc_db)),
             doc_term_db: Arc::new(RwLock::new(doc_term_db)),
+            cache_path: format!("{}/cache", path),
+            cache_size_threshold: DEFAULT_CACHE_SIZE_THRESHOLD,
             last_metrics: Arc::new(RwLock::new(SearchMetrics::new())),
             total_docs: Arc::new(RwLock::new(0)),
         }
@@ -308,6 +317,31 @@ impl InvertedIndex {
     #[allow(dead_code)]
     pub async fn get_last_metrics(&self) -> SearchMetrics {
         self.last_metrics.read().await.clone()
+    }
+    
+    /// Returns the total number of unique terms in the index
+    ///
+    /// # Returns
+    ///
+    /// The number of unique terms
+    pub fn get_total_terms(&self) -> usize {
+        // Get a read guard on the database
+        let guard = match self.db.try_read() {
+            Ok(guard) => guard,
+            Err(_) => return 0, // Return 0 if we can't get a read lock
+        };
+        
+        // Count the total number of unique terms
+        guard.iter().count()
+    }
+    
+    /// Returns the total number of documents in the index
+    ///
+    /// # Returns
+    ///
+    /// The number of documents
+    pub async fn get_total_docs(&self) -> usize {
+        *self.total_docs.read().await
     }
     
     /// Flushes all pending changes to disk
@@ -330,8 +364,38 @@ impl InvertedIndex {
         let doc_term_db = self.doc_term_db.read().await;
         doc_term_db.flush()?;
         
+        // Note: The disk cache doesn't need explicit flushing since each file is written 
+        // with tokio::fs::write which handles proper flushing
+        
         println!("Flushed index and document data to {}", self.path);
         Ok(())
+    }
+    
+    /// Gets cache information including directory and stats
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing (cache_path, file_count, total_size_bytes)
+    pub async fn get_cache_info(&self) -> Result<(String, usize, u64), Box<dyn std::error::Error>> {
+        let cache_path = self.cache_path.clone();
+        
+        // Read directory entries
+        let mut entries = tokio::fs::read_dir(&cache_path).await?;
+        
+        let mut file_count = 0;
+        let mut total_size = 0u64;
+        
+        // Count files and total size
+        while let Some(entry) = entries.next_entry().await? {
+            if let Ok(metadata) = entry.metadata().await {
+                if metadata.is_file() {
+                    file_count += 1;
+                    total_size += metadata.len();
+                }
+            }
+        }
+        
+        Ok((cache_path, file_count, total_size))
     }
 
     pub async fn add_term(&self, token: Token) -> Result<(), Box<dyn std::error::Error>> {
@@ -374,14 +438,6 @@ impl InvertedIndex {
         };
 
         let serialized = rkyv::to_bytes::<Error>(&entry)?;
-        // Log to WAL before making the change
-        self.wal_chan
-            .send(WALCMD::Put {
-                namespace: "index".to_string(),
-                key: term.to_string(),
-                value: serialized.to_vec(),
-            })
-            .await?;
 
         // Update the index
         db.insert(term.as_bytes(), serialized.as_slice())?;
@@ -473,14 +529,7 @@ impl InvertedIndex {
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Panic>(&entry)?;
         
-        // Log to WAL before making the change
-        self.wal_chan
-            .send(WALCMD::Put {
-                namespace: "index".to_string(),
-                key: term.to_string(),
-                value: serialized.to_vec(),
-            })
-            .await?;
+        // WAL logging has been removed
 
         // Update the index
         db.insert(term.as_bytes(), serialized.as_slice())?;
@@ -495,10 +544,53 @@ impl InvertedIndex {
         tokenizer: &T,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let start_time = Instant::now();
+        info!(doc_id=%doc_id, text_size=%text.len(), "Starting document indexing");
         
         // Store the document content in the document database
         let doc_db = self.doc_db.write().await;
         doc_db.insert(doc_id.as_bytes(), text.as_bytes())?;
+        
+        // Check if the document is a text file that should be cached
+        // First check if it's small enough to cache
+        let text_bytes = text.as_bytes();
+        let is_cacheable_size = text_bytes.len() <= self.cache_size_threshold;
+        
+        // Determine if it's likely a text file based on a simple heuristic:
+        // - Non-binary text files typically have a high proportion of printable ASCII
+        // - Check a sample of the file to see if it's primarily printable ASCII
+        let is_text_file = if text_bytes.len() > 0 {
+            let sample_size = std::cmp::min(1024, text_bytes.len());
+            let printable_count = text_bytes[0..sample_size]
+                .iter()
+                .filter(|&&b| (b >= 32 && b <= 126) || b == 9 || b == 10 || b == 13)
+                .count();
+            
+            // If more than 90% is printable, it's likely a text file
+            (printable_count as f32 / sample_size as f32) > 0.9
+        } else {
+            // Empty files are considered text files
+            true
+        };
+        
+        // Save to disk cache if it's a small enough text file
+        if is_cacheable_size && is_text_file {
+            // Create a file path in the cache directory
+            let cache_file_path = PathBuf::from(&self.cache_path).join(doc_id);
+            
+            // Write the file to the cache
+            match tokio::fs::write(&cache_file_path, text_bytes).await {
+                Ok(_) => {
+                    debug!("Saved document '{}' to disk cache at {:?}", doc_id, cache_file_path);
+                },
+                Err(e) => {
+                    warn!("Failed to write document '{}' to disk cache: {}", doc_id, e);
+                    // Continue even if caching fails - this is non-critical
+                }
+            }
+        } else {
+            debug!("Document '{}' not cached (size: {}, is_text: {})", 
+                   doc_id, text_bytes.len(), is_text_file);
+        }
         
         // Tokenize the document for the inverted index
         let tokens = tokenizer.tokenize(text, doc_id);
@@ -541,6 +633,9 @@ impl InvertedIndex {
             .map(|(term, _)| term.clone())
             .collect();
         
+        // Keep track of the term count for logging
+        let term_count = unique_terms.len();
+        
         // Create or update the document-to-terms mapping
         let doc_term_db = self.doc_term_db.write().await;
         let doc_index = DocIndex {
@@ -564,7 +659,7 @@ impl InvertedIndex {
         
         // Record indexing performance
         let indexing_time = start_time.elapsed();
-        println!("Indexed document '{}' in {:?}", doc_id, indexing_time);
+        info!(doc_id=%doc_id, time=?indexing_time, terms=%term_count, "Document indexed successfully");
         
         Ok(())
     }
@@ -604,13 +699,8 @@ impl InvertedIndex {
                                 Err(e) => println!("[REMOVE_TERM] Error removing term from index: {}", e)
                             }
                             
-                            // Log deletion to WAL, but don't wait for ack to avoid timeouts
-                            // This is a tradeoff for test reliability, in production you would want to ensure durability
-                            let _ = self.wal_chan.try_send(WALCMD::Delete {
-                                key: term.to_string(),
-                                namespace: "index".to_string(),
-                            });
-                            println!("[REMOVE_TERM] Sent WAL delete operation without waiting (to avoid test timeouts)");
+                            // WAL logging removed
+                            println!("[REMOVE_TERM] WAL logging has been removed");
                         } else {
                             println!("[REMOVE_TERM] Term '{}' still has {} documents, updating entry", 
                                     term, entry.doc_ids.len());
@@ -623,14 +713,8 @@ impl InvertedIndex {
                                         Err(e) => println!("[REMOVE_TERM] Error updating term in index: {}", e)
                                     }
                                     
-                                    // Log update to WAL, but don't wait for ack to avoid timeouts
-                                    // This is a tradeoff for test reliability, in production you would want to ensure durability
-                                    let _ = self.wal_chan.try_send(WALCMD::Put {
-                                        key: term.to_string(),
-                                        value: serialized.to_vec(),
-                                        namespace: "index".to_string(),
-                                    });
-                                    println!("[REMOVE_TERM] Sent WAL put operation without waiting (to avoid test timeouts)");
+                                    // WAL logging removed
+                                    println!("[REMOVE_TERM] WAL logging has been removed");
                                 },
                                 Err(e) => println!("[REMOVE_TERM] Error serializing updated term: {}", e)
                             }
@@ -669,6 +753,63 @@ impl InvertedIndex {
             Ok(Some(entry))
         } else {
             Ok(None)
+        }
+    }
+    
+    /// Retrieves a document by its ID, first checking the disk cache
+    ///
+    /// This method:
+    /// - First checks if the document is in the disk cache
+    /// - If not found in cache, retrieves from the document database
+    ///
+    /// # Arguments
+    ///
+    /// * `doc_id` - ID of the document to retrieve
+    ///
+    /// # Returns
+    ///
+    /// Result containing the document content or None if not found
+    pub async fn get_document(&self, doc_id: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        // First check the disk cache
+        let cache_file_path = PathBuf::from(&self.cache_path).join(doc_id);
+        
+        if cache_file_path.exists() {
+            // Read from disk cache
+            match tokio::fs::read_to_string(&cache_file_path).await {
+                Ok(content) => {
+                    debug!("Retrieved document '{}' from disk cache", doc_id);
+                    return Ok(Some(content));
+                },
+                Err(e) => {
+                    warn!("Failed to read document '{}' from disk cache: {}", doc_id, e);
+                    // Continue to try from document database if cache read fails
+                }
+            }
+        }
+        
+        // Not in cache or cache read failed, get from document database
+        let doc_db = self.doc_db.read().await;
+        
+        match doc_db.get(doc_id.as_bytes())? {
+            Some(bytes) => {
+                // Convert bytes to string
+                match String::from_utf8(bytes.to_vec()) {
+                    Ok(content) => {
+                        debug!("Retrieved document '{}' from document database", doc_id);
+                        Ok(Some(content))
+                    },
+                    Err(_) => {
+                        // If it's not valid UTF-8, return as lossy string
+                        let lossy_content = String::from_utf8_lossy(&bytes).to_string();
+                        debug!("Retrieved document '{}' from document database (invalid UTF-8)", doc_id);
+                        Ok(Some(lossy_content))
+                    }
+                }
+            },
+            None => {
+                debug!("Document '{}' not found", doc_id);
+                Ok(None)
+            }
         }
     }
     
@@ -751,6 +892,16 @@ impl InvertedIndex {
         match doc_db.remove(doc_id.as_bytes()) {
             Ok(_) => println!("[INDEX] Successfully removed document from document database"),
             Err(e) => println!("[INDEX] Error removing document from database: {}", e)
+        }
+        
+        // Also remove from disk cache if it exists
+        let cache_file_path = PathBuf::from(&self.cache_path).join(doc_id);
+        if cache_file_path.exists() {
+            println!("[INDEX] Removing document from disk cache: {}", doc_id);
+            match tokio::fs::remove_file(&cache_file_path).await {
+                Ok(_) => println!("[INDEX] Successfully removed document from disk cache"),
+                Err(e) => println!("[INDEX] Error removing document from disk cache: {}", e)
+            }
         }
         
         // Decrement document count if we had any terms

@@ -890,8 +890,8 @@ impl Drop for WAL {
         // Set shutdown flag - can't do async operations in Drop
         self.shutdown_flag.store(true, Ordering::Relaxed);
         
-        // Log that we're being dropped
-        info!("WAL system being dropped");
+        // Log that we're being dropped with timestamp to help debug issues
+        info!("WAL system being dropped at {:?}", std::time::Instant::now());
     }
 }
 

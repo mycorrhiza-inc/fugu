@@ -2,11 +2,9 @@
 ///
 /// A Node represents a single namespace in the Fugu search engine and:
 /// - Manages an inverted index for fast text search
-/// - Handles write-ahead logging for data durability
 /// - Provides persistence of indexes to disk
 /// - Supports concurrent operations
 use crate::fugu::index::{InvertedIndex, Token, WhitespaceTokenizer};
-use crate::fugu::wal::{WALCMD, WALOP};
 use crate::fugu::config::{ConfigManager, new_config_manager};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -26,7 +24,6 @@ pub enum NodeJob {}
 /// Each Node:
 /// - Has its own namespace identifier
 /// - Manages a dedicated inverted index
-/// - Communicates with the WAL for durability
 /// - Can be loaded/unloaded independently
 #[derive(Clone, Debug)]
 pub struct Node {
@@ -37,10 +34,7 @@ pub struct Node {
     /// How often to check for jobs (in milliseconds)
     #[allow(dead_code)]
     frequency: u16,
-    /// Channel for sending WAL commands
-    wal_chan: tokio::sync::mpsc::Sender<WALCMD>,
     /// Flag to signal node shutdown
-    // Channel endpoints can't be cloned, so we use a bool to track shutdown state instead
     #[allow(dead_code)]
     shutdown: bool,
     /// Queue of pending jobs
@@ -57,22 +51,21 @@ impl Node {
     ///
     /// * `namespace` - Unique namespace identifier
     /// * `config_path` - Optional path for configuration and index storage
-    /// * `wal_chan` - Channel for sending WAL commands
     ///
     /// # Returns
     ///
     /// A new Node instance
-    pub fn new(namespace: String, config_path: Option<PathBuf>, wal_chan: mpsc::Sender<WALCMD>) -> Self {
+    pub fn new(namespace: String, config_path: Option<PathBuf>) -> Self {
         // Create config manager with optional custom path
         let config = new_config_manager(config_path);
         
         // Ensure namespace directory exists
         let _ = config.ensure_namespace_dir(&namespace);
         
+        // Create a node
         Node {
             namespace,
             config,
-            wal_chan,
             frequency: 1000, //check every second
             shutdown: false,
             job_queue: vec![],
@@ -106,7 +99,7 @@ impl Node {
     #[allow(dead_code)]
     async fn init_index(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let index_path_str = self.get_index_path_str();
-        let index = InvertedIndex::new(&index_path_str, self.wal_chan.clone()).await;
+        let index = InvertedIndex::new(&index_path_str).await;
         self.inverted_index = Some(index);
         Ok(())
     }
@@ -269,53 +262,6 @@ impl Node {
         }
     }
     
-    /// Logs a WAL operation with namespace
-    ///
-    /// # Arguments
-    ///
-    /// * `msg` - WAL operation to log
-    ///
-    /// # Returns
-    ///
-    /// Result indicating success or error
-    #[allow(dead_code)]
-    pub async fn walog(&self, msg: WALOP) -> Result<(), mpsc::error::SendError<WALCMD>> {
-        let msg_clone = msg.clone();
-        let namespace = self.namespace.clone();
-        
-        // Convert to namespace-aware WAL command
-        let cmd = match msg {
-            WALOP::Put { key, value } => {
-                WALCMD::Put { 
-                    key, 
-                    value, 
-                    namespace: namespace.clone() 
-                }
-            },
-            WALOP::Delete { key } => {
-                WALCMD::Delete { 
-                    key, 
-                    namespace: namespace.clone() 
-                }
-            },
-            WALOP::Patch { key, value } => {
-                WALCMD::Patch { 
-                    key, 
-                    value, 
-                    namespace: namespace.clone() 
-                }
-            }
-        };
-        
-        // Send the command
-        match self.wal_chan.send(cmd).await {
-            Ok(_) => {
-                debug!(namespace=%namespace, op=?msg_clone, "WAL operation logged");
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
-    }
     
     /// Deletes a file from the index
     ///
@@ -414,10 +360,7 @@ impl Node {
             }
         }
         
-        let index = InvertedIndex::new(
-            &index_path_str,
-            self.wal_chan.clone()
-        ).await;
+        let index = InvertedIndex::new(&index_path_str).await;
         
         self.inverted_index = Some(index);
         info!(path=%index_path.display(), "Loaded index");
@@ -471,13 +414,12 @@ impl Node {
 ///
 /// * `namespace` - Unique namespace identifier
 /// * `config_path` - Optional path for configuration and index storage
-/// * `wal_chan` - Channel for sending WAL commands
 ///
 /// # Returns
 ///
 /// A new Node instance
-pub fn new(namespace: String, config_path: Option<PathBuf>, wal_chan: mpsc::Sender<WALCMD>) -> Node {
-    Node::new(namespace, config_path, wal_chan)
+pub fn new(namespace: String, config_path: Option<PathBuf>) -> Node {
+    Node::new(namespace, config_path)
 }
 
 #[cfg(test)]
@@ -486,7 +428,6 @@ mod tests {
     use crate::fugu::index::Token;
     use std::time::Duration;
     use tempfile::tempdir;
-    use tokio::sync::mpsc;
     use tokio::time::sleep;
     
     // Helper function to create a test token
@@ -504,14 +445,10 @@ mod tests {
         // Create temporary directory
         let temp_dir = tempdir().unwrap();
         
-        // Create a WAL channel
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
-        
         // Create a node with the temp dir as config path
         let node = Node::new(
             "test_namespace".to_string(),
-            Some(temp_dir.path().to_path_buf()),
-            tx
+            Some(temp_dir.path().to_path_buf())
         );
         
         (node, temp_dir)
@@ -564,11 +501,9 @@ mod tests {
         node1.unload_index().await.unwrap();
         
         // Create a new node with the same config path
-        let (tx, _rx) = mpsc::channel::<WALCMD>(100);
         let mut node2 = Node::new(
             "test_namespace".to_string(),
-            Some(temp_dir.path().to_path_buf()),
-            tx
+            Some(temp_dir.path().to_path_buf())
         );
         
         // Load the index
@@ -593,26 +528,20 @@ mod tests {
         // Setup test environment with multiple nodes
         let temp_dir = tempdir().unwrap();
         
-        // Create a channel to receive WAL commands for verification with a larger buffer
-        let (tx, mut rx) = mpsc::channel::<WALCMD>(1000);
-        
         // Create multiple nodes with different namespaces but same config path
         let mut node1 = Node::new(
             "namespace1".to_string(),
-            Some(temp_dir.path().to_path_buf()),
-            tx.clone()
+            Some(temp_dir.path().to_path_buf())
         );
         
         let mut node2 = Node::new(
             "namespace2".to_string(),
-            Some(temp_dir.path().to_path_buf()),
-            tx.clone()
+            Some(temp_dir.path().to_path_buf())
         );
         
         let mut node3 = Node::new(
             "namespace3".to_string(),
-            Some(temp_dir.path().to_path_buf()),
-            tx.clone()
+            Some(temp_dir.path().to_path_buf())
         );
         
         // Load all indices
@@ -632,105 +561,7 @@ mod tests {
         assert_ne!(path2, path3);
         assert_ne!(path1, path3);
         
-        // Send data to each node first
-        let send_result1 = node1.walog(WALOP::Put { 
-            key: "apple".to_string(), 
-            value: b"apple_value".to_vec() 
-        }).await;
-        
-        let send_result2 = node2.walog(WALOP::Put { 
-            key: "banana".to_string(), 
-            value: b"banana_value".to_vec() 
-        }).await;
-        
-        let send_result3 = node3.walog(WALOP::Put { 
-            key: "cherry".to_string(), 
-            value: b"cherry_value".to_vec() 
-        }).await;
-        
-        // Drop these results to proceed even if some sends fail
-        drop(send_result1);
-        drop(send_result2);
-        drop(send_result3);
-        
-        // Create a task to process WAL commands for verification
-        let verification_handle = tokio::spawn(async move {
-            let mut namespace1_ops = Vec::new();
-            let mut namespace2_ops = Vec::new();
-            let mut namespace3_ops = Vec::new();
-            
-            // Set timeout for receiving commands - increase to allow more time
-            let mut timeout = tokio::time::interval(Duration::from_millis(100));
-            let start = Instant::now();
-            let max_wait = Duration::from_millis(1000); // Increase timeout
-            
-            // Collect WAL commands with timeout
-            'collect: loop {
-                tokio::select! {
-                    _ = timeout.tick() => {
-                        if start.elapsed() > max_wait || 
-                           (namespace1_ops.len() > 0 && namespace2_ops.len() > 0 && namespace3_ops.len() > 0) {
-                            debug!("Verification complete or timed out");
-                            break 'collect;
-                        }
-                    }
-                    cmd = rx.recv() => {
-                        match cmd {
-                            Some(cmd) => {
-                                match &cmd {
-                                    WALCMD::Put { key, namespace, .. } |
-                                    WALCMD::Delete { key, namespace, .. } |
-                                    WALCMD::Patch { key, namespace, .. } => {
-                                        match namespace.as_str() {
-                                            "namespace1" => namespace1_ops.push(key.clone()),
-                                            "namespace2" => namespace2_ops.push(key.clone()),
-                                            "namespace3" => namespace3_ops.push(key.clone()),
-                                            _ => {}
-                                        }
-                                    },
-                                    // Handle other command types
-                                    WALCMD::DumpWAL { .. } | WALCMD::FlushWAL { .. } => {
-                                        // These commands don't have keys, so we don't track them
-                                    }
-                                }
-                            },
-                            None => {
-                                debug!("Channel closed during verification");
-                                break 'collect;
-                            }
-                        }
-                    }
-                }
-            }
-            
-            debug!("Collected operations - namespace1: {}, namespace2: {}, namespace3: {}", 
-                namespace1_ops.len(), namespace2_ops.len(), namespace3_ops.len());
-                
-            // Check if we received any operations (we might not get all due to channel closing)
-            // We'll relax this assertion to allow the test to pass if we don't get operations
-            // due to timing/async issues, since the actual functionality being tested
-            // is the separate namespace paths and index isolation
-            if namespace1_ops.len() > 0 {
-                assert!(namespace1_ops.contains(&"apple".to_string()), 
-                    "Namespace1 should contain 'apple'");
-            }
-            
-            if namespace2_ops.len() > 0 {
-                assert!(namespace2_ops.contains(&"banana".to_string()), 
-                    "Namespace2 should contain 'banana'");
-            }
-            
-            if namespace3_ops.len() > 0 {
-                assert!(namespace3_ops.contains(&"cherry".to_string()), 
-                    "Namespace3 should contain 'cherry'");
-            }
-        });
-        
-        // Wait for verification to complete
-        // Use try_join to prevent test failure if verification has issues
-        let _ = tokio::time::timeout(Duration::from_millis(2000), verification_handle).await;
-        
-        // Also create test documents in the indices
+        // Create test documents in the indices
         // Write test files in each index directory that we can index
         let doc_id1 = "test_doc1.txt";
         let doc_id2 = "test_doc2.txt";
@@ -745,11 +576,8 @@ mod tests {
         std::fs::write(&doc_path2, "This is a test document with banana content").unwrap();
         std::fs::write(&doc_path3, "This is a test document with cherry content").unwrap();
         
-        // Now index the test documents - don't use add_term directly as it's causing issues with WAL channel
+        // Now index the test documents
         if node1.inverted_index.is_some() {
-            // Instead of direct term addition, use a custom indexer approach
-            let mut index_content = "This is a test document with apple content";
-            std::fs::write(&doc_path1, index_content).unwrap();
             let _ = node1.index_file(doc_path1).await;
         }
         
@@ -779,9 +607,6 @@ mod tests {
     
     #[tokio::test]
     async fn test_concurrent_operations() {
-        // Skip the concurrent WAL test entirely and just test file operations
-        // This test has flaky behavior due to channel/async timing issues
-        
         // Setup test environment
         let (mut node, temp_dir) = setup_test_node().await;
         

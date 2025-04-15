@@ -1,6 +1,6 @@
 use crate::cmd::commands::{
     NamespaceCommand, NamespaceSubcommands,
-    NamespaceIndexCommand, NamespaceSearchCommand, NamespaceDeleteCommand
+    NamespaceIndexCommand, NamespaceSearchCommand, NamespaceDeleteCommand, NamespaceListCommand
 };
 use crate::fugu::grpc::{client_index, client_delete, client_search};
 use std::path::PathBuf;
@@ -30,6 +30,9 @@ pub async fn run(ns: NamespaceCommand) -> Result<(), Box<dyn std::error::Error +
                 println!("gracefully stopping namespace `{namespace}`...");
             }
             // TODO: Connect to the server and send a shutdown command
+        }
+        Some(NamespaceSubcommands::List(list_cmd)) => {
+            handle_list_command(list_cmd, &namespace).await?;
         }
         None => {
             if ns.status {
@@ -73,7 +76,15 @@ pub async fn handle_index_command(
     println!("Indexing file in namespace `{namespace}`...");
     
     // Index the file using the client, passing the namespace
-    client_index(cmd.addr, cmd.file, Some(namespace.to_string())).await?;
+    let result = client_index(cmd.addr, cmd.file, Some(namespace.to_string())).await?;
+    
+    // Display indexing status information to the user
+    println!("Indexing completed successfully:");
+    println!("  - Location: {}", result.location);
+    println!("  - Bytes processed: {}", result.bytes_received);
+    println!("  - Indexed terms: {}", result.indexed_terms);
+    println!("  - Indexing time: {} ms", result.indexing_time_ms);
+    println!("  - Status: {}", result.indexing_status);
     
     Ok(())
 }
@@ -108,6 +119,36 @@ pub async fn handle_delete_command(
     
     // Delete the document with namespace
     client_delete(cmd.addr, cmd.location, Some(namespace.to_string())).await?;
+    
+    Ok(())
+}
+
+// Handle the list subcommand
+pub async fn handle_list_command(
+    cmd: NamespaceListCommand,
+    namespace: &str
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("Listing documents in namespace `{namespace}`...");
+    
+    // First try an empty query to list all documents in the namespace
+    println!("Querying with empty string...");
+    client_search(
+        cmd.addr.clone(), 
+        String::new(), 
+        cmd.limit.try_into().unwrap_or(100), 
+        cmd.offset.try_into().unwrap_or(0),
+        Some(namespace.to_string())
+    ).await?;
+    
+    // Then try with a wildcard-like broad search for diagnostic purposes
+    println!("\nTrying with broad search term 'a'...");
+    client_search(
+        cmd.addr, 
+        "a".to_string(), 
+        cmd.limit.try_into().unwrap_or(100), 
+        cmd.offset.try_into().unwrap_or(0),
+        Some(namespace.to_string())
+    ).await?;
     
     Ok(())
 }

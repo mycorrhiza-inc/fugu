@@ -18,7 +18,6 @@ use crdts::{CmRDT, CvRDT};
 use num_traits::ToPrimitive;
 
 use crate::fugu::server::FuguServer;
-use crate::fugu::wal::WALCMD;
 use crate::fugu::node::Node;
 
 // Include the generated protobuf code
@@ -49,8 +48,6 @@ pub struct NamespaceService {
     /// The underlying Fugu server
     #[allow(dead_code)]
     server: FuguServer,
-    /// Channel for sending WAL commands
-    wal_sender: mpsc::Sender<WALCMD>,
     /// Path for configuration and storage
     config_path: PathBuf,
     /// Map of namespace identifiers to Node instances
@@ -69,15 +66,38 @@ impl NamespaceService {
     /// A new NamespaceService instance
     pub fn new(path: PathBuf) -> Self {
         let server = FuguServer::new(path.clone());
-        let wal_sender = server.get_wal_sender();
         let config_path = path.clone();
 
         Self { 
             server, 
-            wal_sender,
             config_path,
             nodes: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+    
+    /// Explicitly shutdown the namespace service and its server instance
+    ///
+    /// This method ensures that all resources are properly cleaned up
+    pub async fn shutdown(&mut self) -> Result<(), BoxError> {
+        info!("Shutting down NamespaceService");
+        
+        // First shut down the server to ensure WAL commands are processed
+        match self.server.down().await {
+            Ok(_) => info!("FuguServer shut down cleanly"),
+            Err(e) => warn!("Error during FuguServer shutdown: {}", e),
+        }
+        
+        // Clean up and flush all nodes
+        let mut nodes = self.nodes.write().await;
+        for (namespace, mut node) in nodes.drain() {
+            info!(namespace=%namespace, "Shutting down node");
+            if let Err(e) = node.unload_index().await {
+                warn!(namespace=%namespace, "Error unloading node index: {}", e);
+            }
+        }
+        
+        info!("NamespaceService shutdown complete");
+        Ok(())
     }
     
     /// Gets or creates a node for the given namespace
@@ -104,8 +124,7 @@ impl NamespaceService {
         // Node doesn't exist, create a new one
         let node = crate::fugu::node::new(
             namespace.to_string(), 
-            Some(self.config_path.clone()),
-            self.wal_sender.clone()
+            Some(self.config_path.clone())
         );
         
         nodes.insert(namespace.to_string(), node.clone());
@@ -561,12 +580,20 @@ impl Namespace for NamespaceService {
             Status::internal(format!("Failed to index file: {}", e))
         })?;
         
-        // Build the response
+        // Build the enhanced response with indexing details
         let response = IndexResponse {
             success: true,
             location: format!("/{}", file.name),
             bytes_received: file.body.len() as i64,
             chunks_received: 1,
+            indexed_terms: if let Some(index) = node.get_index() {
+                // Get term count from the inverted index if available
+                index.get_total_terms() as i64
+            } else {
+                0
+            },
+            indexing_time_ms: indexing_result.as_millis() as i64,
+            indexing_status: "completed".to_string(),
         };
 
         info!(namespace=%namespace, file=%file.name, time=?indexing_result, "[gRPC Response] index request completed");
@@ -668,6 +695,14 @@ impl Namespace for NamespaceService {
             location: format!("/{}", file_name),
             bytes_received: total_bytes,
             chunks_received,
+            indexed_terms: if let Some(index) = node.get_index() {
+                // Get term count from the inverted index if available
+                index.get_total_terms() as i64
+            } else {
+                0
+            },
+            indexing_time_ms: indexing_result.as_millis() as i64,
+            indexing_status: "completed".to_string(),
         };
         
         info!(
@@ -929,27 +964,27 @@ pub async fn start_grpc_server(
 
     // Use graceful shutdown if a receiver was provided
     if let Some(shutdown_signal) = shutdown_rx {
-        let namespace_service_clone = namespace_service.clone();
+        let mut namespace_service_clone = namespace_service.clone();
         let server_fut = Server::builder()
             .add_service(NamespaceServer::new(namespace_service))
             .serve_with_shutdown(addr, async move {
                 // Wait for the shutdown signal
                 let _ = shutdown_signal.await;
                 
-                info!("Graceful shutdown signal received, unloading all indices");
+                info!("Graceful shutdown signal received, unloading all indices and shutting down server");
                 
-                // Unload all indices on shutdown (with timeout)
-                let nodes = namespace_service_clone.nodes.read().await;
-                for (namespace, _) in nodes.iter() {
-                    // Add timeout for each unload operation
-                    match tokio::time::timeout(
-                        tokio::time::Duration::from_secs(5), // 5 second timeout per namespace
-                        namespace_service_clone.unload_node(namespace)
-                    ).await {
-                        Ok(Ok(_)) => info!(namespace=%namespace, "Successfully unloaded node for namespace"),
-                        Ok(Err(e)) => error!(namespace=%namespace, error=%e, "Error unloading node for namespace"),
-                        Err(_) => warn!(namespace=%namespace, "Timeout unloading node for namespace"),
-                    }
+                // Use our new shutdown method for clean shutdown
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(10), // 10 second timeout for full shutdown
+                    namespace_service_clone.shutdown()
+                ).await {
+                    Ok(shutdown_result) => {
+                        match shutdown_result {
+                            Ok(_) => info!("NamespaceService graceful shutdown completed successfully"),
+                            Err(inner_err) => error!("Error during NamespaceService shutdown: {}", inner_err),
+                        }
+                    },
+                    Err(_) => error!("Timeout during NamespaceService shutdown"),
                 }
             });
 
@@ -958,7 +993,7 @@ pub async fn start_grpc_server(
         // No shutdown signal provided - don't allow this in tests
         // Always add a shutdown channel with timeout to prevent hanging
         let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let namespace_service_clone = namespace_service.clone();
+        let mut namespace_service_clone = namespace_service.clone();
         let server_fut = Server::builder()
             .add_service(NamespaceServer::new(namespace_service))
             .serve_with_shutdown(addr, async move {
@@ -970,15 +1005,18 @@ pub async fn start_grpc_server(
                     }
                 }
                 
-                // Unload all indices on shutdown
-                let nodes = namespace_service_clone.nodes.read().await;
-                for (namespace, _) in nodes.iter() {
-                    if let Err(_e) = tokio::time::timeout(
-                        tokio::time::Duration::from_secs(5),
-                        namespace_service_clone.unload_node(namespace)
-                    ).await {
-                        warn!(namespace=%namespace, "Timeout unloading node for namespace");
-                    }
+                // Use our new shutdown method for clean shutdown
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(10), // 10 second timeout for full shutdown
+                    namespace_service_clone.shutdown()
+                ).await {
+                    Ok(shutdown_result) => {
+                        match shutdown_result {
+                            Ok(_) => info!("NamespaceService graceful shutdown completed successfully"),
+                            Err(inner_err) => error!("Error during NamespaceService shutdown: {}", inner_err),
+                        }
+                    },
+                    Err(_) => error!("Timeout during NamespaceService shutdown"),
                 }
             });
 
@@ -1476,7 +1514,7 @@ async fn add_searchable_metadata(
                 ns, metadata_response.success);
     }
     
-    Ok(())
+    unreachable!("Should not reach here as we return inside the branches")
 }
 
 /// Index a file via gRPC with appropriate strategy based on size
@@ -1498,7 +1536,7 @@ pub async fn client_index(
     addr: String,
     file_path: String,
     namespace: Option<String>,
-) -> Result<(), BoxError> {
+) -> Result<IndexResponse, BoxError> {
     let file_name = PathBuf::from(&file_path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -1541,6 +1579,8 @@ pub async fn client_index(
             chunks_received=%response.chunks_received,
             "Streaming index response with parallel processing"
         );
+        
+        return Ok(response);
     } else {
         // For medium to small files, use regular indexing
         info!(
@@ -1571,9 +1611,11 @@ pub async fn client_index(
             "Index response{}",
             if file_size > PARALLEL_THRESHOLD { " with server-side parallel processing" } else { "" }
         );
+        
+        return Ok(response);
     }
     
-    Ok(())
+    unreachable!("Should not reach here as we return inside the branches")
 }
 
 /// Stream index a large file via gRPC with efficient parallel processing

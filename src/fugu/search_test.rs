@@ -48,7 +48,7 @@ mod tests {
         let index_path = index_dir.path().join("test_index").to_str().unwrap().to_string();
         
         // Create the inverted index
-        let index = InvertedIndex::new(&index_path, tx).await;
+        let index = InvertedIndex::new(&index_path).await;
         
         // Set up test data
         setup_test_index(&index).await;
@@ -100,7 +100,7 @@ mod tests {
         let index_path = index_dir.path().join("test_index").to_str().unwrap().to_string();
         
         // Create the inverted index
-        let index = InvertedIndex::new(&index_path, tx).await;
+        let index = InvertedIndex::new(&index_path).await;
         
         // Create a tokenizer
         let tokenizer = WhitespaceTokenizer;
@@ -148,7 +148,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<WALCMD>(100);
         
         // Create a node
-        let mut node = Node::new("test_namespace".to_string(), Some(config_path.clone()), tx);
+        let mut node = Node::new("test_namespace".to_string(), Some(config_path.clone()));
         
         // Load the index
         node.load_index().await.unwrap();
@@ -199,7 +199,7 @@ mod tests {
         let index_path = index_dir.path().join("bm25_test").to_str().unwrap().to_string();
         
         // Create the inverted index
-        let index = InvertedIndex::new(&index_path, tx).await;
+        let index = InvertedIndex::new(&index_path).await;
         
         // Create a tokenizer
         let tokenizer = WhitespaceTokenizer;
