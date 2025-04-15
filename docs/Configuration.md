@@ -21,14 +21,17 @@ By default, Fugu stores all its data in the `~/.fugu` directory. This can be ove
   /logs           # Log files
   /namespaces     # Namespace data
     /default      # Default namespace
-      /index      # Index files
-        /index    # Main index database
-        /docs     # Document content database
-        /doc_terms # Document-to-terms mapping
-      /wal.bin    # Write-ahead log
+      /.fugu      # Namespace-specific data directory
+        /index    # Index directory
+          /consolidated.rkyv # Consolidated rkyv file (all databases in one)
+          /index    # Main index database
+          /docs     # Document content database
+          /doc_terms # Document-to-terms mapping
+      /{files}    # Document files are stored directly in the namespace
     /custom_ns    # Custom namespaces follow same pattern
+      /.fugu      # Namespace-specific data directory
+      /{files}    # Files are stored directly in the namespace
   /tmp            # Temporary files
-  /wal            # Global WAL files
 ```
 
 ## Configuration Options
@@ -112,29 +115,36 @@ let index_path = config.namespace_index_path("my_namespace");
 let temp_dir = config.temp_dir();
 ```
 
-## BM25 Configuration
+## Consolidated Index
 
-Fugu's search algorithm uses BM25 with configurable parameters:
+Fugu now supports a consolidated index format that combines all database files into a single rkyv file:
 
 ```rust
-// Default values in index.rs
-k1: 1.2,  // Term frequency saturation parameter
-b: 0.75,  // Document length normalization parameter
+// Structure of the consolidated index
+struct ConsolidatedIndex {
+    terms: HashMap<String, TermIndex>,      // All term indices
+    documents: HashMap<String, String>,     // All document content
+    doc_terms: HashMap<String, DocIndex>,   // Document-to-terms mapping
+    total_docs: usize,                      // Total document count
+    metrics: SearchMetrics,                 // Latest search metrics
+}
 ```
 
-These parameters control the balance between:
-- Term frequency (how often a term appears in a document)
-- Document length normalization (accounting for length differences)
+Benefits of the consolidated index:
+- Single file for simpler backup and restore
+- Faster loading and unloading
+- Reduced file system overhead
+- More efficient memory usage
 
-## WAL Configuration
+## Search Configuration
 
-The WAL system has several tunable parameters:
+Fugu uses TF-IDF scoring for relevance ranking:
 
 ```rust
-// Constants in wal.rs
-MAX_CONCURRENT_WRITERS: 8      // Maximum writers to the WAL
-BUFFER_SIZE: 1024 * 1024       // 1MB buffer size for batching operations
-FLUSH_INTERVAL_MS: 100         // Flush interval in milliseconds
+// The ranking considers:
+- Term frequency (how often a term appears in a document)
+- Inverse document frequency (how rare a term is across all documents)
+- Document length normalization (accounting for length differences)
 ```
 
 ## Environment Variable Support
