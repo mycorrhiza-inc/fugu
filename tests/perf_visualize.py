@@ -224,26 +224,50 @@ def load_csv_data(data_dir="tests/data"):
     """Load CSV performance data files."""
     print(f"Loading CSV performance data from directory: {data_dir}")
     
+    # Adjust the path for relative vs absolute path
+    # If we're in the 'tests' directory already, we need to use 'data'
+    # If we're in the root directory, we need to use 'tests/data'
+    if os.path.basename(os.getcwd()) == 'tests':
+        adjusted_data_dir = "data"
+    else:
+        adjusted_data_dir = data_dir
+    
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Adjusted data directory: {adjusted_data_dir}")
+    
     # Check if directory exists
-    if not os.path.exists(data_dir):
-        print(f"Warning: Data directory {data_dir} does not exist")
-        print(f"Current working directory: {os.getcwd()}")
+    if not os.path.exists(adjusted_data_dir):
+        print(f"Warning: Data directory {adjusted_data_dir} does not exist")
         print("Creating directory...")
         try:
-            os.makedirs(data_dir, exist_ok=True)
-            print(f"Created directory: {data_dir}")
+            os.makedirs(adjusted_data_dir, exist_ok=True)
+            print(f"Created directory: {adjusted_data_dir}")
         except Exception as e:
             print(f"Error creating directory: {e}")
         return {}
         
     csv_results = {}
-    csv_files = glob.glob(f"{data_dir}/*.csv")
+    
+    # Try multiple glob patterns to find CSV files
+    csv_files = glob.glob(f"{adjusted_data_dir}/*.csv")
+    if not csv_files:
+        # Try direct use of os.listdir as a fallback
+        print(f"Trying alternative method to find CSV files...")
+        try:
+            csv_files = [f"{adjusted_data_dir}/{f}" for f in os.listdir(adjusted_data_dir) 
+                        if f.endswith('.csv')]
+            print(f"Found {len(csv_files)} CSV files using listdir")
+        except Exception as e:
+            print(f"Error listing directory: {e}")
     
     if not csv_files:
-        print(f"No CSV files found in {data_dir}")
+        print(f"No CSV files found in {adjusted_data_dir}")
         print("Directory contents:")
-        for item in os.listdir(data_dir) if os.path.exists(data_dir) else []:
-            print(f"  - {item}")
+        try:
+            for item in os.listdir(adjusted_data_dir):
+                print(f"  - {item}")
+        except Exception as e:
+            print(f"Error listing directory contents: {e}")
         return {}
         
     print(f"Found {len(csv_files)} CSV files")
@@ -746,12 +770,22 @@ def create_integrated_distribution_plots(csv_results, output_dir="tests/perf_res
             plt.legend(loc='upper right')
             plt.tight_layout()
             
-            # Save the figure
+            # Save the figure - generate two versions of each file to ensure compatibility
+            # with both naming conventions used in the documentation
+
+            # First, save with the operation name format (e.g., integrated_insert_distribution.png)
             output_file = f"{output_dir}/integrated_{operation_name}_distribution.png"
             print(f"  Saving integrated distribution plot to: {output_file}")
             plt.savefig(output_file, dpi=300)
             
-            # Verify the file was created
+            # Second, save with integration test name if it differs from the operation name 
+            # (especially for "insert" -> "integration_index")
+            if operation_name == "insert":
+                test_output_file = f"{output_dir}/integrated_index_distribution.png"
+                print(f"  Saving additional copy to: {test_output_file}")
+                plt.savefig(test_output_file, dpi=300)
+            
+            # Verify the files were created
             if os.path.exists(output_file):
                 print(f"  Successfully saved integrated distribution plot ({os.path.getsize(output_file)} bytes)")
             else:
@@ -1038,15 +1072,18 @@ def main():
         print("Dependency check failed. Exiting.")
         return
 
+    # Get script directory for path resolution
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
     parser = argparse.ArgumentParser(
         description='Run and visualize performance tests')
     parser.add_argument('--no-run', action='store_true',
                         help='Skip running tests and just visualize existing data')
-    parser.add_argument('--history-file', default='tests/perf_history.json',
+    parser.add_argument('--history-file', default=os.path.join(script_dir, 'perf_history.json'),
                         help='Path to the performance history file')
-    parser.add_argument('--output-dir', default='tests/perf_results',
+    parser.add_argument('--output-dir', default=os.path.join(script_dir, 'perf_results'),
                         help='Directory to save visualizations')
-    parser.add_argument('--data-dir', default='tests/data',
+    parser.add_argument('--data-dir', default=os.path.join(script_dir, 'data'),
                         help='Directory with CSV data files')
     parser.add_argument('--integrated-only', action='store_true',
                         help='Only generate integrated p-distribution charts')

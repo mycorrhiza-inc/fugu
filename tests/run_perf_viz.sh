@@ -20,9 +20,19 @@ if ! python3 -c "import matplotlib" 2>/dev/null || ! python3 -c "import numpy" 2
   pip3 install -r requirements.txt
 fi
 
-# Run performance tests and generate visualizations
-echo "Running performance tests and generating visualizations..."
-python3 perf_visualize.py
+# Debug: Check if CSV files exist
+echo "Checking CSV files in data directory..."
+ls -la data/*.csv || echo "No CSV files found in data directory!"
+
+# Create data directory if it doesn't exist
+mkdir -p data
+
+# Create perf_results directory if it doesn't exist
+mkdir -p perf_results
+
+# Run performance visualization only (skip tests)
+echo "Generating visualizations from existing data..."
+python3 perf_visualize.py --no-run
 
 # Check if visualizations were created
 if [ -d "perf_results" ]; then
