@@ -57,7 +57,36 @@ To run the WAL performance benchmark:
 cargo test test_multithreaded_wal_performance -- --nocapture
 ```
 
-## Integrated Performance Distributions
+## Individual Operations Performance
+
+These metrics represent the performance of individual operations when executed separately.
+
+### Insert Performance Distribution
+![Insert Performance Distribution](tests/perf_results/insert_performance_distribution.png)
+
+### Search Performance Distribution
+![Search Performance Distribution](tests/perf_results/search_performance_distribution.png)
+
+### Delete Performance Distribution
+![Delete Performance Distribution](tests/perf_results/delete_performance_distribution.png)
+
+### Text Search Performance Distribution
+![Text Search Performance Distribution](tests/perf_results/text_search_performance_distribution.png)
+
+### Performance Comparisons
+
+#### Insert Comparison
+![Insert Comparison](tests/perf_results/insert_comparison.png)
+
+#### Search Comparison
+![Search Comparison](tests/perf_results/search_comparison.png)
+
+#### Delete Comparison
+![Delete Comparison](tests/perf_results/delete_comparison.png)
+
+## Integrated Operations Performance
+
+These metrics represent the performance of operations when executed as part of an integrated workflow.
 
 ### Integrated Insert Performance
 ![Integrated Insert Performance Distribution](tests/perf_results/integrated_insert_distribution.png)
@@ -68,16 +97,14 @@ cargo test test_multithreaded_wal_performance -- --nocapture
 ### Integrated Delete Performance
 ![Integrated Delete Performance Distribution](tests/perf_results/integrated_delete_distribution.png)
 
-## Performance Comparisons
+### Integration Index Performance
+![Integration Index Performance Distribution](tests/perf_results/integration_index_distribution.png)
 
-### Insert Comparison
-![Insert Comparison](tests/perf_results/insert_comparison.png)
+### Integration Delete Performance
+![Integration Delete Performance Distribution](tests/perf_results/integration_delete_distribution.png)
 
-### Search Comparison
-![Search Comparison](tests/perf_results/search_comparison.png)
-
-### Delete Comparison
-![Delete Comparison](tests/perf_results/delete_comparison.png)
+### Integration Search Performance
+![Integration Search Performance Distribution](tests/perf_results/integration_search_distribution.png)
 
 ## Hot vs Cold Performance
 
@@ -94,6 +121,12 @@ A significant performance improvement is typically observed in the hot state due
 - Operating system file caching
 - Preloaded and optimized data structures
 
+### Cold Search Performance Distribution
+![Cold Search Performance Distribution](tests/perf_results/cold_search_performance_distribution.png)
+
+### Hot Search Performance Distribution
+![Hot Search Performance Distribution](tests/perf_results/hot_search_performance_distribution.png)
+
 ### Server Reload Performance
 ![Server Reload Performance](tests/perf_results/server_reload_performance.png)
 
@@ -101,6 +134,9 @@ This chart shows the time taken to start the server with existing data. This met
 - Cold start latency with production data volumes
 - Recovery time after planned or unplanned restarts
 - Impact of data size on startup performance
+
+### Server Reload Performance Distribution
+![Server Reload Performance Distribution](tests/perf_results/server_reload_performance_distribution.png)
 
 ## Testing Methodology
 
