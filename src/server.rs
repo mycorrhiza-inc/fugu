@@ -2,8 +2,9 @@ use crate::db::{
     FuguDB, PREFIX_FILTER_INDEX, PREFIX_RECORD_INDEX_TREE, TREE_FILTERS, TREE_GLOBAL_INDEX,
     TREE_RECORDS,
 };
-use crate::{ObjectIndex, ObjectRecord, tracing_utils, rkyv_adapter};
 use crate::object::ArchivableObjectRecord;
+use crate::query_endpoints;
+use crate::{ObjectIndex, ObjectRecord, rkyv_adapter, tracing_utils};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -11,8 +12,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::hash_map::HashMap;
@@ -101,6 +102,19 @@ pub struct IndexRequest {
     data: ObjectRecord,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct BatchIndexRequest {
+    objects: Vec<ObjectRecord>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct FileIngestionRequest {
+    file_path: String,
+    id: Option<String>,
+    namespace: Option<String>,
+    metadata: Option<Value>,
+}
+
 /// Health check endpoint
 async fn health() -> &'static str {
     let span = tracing_utils::server_span("/health", "GET");
@@ -145,20 +159,62 @@ fn word_positions(text: &str) -> impl Iterator<Item = (&str, usize)> {
         })
 }
 
-fn index_object(
+/// Ingest a single object into the database
+async fn ingest_object(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<IndexRequest>,
-) -> Json<Value> {
-    let span = tracing_utils::server_span("/index", "POST");
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/ingest", "POST");
     let _guard = span.enter();
 
-    debug!("index endpoint called with ID: {:?}", payload.data.id);
+    debug!("Ingest endpoint called with ID: {:?}", payload.data.id);
 
     let object = payload.data;
+    let object_id = object.id.clone();
 
-    // TODO: check if the object has already been added to the index
+    // Check if the ID is valid
+    if object_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Object ID cannot be empty",
+                "status": "error"
+            })),
+        );
+    }
 
-    // Create a ObjectIndex with the demo object's content
+    // Check if the object already exists in the database
+    let records_tree = match state.db.db().open_tree(crate::db::TREE_RECORDS) {
+        Ok(tree) => tree,
+        Err(e) => {
+            error!("Failed to open RECORDS tree: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to open RECORDS tree: {}", e),
+                    "status": "error"
+                })),
+            );
+        }
+    };
+
+    let existing_object = if let Ok(Some(data)) = records_tree.get(object_id.as_bytes()) {
+        debug!("Object with ID '{}' already exists, will be updated", object_id);
+        match rkyv_adapter::deserialize::<ArchivableObjectRecord>(&data) {
+            Ok(archivable) => {
+                debug!("Successfully deserialized existing object");
+                Some(archivable)
+            },
+            Err(e) => {
+                debug!("Could not deserialize existing object: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Create an ObjectIndex with the object's content
     let mut inverted_index: HashMap<String, Vec<usize>> = std::collections::HashMap::new();
 
     // Split the content into words and create a simple inverted index
@@ -174,18 +230,26 @@ fn index_object(
     }
 
     info!(
-        "CreatedObjectIndex with ID: {}, containing {} unique terms",
-        object.id,
+        "Created ObjectIndex with ID: {}, containing {} unique terms",
+        object_id,
         inverted_index.len()
     );
 
-    // Keep a copy of the ID for the response
+    // Keep a copy of the metadata for the response
     let metadata = object.metadata.clone();
+    let text_length = object.text.len();
+
+    // Create variables for response
+    let object_id_for_response = object_id.clone();
+    let operation_type = if existing_object.is_some() { "update" } else { "create" };
+
+    // Clone the object for background task
+    let object_clone = object.clone();
 
     // Create an ObjectIndex instance for the database
     let object_index = ObjectIndex {
-        object_id: object.id.clone(),
-        inverted_index,
+        object_id: object_id.clone(),
+        inverted_index: inverted_index.clone(),
     };
 
     // Get a clone of the shared DB state for the background task
@@ -194,17 +258,13 @@ fn index_object(
     // Add the object to the database in a background task
     tokio::spawn(async move {
         // Log that we're starting the database operations
-        info!("Adding demo object to database: {}", object.id);
-
-        // No need for a mutex since only the compactor writes
-        // Index the object which will add it to the database
-        info!("Indexing demo object: {}", object.id);
+        info!("Adding object to database: {}", object_id);
 
         // Queue the object for indexing - the compactor will handle the actual database writes
         db_state.index(object_index);
 
         // Add the record to the RECORDS tree
-        info!("Adding object to RECORDS tree: {}", object.id);
+        info!("Adding object to RECORDS tree: {}", object_id);
         let records_tree = match db_state.db().open_tree(crate::db::TREE_RECORDS) {
             Ok(tree) => tree,
             Err(e) => {
@@ -214,14 +274,14 @@ fn index_object(
         };
 
         // Convert to archivable format and serialize
-        let archivable = ArchivableObjectRecord::from(&object);
+        let archivable = ArchivableObjectRecord::from(&object_clone);
         match rkyv_adapter::serialize(&archivable) {
             Ok(serialized) => {
                 // Insert the record into the tree
-                if let Err(e) = records_tree.insert(object.id.as_bytes(), serialized.to_vec()) {
+                if let Err(e) = records_tree.insert(object_id.as_bytes(), serialized.to_vec()) {
                     error!("Failed to insert record into RECORDS tree: {}", e);
                 } else {
-                    info!("Successfully added record to RECORDS tree: {}", object.id);
+                    info!("Successfully added record to RECORDS tree: {}", object_id);
                 }
             }
             Err(e) => {
@@ -229,13 +289,384 @@ fn index_object(
             }
         }
 
-        // Note: The compactor service will automatically handle compaction on its schedule
-        // We don't need to manually trigger it here anymore
-
         // Log successful completion
-        info!("Successfully queued object for indexing: {}", object.id);
+        info!("Successfully queued object for indexing: {}", object_id);
     });
-    Json(json!({}))
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "message": if existing_object.is_some() { "Object successfully updated and queued for indexing" } else { "Object successfully created and queued for indexing" },
+            "object_id": object_id_for_response,
+            "operation": operation_type,
+            "unique_terms": inverted_index.len(),
+            "text_length": text_length,
+            "metadata": metadata,
+        })),
+    )
+}
+
+/// Ingest multiple objects in a batch
+async fn batch_ingest(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BatchIndexRequest>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/batch-ingest", "POST");
+    let _guard = span.enter();
+
+    debug!("Batch ingest endpoint called with {} objects", payload.objects.len());
+
+    // Validate the batch
+    if payload.objects.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Batch cannot be empty",
+                "status": "error"
+            })),
+        );
+    }
+
+    // Prepare vectors to track objects and their indices
+    let mut object_indices = Vec::with_capacity(payload.objects.len());
+    let mut summary = Vec::with_capacity(payload.objects.len());
+    let mut error_count = 0;
+
+    // Open the RECORDS tree once for checking existing objects
+    let records_tree = match state.db.db().open_tree(crate::db::TREE_RECORDS) {
+        Ok(tree) => tree,
+        Err(e) => {
+            error!("Failed to open RECORDS tree: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to open RECORDS tree: {}", e),
+                    "status": "error"
+                })),
+            );
+        }
+    };
+
+    // Process each object in the batch
+    for object in &payload.objects {
+        let object_id = object.id.clone();
+
+        // Skip objects with empty IDs
+        if object_id.is_empty() {
+            error_count += 1;
+            summary.push(json!({
+                "id": null,
+                "status": "error",
+                "error": "Object ID cannot be empty"
+            }));
+            continue;
+        }
+
+        // Check if the object already exists
+        let operation = if let Ok(Some(_)) = records_tree.get(object_id.as_bytes()) {
+            debug!("Object with ID '{}' already exists, will be updated", object_id);
+            "update"
+        } else {
+            debug!("Object with ID '{}' is new", object_id);
+            "create"
+        };
+
+        // Create inverted index for the object
+        let mut inverted_index: HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+
+        // Generate position data for each word
+        for (word, pos) in word_positions(&object.text) {
+            match inverted_index.entry(word.to_string()) {
+                Occupied(mut o) => {
+                    o.get_mut().push(pos);
+                }
+                Vacant(v) => {
+                    v.insert(vec![pos]);
+                }
+            };
+        }
+
+        // Create ObjectIndex instance
+        let object_index = ObjectIndex {
+            object_id: object_id.clone(),
+            inverted_index: inverted_index.clone(),
+        };
+
+        // Add to results vector
+        object_indices.push(object_index);
+
+        // Add to summary
+        summary.push(json!({
+            "id": object_id,
+            "status": "success",
+            "operation": operation,
+            "unique_terms": inverted_index.len(),
+            "text_length": object.text.len()
+        }));
+    }
+
+    // Get a clone of the shared DB state for the background task
+    let db_state = state.db.clone();
+
+    // Clone the objects for storage in the background task
+    let objects_for_storage = payload.objects.clone();
+
+    // Process the batch in a background task
+    tokio::spawn(async move {
+        // Index all objects
+        info!("Batch indexing {} objects", object_indices.len());
+        db_state.batch_index(object_indices);
+
+        // Store all objects in the RECORDS tree
+        info!("Adding objects to RECORDS tree");
+        let records_tree = match db_state.db().open_tree(crate::db::TREE_RECORDS) {
+            Ok(tree) => tree,
+            Err(e) => {
+                error!("Failed to open RECORDS tree: {}", e);
+                return;
+            }
+        };
+
+        // Process each object
+        for object in objects_for_storage {
+            // Convert to archivable format and serialize
+            let archivable = ArchivableObjectRecord::from(&object);
+            match rkyv_adapter::serialize(&archivable) {
+                Ok(serialized) => {
+                    // Insert the record into the tree
+                    if let Err(e) = records_tree.insert(object.id.as_bytes(), serialized.to_vec()) {
+                        error!("Failed to insert record into RECORDS tree: {}", e);
+                    } else {
+                        debug!("Successfully added record to RECORDS tree: {}", object.id);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to serialize record {}: {}", object.id, e);
+                }
+            }
+        }
+
+        info!("Batch processing completed");
+    });
+
+    // Return summary response
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "message": "Batch successfully queued for indexing",
+            "total_objects": payload.objects.len(),
+            "processed": summary.len() - error_count,
+            "errors": error_count,
+            "objects": summary
+        })),
+    )
+}
+
+/// Ingest content from a file into the database
+async fn ingest_file(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<FileIngestionRequest>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/ingest-file", "POST");
+    let _guard = span.enter();
+
+    debug!("File ingest endpoint called for file: {}", payload.file_path);
+
+    // Try to read the file
+    let file_content = match tokio::fs::read_to_string(&payload.file_path).await {
+        Ok(content) => content,
+        Err(e) => {
+            error!("Failed to read file {}: {}", payload.file_path, e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("Failed to read file: {}", e),
+                    "status": "error"
+                })),
+            );
+        }
+    };
+
+    // Generate ID if not provided
+    let object_id = match payload.id {
+        Some(id) if !id.is_empty() => id,
+        _ => {
+            // Use filename as ID if none provided
+            let path = std::path::Path::new(&payload.file_path);
+            match path.file_name() {
+                Some(name) => match name.to_str() {
+                    Some(name_str) => name_str.to_string(),
+                    None => {
+                        // Generate timestamp-based ID if filename has invalid UTF-8
+                        let timestamp = chrono::Utc::now().timestamp();
+                        format!("file_{}", timestamp)
+                    }
+                },
+                None => {
+                    // Generate timestamp-based ID if no filename
+                    let timestamp = chrono::Utc::now().timestamp();
+                    format!("file_{}", timestamp)
+                }
+            }
+        }
+    };
+
+    // Check if the object already exists in the database
+    let records_tree = match state.db.db().open_tree(crate::db::TREE_RECORDS) {
+        Ok(tree) => tree,
+        Err(e) => {
+            error!("Failed to open RECORDS tree: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to open RECORDS tree: {}", e),
+                    "status": "error"
+                })),
+            );
+        }
+    };
+
+    let operation = if let Ok(Some(_)) = records_tree.get(object_id.as_bytes()) {
+        debug!("File object with ID '{}' already exists, will be updated", object_id);
+        "update"
+    } else {
+        debug!("File object with ID '{}' is new", object_id);
+        "create"
+    };
+
+    // Prepare metadata
+    let mut metadata = match payload.metadata {
+        Some(meta) => meta,
+        None => serde_json::json!({}),
+    };
+
+    // Add file info to metadata
+    if let serde_json::Value::Object(ref mut map) = metadata {
+        map.insert(
+            "file_path".to_string(),
+            serde_json::Value::String(payload.file_path.clone())
+        );
+
+        map.insert(
+            "ingested_at".to_string(),
+            serde_json::Value::String(chrono::Utc::now().to_rfc3339())
+        );
+
+        // Add namespace if provided
+        if let Some(namespace) = payload.namespace {
+            map.insert(
+                "namespace".to_string(),
+                serde_json::Value::String(namespace)
+            );
+        }
+
+        // Add file size
+        map.insert(
+            "file_size_bytes".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(file_content.len() as u64))
+        );
+    }
+
+    // Create the ObjectRecord
+    let object = ObjectRecord {
+        id: object_id.clone(),
+        text: file_content,
+        metadata: metadata.clone(),
+    };
+
+    // Save copies for later use
+    let object_id_for_response = object_id.clone();
+    let operation_type_for_response = operation.to_string();
+    let text_length = object.text.len();
+
+    // Create inverted index
+    let mut inverted_index: HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+
+    // Generate position data for each word
+    for (word, pos) in word_positions(&object.text) {
+        match inverted_index.entry(word.to_string()) {
+            Occupied(mut o) => {
+                o.get_mut().push(pos);
+            }
+            Vacant(v) => {
+                v.insert(vec![pos]);
+            }
+        };
+    }
+
+    // Create the ObjectIndex
+    let object_index = ObjectIndex {
+        object_id: object_id.clone(),
+        inverted_index: inverted_index.clone(),
+    };
+
+    // Save the number of terms for response
+    let unique_term_count = inverted_index.len();
+
+    info!(
+        "Created ObjectIndex from file with ID: {}, containing {} unique terms",
+        object_id,
+        inverted_index.len()
+    );
+
+    // Get a clone of the shared DB state for the background task
+    let db_state = state.db.clone();
+
+    // Clone object for background task
+    let object_clone = object.clone();
+
+    // Index and store the object in a background task
+    tokio::spawn(async move {
+        // Log that we're starting the database operations
+        info!("Adding file object to database: {}", object_id);
+
+        // Queue the object for indexing
+        db_state.index(object_index);
+
+        // Add the record to the RECORDS tree
+        info!("Adding file object to RECORDS tree: {}", object_id);
+        let records_tree = match db_state.db().open_tree(crate::db::TREE_RECORDS) {
+            Ok(tree) => tree,
+            Err(e) => {
+                error!("Failed to open RECORDS tree: {}", e);
+                return;
+            }
+        };
+
+        // Convert to archivable format and serialize
+        let archivable = ArchivableObjectRecord::from(&object_clone);
+        match rkyv_adapter::serialize(&archivable) {
+            Ok(serialized) => {
+                // Insert the record into the tree
+                if let Err(e) = records_tree.insert(object_id.as_bytes(), serialized.to_vec()) {
+                    error!("Failed to insert record into RECORDS tree: {}", e);
+                } else {
+                    info!("Successfully added file record to RECORDS tree: {}", object_id);
+                }
+            }
+            Err(e) => {
+                error!("Failed to serialize file record: {}", e);
+            }
+        }
+
+        info!("Successfully queued file for indexing: {}", object_id);
+    });
+
+    // Return success response
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "message": if operation_type_for_response == "update" { "File successfully updated and queued for indexing" } else { "File successfully created and queued for indexing" },
+            "object_id": object_id_for_response,
+            "operation": operation_type_for_response,
+            "unique_terms": unique_term_count,
+            "text_length": text_length,
+            "metadata": metadata,
+        })),
+    )
 }
 
 /// Search in a specific namespace
@@ -278,8 +709,8 @@ async fn get_object_by_id(
     match state.db.get(&object_id) {
         Some(record) => {
             // Return the full record with a note if it was auto-repaired
-            let was_repaired = record.id.contains("dummy_item") &&
-                record.metadata.get("auto_repaired").is_some();
+            let was_repaired =
+                record.id.contains("dummy_item") && record.metadata.get("auto_repaired").is_some();
 
             if was_repaired {
                 Json(json!({
@@ -445,7 +876,9 @@ async fn list_global_terms(State(state): State<Arc<AppState>>) -> Json<Value> {
                     match item {
                         Ok((key, value)) => {
                             if let Ok(term) = std::str::from_utf8(&key) {
-                                if let Ok(positions) = rkyv_adapter::deserialize::<Vec<usize>>(&value) {
+                                if let Ok(positions) =
+                                    rkyv_adapter::deserialize::<Vec<usize>>(&value)
+                                {
                                     // Update stats for this term
                                     if let Some(existing) = term_stats.get_mut(term) {
                                         // Term already exists, update count
@@ -617,10 +1050,14 @@ pub async fn create_dummy_record(
         match rkyv_adapter::serialize(&archivable) {
             Ok(serialized) => {
                 // Insert the record into the tree
-                if let Err(e) = records_tree.insert(demo_object.id.as_bytes(), serialized.to_vec()) {
+                if let Err(e) = records_tree.insert(demo_object.id.as_bytes(), serialized.to_vec())
+                {
                     error!("Failed to insert record into RECORDS tree: {}", e);
                 } else {
-                    info!("Successfully added record to RECORDS tree: {}", demo_object.id);
+                    info!(
+                        "Successfully added record to RECORDS tree: {}",
+                        demo_object.id
+                    );
                 }
             }
             Err(e) => {
@@ -705,7 +1142,8 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
                                 info!("Attempting to clean up corrupted dummy item: {}", key_str);
 
                                 // Create a fresh dummy object with the same ID
-                                let replacement = crate::create_dummy_object(Some(key_str.to_string()));
+                                let replacement =
+                                    crate::create_dummy_object(Some(key_str.to_string()));
 
                                 // Serialize it
                                 // Convert to archivable format for storage
@@ -713,10 +1151,15 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
                                 match rkyv_adapter::serialize(&archivable) {
                                     Ok(serialized) => {
                                         // Try to replace the corrupted record
-                                        if let Err(err) = records_tree.insert(key.clone(), serialized.to_vec()) {
+                                        if let Err(err) =
+                                            records_tree.insert(key.clone(), serialized.to_vec())
+                                        {
                                             error!("Failed to replace corrupted record: {}", err);
                                         } else {
-                                            info!("Successfully replaced corrupted record: {}", key_str);
+                                            info!(
+                                                "Successfully replaced corrupted record: {}",
+                                                key_str
+                                            );
 
                                             // Add the replacement to the list
                                             objects.push(json!({
@@ -789,6 +1232,18 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
             .route("/objects/{object_id}", get(get_object_by_id))
             .route("/objects/{object_id}/terms", get(list_object_terms))
             .route("/terms", get(list_global_terms))
+            // Data ingestion endpoints
+            .route("/ingest", post(ingest_object))
+            .route("/batch-ingest", post(batch_ingest))
+            .route("/ingest-file", post(ingest_file))
+            // Query API endpoints
+            .route("/query", get(query_endpoints::query_text_get))
+            .route("/query/{query}", get(query_endpoints::query_text_path))
+            .route("/query", post(query_endpoints::query_json_post))
+            .route(
+                "/query/advanced",
+                post(query_endpoints::query_advanced_post),
+            )
             // Add the shared state
             .with_state(app_state);
 
@@ -859,4 +1314,3 @@ async fn shutdown_signal() {
     .instrument(shutdown_span)
     .await
 }
-

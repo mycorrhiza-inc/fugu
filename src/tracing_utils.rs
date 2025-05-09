@@ -200,3 +200,36 @@ pub fn compactor_span(operation: &str, records: Option<usize>) -> Span {
     }
 }
 
+/// Creates a tracing span for the query engine
+///
+/// Use this to trace query operations with consistent naming
+///
+/// # Arguments
+/// * `operation` - The specific query operation (e.g., "search_text", "search_json")
+/// * `query` - The query text or summary
+/// * `additional_fields` - Optional HashMap of additional fields to include in the span
+///
+/// # Returns
+/// A new tracing span for the query operation
+pub fn query_span<S>(operation: &str, query: &str, additional_fields: Option<std::collections::HashMap<&str, S>>) -> Span
+where
+    S: std::fmt::Debug + Send + Sync + 'static,
+{
+    // Create a basic span with the operation and query
+    let mut span = tracing::span!(
+        Level::INFO,
+        "query",
+        operation = operation,
+        query = query
+    );
+
+    // Add additional fields if provided
+    let mut final_span = span;
+    if let Some(fields) = additional_fields {
+        for (key, value) in fields {
+            final_span = final_span.record(key, &tracing::field::debug(value)).clone();
+        }
+    }
+
+    final_span
+}

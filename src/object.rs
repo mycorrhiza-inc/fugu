@@ -1,7 +1,7 @@
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap as StandardHashMap;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 #[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 pub struct ObjectIndex {
@@ -12,7 +12,7 @@ pub struct ObjectIndex {
 // Structure for a object that can be indexed
 // Note: We can't directly derive Archive for a struct containing serde_json::Value
 // So we'll implement serialization/deserialization for this type separately
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ObjectRecord {
     pub id: String,
     pub text: String,

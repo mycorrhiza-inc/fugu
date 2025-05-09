@@ -19,8 +19,9 @@ pub fn serialize<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, ArchiveError
 /// This implementation actually uses bincode under the hood.
 pub fn deserialize<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ArchiveError> {
     // Use bincode for the actual deserialization
-    let (result, _): (T, usize) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
-        .map_err(|e| Box::new(e) as ArchiveError)?;
+    let (result, _): (T, usize) =
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+            .map_err(|e| Box::new(e) as ArchiveError)?;
     Ok(result)
 }
 
@@ -37,7 +38,9 @@ pub fn serialize_serde_compat<T: serde::Serialize>(value: &T) -> Result<Vec<u8>,
 }
 
 /// Helper for working with serde types.
-pub fn deserialize_serde_compat<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ArchiveError> {
+pub fn deserialize_serde_compat<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, ArchiveError> {
     deserialize::<T>(bytes)
 }
 

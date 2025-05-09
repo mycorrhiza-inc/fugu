@@ -1,12 +1,17 @@
 pub mod cli;
 pub mod db;
 pub mod object;
+pub mod query;
+pub mod query_endpoints;
 pub mod server;
 // pub mod time_index;
-pub mod tracing_utils;
+#[cfg(test)]
+mod query_test;
 pub mod rkyv_adapter;
+pub mod tracing_utils;
 
 pub use object::{ObjectIndex, ObjectRecord};
+pub use query::{QueryConfig, QueryEngine, QueryHit, QueryResults};
 
 use serde_json::json;
 use tracing::{debug, info};

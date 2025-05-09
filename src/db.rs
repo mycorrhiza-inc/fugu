@@ -1,6 +1,6 @@
+use crate::object::ArchivableObjectRecord;
 use crate::tracing_utils;
 use crate::{ObjectIndex, ObjectRecord, rkyv_adapter};
-use crate::object::ArchivableObjectRecord;
 use serde::{Deserialize, Serialize};
 use sled;
 use tokio::sync::mpsc;
@@ -194,11 +194,15 @@ impl FuguDB {
                             info!("Attempting to repair corrupted dummy item: {}", object_id);
 
                             // Create a fresh dummy object with the same ID
-                            let mut replacement = crate::create_dummy_object(Some(object_id.to_string()));
+                            let mut replacement =
+                                crate::create_dummy_object(Some(object_id.to_string()));
 
                             // Add auto_repaired flag to metadata
                             if let serde_json::Value::Object(ref mut map) = replacement.metadata {
-                                map.insert("auto_repaired".to_string(), serde_json::Value::Bool(true));
+                                map.insert(
+                                    "auto_repaired".to_string(),
+                                    serde_json::Value::Bool(true),
+                                );
                             }
 
                             // Convert to ArchivableObjectRecord for storage
@@ -208,11 +212,16 @@ impl FuguDB {
                             match rkyv_adapter::serialize(&archivable) {
                                 Ok(serialized) => {
                                     // Try to replace the corrupted record
-                                    if let Err(err) = records_tree.insert(object_id.as_bytes(), serialized.to_vec()) {
+                                    if let Err(err) = records_tree
+                                        .insert(object_id.as_bytes(), serialized.to_vec())
+                                    {
                                         error!("Failed to replace corrupted record: {}", err);
                                         None
                                     } else {
-                                        info!("Successfully repaired corrupted record: {}", object_id);
+                                        info!(
+                                            "Successfully repaired corrupted record: {}",
+                                            object_id
+                                        );
                                         Some(replacement)
                                     }
                                 }
@@ -553,21 +562,36 @@ mod tests {
         };
 
         // Get the RECORDS tree and insert the test object
-        let records_tree = fugu_db.db().open_tree(TREE_RECORDS).expect("Failed to open RECORDS tree");
+        let records_tree = fugu_db
+            .db()
+            .open_tree(TREE_RECORDS)
+            .expect("Failed to open RECORDS tree");
         let archivable = ArchivableObjectRecord::from(&test_object);
-        let serialized = rkyv_adapter::serialize(&archivable).expect("Failed to serialize test object");
-        records_tree.insert(test_id.as_bytes(), serialized.to_vec()).expect("Failed to insert test object");
+        let serialized =
+            rkyv_adapter::serialize(&archivable).expect("Failed to serialize test object");
+        records_tree
+            .insert(test_id.as_bytes(), serialized.to_vec())
+            .expect("Failed to insert test object");
 
         // Test the get method
         let retrieved_object = fugu_db.get(test_id);
         assert!(retrieved_object.is_some(), "Failed to retrieve test object");
 
         let retrieved_object = retrieved_object.unwrap();
-        assert_eq!(retrieved_object.id, test_id, "Retrieved object ID doesn't match");
-        assert_eq!(retrieved_object.text, "This is a test object", "Retrieved object text doesn't match");
+        assert_eq!(
+            retrieved_object.id, test_id,
+            "Retrieved object ID doesn't match"
+        );
+        assert_eq!(
+            retrieved_object.text, "This is a test object",
+            "Retrieved object text doesn't match"
+        );
 
         // Test retrieving a non-existent object
         let non_existent = fugu_db.get("non_existent_id");
-        assert!(non_existent.is_none(), "Non-existent object should return None");
+        assert!(
+            non_existent.is_none(),
+            "Non-existent object should return None"
+        );
     }
 }
