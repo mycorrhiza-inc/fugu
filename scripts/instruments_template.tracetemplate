@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.dt.Instruments.Recorder</key>
+	<array>
+		<string>com.apple.dt.instruments.time-profiler</string>
+		<string>com.apple.dt.instruments.system-usage</string>
+		<string>com.apple.dt.instruments.file-activity</string>
+		<string>com.apple.dt.instruments.memory</string>
+	</array>
+	<key>com.apple.dt.trace.essential-attributes</key>
+	<dict>
+		<key>schema</key>
+		<integer>3</integer>
+		<key>template-uuid</key>
+		<string>13D8C9E8-CA5A-4AEF-B92A-D9FD39B6E7B1</string>
+		<key>template-version</key>
+		<integer>1</integer>
+		<key>time-range-type</key>
+		<string>process-lifetime</string>
+		<key>title</key>
+		<string>Fugu Custom Template</string>
+	</dict>
+	<key>com.apple.dt.instruments.time-profiler</key>
+	<dict>
+		<key>config</key>
+		<dict>
+			<key>sampling-interval</key>
+			<integer>1000</integer>
+			<key>track-kernel-callstacks</key>
+			<true/>
+		</dict>
+	</dict>
+	<key>com.apple.dt.instruments.file-activity</key>
+	<dict>
+		<key>config</key>
+		<dict>
+			<key>physical-reads</key>
+			<true/>
+			<key>physical-writes</key>
+			<true/>
+			<key>logical-reads</key>
+			<true/>
+			<key>logical-writes</key>
+			<true/>
+		</dict>
+	</dict>
+	<key>com.apple.dt.instruments.memory</key>
+	<dict>
+		<key>config</key>
+		<dict>
+			<key>memory-allocation-events</key>
+			<true/>
+			<key>memory-region-monitoring</key>
+			<true/>
+		</dict>
+	</dict>
+</dict>
+</plist>
