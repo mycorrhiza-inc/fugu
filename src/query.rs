@@ -17,20 +17,17 @@ use crate::tracing_utils;
 pub struct QueryConfig {
     /// Default number of results to return
     pub default_limit: usize,
-
-    /// Whether to include snippet highlights in results
+    /// Whether to include snippets with highlights
     pub highlight_snippets: bool,
-
-    /// Maximum frequency of a term to consider for scoring
-    pub max_term_frequency: usize,
-
-    /// Minimum score threshold for results (0.0 - 1.0)
+    /// Minimum threshold for matching
     pub min_score_threshold: f64,
-
-    /// BM25 k1 parameter
+    /// Maximum number of results to fetch
+    pub max_results: usize,
+    /// Context window size for snippets
+    pub snippet_context_size: usize,
+    /// BM25 k1 parameter (kept for compatibility)
     pub bm25_k1: f64,
-
-    /// BM25 b parameter
+    /// BM25 b parameter (kept for compatibility)
     pub bm25_b: f64,
 }
 
@@ -39,717 +36,346 @@ impl Default for QueryConfig {
         Self {
             default_limit: 10,
             highlight_snippets: true,
-            max_term_frequency: 1000,
-            min_score_threshold: 0.01,
+            min_score_threshold: 0.1,
+            max_results: 1000,
+            snippet_context_size: 50,
             bm25_k1: 1.2,
             bm25_b: 0.75,
         }
     }
 }
 
-/// A search hit in query results
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryHit {
-    /// Document identifier
-    pub document_id: String,
-
-    /// Relevance score (higher is better)
-    pub score: f64,
-
-    /// Optional text snippets with highlighted matches
-    pub highlights: Option<Vec<String>>,
-
-    /// Optional document metadata
-    pub metadata: Option<Value>,
-}
-
-/// Results from a search query
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryResults {
-    /// Matching documents
-    pub hits: Vec<QueryHit>,
-
-    /// Total number of matching documents (may be more than returned)
-    pub total_hits: usize,
-
-    /// Time taken to execute the query in milliseconds
-    pub took_ms: u64,
-}
-
-/// Operators that can be used in queries
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum QueryOperator {
-    /// Logical AND (intersection)
-    And,
-
-    /// Logical OR (union)
-    Or,
-
-    /// Logical NOT (negation)
-    Not,
-}
-
-impl std::str::FromStr for QueryOperator {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_uppercase().as_str() {
-            "AND" => Ok(QueryOperator::And),
-            "OR" => Ok(QueryOperator::Or),
-            "NOT" => Ok(QueryOperator::Not),
-            _ => Err(anyhow!("Invalid operator: {}", s)),
-        }
-    }
-}
-
-/// A term in a parsed query
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryTerm {
-    /// The text of the term
-    pub text: String,
-
-    /// Optional operator preceding this term
-    pub operator: Option<QueryOperator>,
-
-    /// Whether this term is a phrase (surrounded by quotes)
-    pub is_phrase: bool,
-
-    /// Whether this term contains wildcards
-    pub is_wildcard: bool,
-
-    /// Optional boost factor for this term
-    pub boost: Option<f64>,
-}
-
-impl QueryTerm {
-    /// Create a new query term
-    pub fn new(text: String) -> Self {
-        let is_wildcard = text.contains('*');
-
-        Self {
-            text,
-            operator: None,
-            is_phrase: false,
-            is_wildcard,
-            boost: None,
-        }
-    }
-
-    /// Create a new phrase term
-    pub fn new_phrase(text: String) -> Self {
-        Self {
-            text,
-            operator: None,
-            is_phrase: true,
-            is_wildcard: false,
-            boost: None,
-        }
-    }
-
-    /// Set the operator for this term
-    pub fn with_operator(mut self, operator: QueryOperator) -> Self {
-        self.operator = Some(operator);
-        self
-    }
-
-    /// Set the boost factor for this term
-    pub fn with_boost(mut self, boost: f64) -> Self {
-        self.boost = Some(boost);
-        self
-    }
-}
-
-/// A parsed query ready for processing
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParsedQuery {
-    /// The terms in the query
+/// Represents a query to search objects
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Query {
     pub terms: Vec<QueryTerm>,
-
-    /// Default operator to use between terms
-    pub default_operator: QueryOperator,
-}
-
-impl ParsedQuery {
-    /// Create a new empty parsed query
-    pub fn new() -> Self {
-        Self {
-            terms: Vec::new(),
-            default_operator: QueryOperator::And,
-        }
-    }
-
-    /// Add a term to this query
-    pub fn add_term(&mut self, term: QueryTerm) {
-        self.terms.push(term);
-    }
-
-    /// Set the default operator
-    pub fn with_default_operator(mut self, operator: QueryOperator) -> Self {
-        self.default_operator = operator;
-        self
-    }
-}
-
-/// Parse a text query string into a structured query
-pub fn parse_text_query(query: &str) -> Result<ParsedQuery> {
-    let mut parsed_query = ParsedQuery::new();
-    let mut current_operator: Option<QueryOperator> = None;
-
-    // Simple tokenization by splitting on whitespace
-    let tokens: Vec<&str> = query.split_whitespace().collect();
-
-    for i in 0..tokens.len() {
-        let token = tokens[i];
-
-        // Check if this token is an operator
-        if let Ok(op) = QueryOperator::from_str(token) {
-            current_operator = Some(op);
-            continue;
-        }
-
-        // Process the token as a term
-        let mut term_text = token.to_string();
-
-        // Basic preprocessing
-        term_text = term_text.to_lowercase();
-
-        // Check for phrase (assuming simple implementation for now)
-        let is_phrase = term_text.starts_with('"') && term_text.ends_with('"');
-
-        if is_phrase {
-            // Remove the quotes
-            term_text = term_text[1..term_text.len() - 1].to_string();
-            let term = QueryTerm::new_phrase(term_text);
-            parsed_query.add_term(if let Some(op) = current_operator {
-                term.with_operator(op)
-            } else {
-                term
-            });
-        } else {
-            // Check for boost factor (e.g., term^2.0)
-            let mut boost = None;
-            if let Some(boost_idx) = term_text.find('^') {
-                if boost_idx < term_text.len() - 1 {
-                    if let Ok(factor) = term_text[boost_idx + 1..].parse::<f64>() {
-                        boost = Some(factor);
-                        term_text = term_text[0..boost_idx].to_string();
-                    }
-                }
-            }
-
-            // Create a normal term
-            let mut term = QueryTerm::new(term_text);
-            if let Some(op) = current_operator {
-                term = term.with_operator(op);
-            }
-            if let Some(b) = boost {
-                term = term.with_boost(b);
-            }
-
-            parsed_query.add_term(term);
-        }
-
-        // Reset the operator after it's been applied
-        current_operator = None;
-    }
-
-    Ok(parsed_query)
-}
-
-/// Parse a query that includes quoted phrases
-pub fn parse_query_with_phrases(query: &str) -> Result<ParsedQuery> {
-    let mut parsed_query = ParsedQuery::new();
-    let mut current_pos = 0;
-    let mut current_operator: Option<QueryOperator> = None;
-
-    let query_chars: Vec<char> = query.chars().collect();
-
-    while current_pos < query_chars.len() {
-        // Skip whitespace
-        while current_pos < query_chars.len() && query_chars[current_pos].is_whitespace() {
-            current_pos += 1;
-        }
-
-        if current_pos >= query_chars.len() {
-            break;
-        }
-
-        // Check for quoted phrases
-        if query_chars[current_pos] == '"' {
-            current_pos += 1; // Skip the opening quote
-            let start_pos = current_pos;
-
-            // Find the closing quote
-            while current_pos < query_chars.len() && query_chars[current_pos] != '"' {
-                current_pos += 1;
-            }
-
-            if current_pos < query_chars.len() {
-                let phrase = query_chars[start_pos..current_pos]
-                    .iter()
-                    .collect::<String>();
-                let term = QueryTerm::new_phrase(phrase);
-
-                parsed_query.add_term(if let Some(op) = current_operator {
-                    term.with_operator(op)
-                } else {
-                    term
-                });
-
-                current_pos += 1; // Skip the closing quote
-                current_operator = None;
-            } else {
-                // Unclosed quote, treat the rest as a normal term
-                let term_text = query_chars[start_pos..].iter().collect::<String>();
-                parsed_query.add_term(QueryTerm::new(term_text));
-                break;
-            }
-        } else {
-            // Check if this is an operator
-            let remaining = query_chars[current_pos..].iter().collect::<String>();
-            let next_space = remaining
-                .find(|c: char| c.is_whitespace())
-                .unwrap_or(remaining.len());
-            let word = &remaining[0..next_space];
-
-            if let Ok(op) = QueryOperator::from_str(word) {
-                current_operator = Some(op);
-                current_pos += word.len();
-                continue;
-            }
-
-            // Normal term
-            let start_pos = current_pos;
-
-            while current_pos < query_chars.len() && !query_chars[current_pos].is_whitespace() {
-                current_pos += 1;
-            }
-
-            let term_text = query_chars[start_pos..current_pos]
-                .iter()
-                .collect::<String>();
-
-            // Check for boost factor
-            let mut term_text_final = term_text.clone();
-            let mut boost = None;
-
-            if let Some(boost_idx) = term_text.find('^') {
-                if boost_idx < term_text.len() - 1 {
-                    if let Ok(factor) = term_text[boost_idx + 1..].parse::<f64>() {
-                        boost = Some(factor);
-                        term_text_final = term_text[0..boost_idx].to_string();
-                    }
-                }
-            }
-
-            // Create and add the term
-            let mut term = QueryTerm::new(term_text_final);
-            if let Some(op) = current_operator {
-                term = term.with_operator(op);
-            }
-            if let Some(b) = boost {
-                term = term.with_boost(b);
-            }
-
-            parsed_query.add_term(term);
-            current_operator = None;
-        }
-    }
-
-    Ok(parsed_query)
-}
-
-/// Filter expression types for queries
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum FilterExpression {
-    /// Exact term match
-    #[serde(rename = "term")]
-    Term { field: String, value: String },
-
-    /// Range filter for numeric values
-    #[serde(rename = "range")]
-    Range {
-        field: String,
-        min: Option<Value>,
-        max: Option<Value>,
-    },
-
-    /// Logical AND of multiple filters
-    #[serde(rename = "and")]
-    And { filters: Vec<FilterExpression> },
-
-    /// Logical OR of multiple filters
-    #[serde(rename = "or")]
-    Or { filters: Vec<FilterExpression> },
-
-    /// Logical NOT of a filter
-    #[serde(rename = "not")]
-    Not { filter: Box<FilterExpression> },
-}
-
-/// JSON query structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonQuery {
-    /// Text query string
-    pub query: String,
-
-    /// Maximum number of results to return
-    #[serde(rename = "top_k")]
-    pub top_k: Option<usize>,
-
-    /// Optional filter expressions
-    pub filters: Option<Vec<FilterExpression>>,
-
-    /// Optional field boosts
-    pub boost: Option<Vec<BoostCriteria>>,
-
-    /// Result offset for pagination
+    pub logical_operator: LogicalOperator,
+    pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
 
-/// Boost criteria for terms
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BoostCriteria {
-    /// Field to boost
-    pub field: String,
-
-    /// Boost factor (multiplier)
-    pub factor: f64,
-}
-
-/// Parse a JSON query string
-pub fn parse_json_query(json_str: &str) -> Result<JsonQuery> {
-    serde_json::from_str(json_str).context("Failed to parse JSON query")
-}
-
-/// Simple BM25 scoring implementation
-pub struct BM25 {
-    /// K1 parameter (term frequency saturation)
-    pub k1: f64,
-
-    /// B parameter (length normalization)
-    pub b: f64,
-}
-
-impl Default for BM25 {
+impl Default for Query {
     fn default() -> Self {
-        Self { k1: 1.2, b: 0.75 }
+        Self {
+            terms: Vec::new(),
+            logical_operator: LogicalOperator::And,
+            limit: None,
+            offset: None,
+        }
     }
 }
 
-impl BM25 {
-    /// Create a new BM25 scoring instance with specified parameters
-    pub fn new(k1: f64, b: f64) -> Self {
-        Self { k1, b }
-    }
+/// Individual query term with modifiers
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QueryTerm {
+    pub text: String,
+    pub weight: Option<f64>,
+    pub fuzzy: Option<bool>,
+    pub prefix: Option<bool>,
+}
 
-    /// Calculate BM25 score for a single term in a document
-    pub fn score(
-        &self,
-        term_freq: usize,
-        doc_length: usize,
-        avg_doc_length: f64,
-        doc_count: usize,
-        term_doc_freq: usize,
-    ) -> f64 {
-        if term_doc_freq == 0 || doc_count == 0 {
-            return 0.0;
+impl QueryTerm {
+    pub fn new(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            weight: None,
+            fuzzy: None,
+            prefix: None,
         }
-
-        // Calculate the inverse document frequency (IDF)
-        let idf = (doc_count as f64 - term_doc_freq as f64 + 0.5) / (term_doc_freq as f64 + 0.5);
-        let idf = (1.0 + idf).ln();
-
-        // If IDF is negative or zero, this term isn't useful for scoring
-        if idf <= 0.0 {
-            return 0.0;
-        }
-
-        // Calculate the term frequency component
-        let tf_component = term_freq as f64 * (self.k1 + 1.0)
-            / (term_freq as f64
-                + self.k1 * (1.0 - self.b + self.b * doc_length as f64 / avg_doc_length));
-
-        // Return the final score
-        idf * tf_component
     }
 }
 
-/// Term positions for query scoring
-#[derive(Debug, Clone)]
+/// Logical operators for combining query terms
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum LogicalOperator {
+    And,
+    Or,
+}
+
+impl FromStr for LogicalOperator {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "and" => Ok(LogicalOperator::And),
+            "or" => Ok(LogicalOperator::Or),
+            _ => Err(format!("Unknown logical operator: {}", s)),
+        }
+    }
+}
+
+/// A position of a term in a document
+#[derive(Clone, Debug)]
 pub struct TermPosition {
-    /// Position in the document
     pub position: usize,
-
-    /// Document ID
     pub document_id: String,
 }
 
-/// Main query engine for the Fugu database
+/// A matching document with score and optional highlights
+#[derive(Clone, Debug, Serialize)]
+pub struct ScoredDocument {
+    pub id: String,
+    pub score: f64,
+    pub metadata: Option<Value>,
+    pub highlights: Option<Vec<String>>,
+}
+
+/// Alias for backward compatibility with old API
+pub type QueryHit = ScoredDocument;
+
+/// Represents search results returned to the client
+#[derive(Clone, Debug, Serialize)]
+pub struct QueryResults {
+    pub took_ms: u64,
+    pub total_hits: usize,
+    pub hits: Vec<QueryHit>,
+}
+
+/// Highlight in search results
+#[derive(Clone, Debug, Serialize)]
+pub struct Highlight {
+    pub term: String,
+    pub context: String,
+}
+
+/// Main query engine that works with our database backend
 pub struct QueryEngine {
-    /// Database connection
     db: Arc<FuguDB>,
-
-    /// Query configuration
     config: QueryConfig,
-
-    /// BM25 scoring algorithm
-    bm25: BM25,
 }
 
 impl QueryEngine {
-    /// Create a new query engine instance
+    /// Create a new query engine with the given database and config
     pub fn new(db: Arc<FuguDB>, config: QueryConfig) -> Self {
-        let bm25 = BM25::new(config.bm25_k1, config.bm25_b);
-
-        Self { db, config, bm25 }
+        Self { db, config }
     }
 
-    /// Execute a simple text search query
+    /// Execute a query and return scored results
+    pub fn execute(&self, query: Query) -> Result<Vec<ScoredDocument>> {
+        let span = tracing_utils::db_span("query_execute");
+        let _enter = span.enter();
+
+        let start_time = Instant::now();
+        debug!("Executing query: {:?}", query);
+
+        // Parse the query
+        let parsed_query = self.parse_query(query)?;
+
+        // Collect document statistics for scoring
+        let (doc_count, avg_doc_length, term_freq) = self.collect_document_statistics()?;
+
+        // Get term positions from the inverted index
+        let mut term_positions = HashMap::new();
+        for term in &parsed_query.terms {
+            let positions = self.get_term_positions(&term.text.to_lowercase())?;
+            term_positions.insert(term.text.clone(), positions);
+        }
+
+        // Score documents based on term positions and document statistics
+        let scored_docs = self.score_documents(
+            &parsed_query
+                .terms
+                .iter()
+                .map(|t| t.text.clone())
+                .collect::<Vec<_>>(),
+            &term_positions,
+            doc_count,
+            avg_doc_length,
+            &parsed_query.logical_operator,
+        );
+
+        // Sort by score descending
+        let mut results: Vec<_> = scored_docs.into_iter().collect();
+        results.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(Ordering::Equal)
+        });
+
+        // Apply limit
+        let limit = parsed_query.limit.unwrap_or(self.config.default_limit);
+        let offset = parsed_query.offset.unwrap_or(0);
+        let results = results
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .filter(|(_, score)| *score >= self.config.min_score_threshold)
+            .collect::<Vec<_>>();
+
+        debug!(
+            "Found {} results in {:.2?}",
+            results.len(),
+            start_time.elapsed()
+        );
+
+        // Build the final result objects
+        let mut documents = Vec::new();
+        for (doc_id, score) in results {
+            let mut highlights = None;
+            let mut metadata = None;
+
+            // Fetch full document record
+            if let Some(record) = self.db.get(&doc_id) {
+                metadata = Some(record.metadata.clone());
+
+                // Add highlights if enabled and score is above threshold
+                if self.config.highlight_snippets && score >= self.config.min_score_threshold {
+                    // Extract positions for this document across all terms
+                    let mut doc_term_positions = HashMap::new();
+                    for (term, positions_map) in &term_positions {
+                        if let Some(positions) = positions_map.get(&doc_id) {
+                            doc_term_positions.insert(term.clone(), positions.clone());
+                        }
+                    }
+
+                    let snippets = self.create_highlights(
+                        &record.text,
+                        &parsed_query
+                            .terms
+                            .iter()
+                            .map(|t| t.text.clone())
+                            .collect::<Vec<_>>(),
+                        &doc_term_positions,
+                    );
+
+                    if !snippets.is_empty() {
+                        highlights = Some(snippets);
+                    }
+                }
+            }
+
+            documents.push(ScoredDocument {
+                id: doc_id,
+                score,
+                metadata,
+                highlights,
+            });
+        }
+
+        Ok(documents)
+    }
+    
+    /// Compatibility method for the old API - search using text query
     pub fn search_text(&self, query_text: &str, limit: Option<usize>) -> Result<QueryResults> {
-        // Create a query span for this operation
-        let mut additional_fields = HashMap::new();
-        additional_fields.insert("limit", limit.unwrap_or(self.config.default_limit));
-        let span = tracing_utils::query_span("search_text", query_text, Some(additional_fields));
-
-        async move {
-            let start_time = Instant::now();
-            let limit = limit.unwrap_or(self.config.default_limit);
-
-            debug!("Executing text search query: {}", query_text);
-
-            // Parse the query
-            let parsed_query = match parse_query_with_phrases(query_text) {
-                Ok(query) => query,
-                Err(e) => {
-                    error!("Failed to parse text query: {}", e);
-                    return Err(e.context("Failed to parse text query"));
-                }
-            };
-
-            // Get document statistics for scoring
-            let (doc_count, avg_doc_length, term_doc_freqs) = match self.get_document_statistics() {
-                Ok(stats) => {
-                    let (count, avg_len, _) = stats;
-                    debug!("Retrieved document statistics: {} docs, {:.2} avg length", count, avg_len);
-                    stats
-                },
-                Err(e) => {
-                    error!("Failed to get document statistics: {}", e);
-                    return Err(e.context("Failed to get document statistics"));
-                }
-            };
-
-            // Retrieve term positions for all query terms
-            let mut term_positions = HashMap::new();
-            for term in &parsed_query.terms {
-                match self.get_term_positions(&term.text) {
-                    Ok(positions) => {
-                        if !positions.is_empty() {
-                            debug!("Term '{}' found in {} documents", term.text, positions.len());
-                            term_positions.insert(term.text.clone(), positions);
-                        } else {
-                            debug!("Term '{}' not found in any documents", term.text);
-                        }
-                    },
-                    Err(e) => {
-                        error!("Error retrieving positions for term '{}': {}", term.text, e);
-                        // Continue with other terms rather than failing the whole query
-                    }
-                }
-            }
-
-            // Score the documents
-            let doc_scores = self.score_documents(
-                &parsed_query
-                    .terms
-                    .iter()
-                    .map(|t| t.text.clone())
-                    .collect::<Vec<_>>(),
-                &term_positions,
-                doc_count,
-                avg_doc_length,
-                &term_doc_freqs,
-            );
-
-            debug!("Scored {} documents", doc_scores.len());
-
-            // Sort by score and apply limit
-            let mut scored_docs: Vec<_> = doc_scores.into_iter().collect();
-            scored_docs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-            let total_hits = scored_docs.len();
-
-            // Keep only top-k results
-            if scored_docs.len() > limit {
-                scored_docs.truncate(limit);
-            }
-
-            // Create query hits with highlights if requested
-            let mut hits = Vec::with_capacity(scored_docs.len());
-            for (doc_id, score) in scored_docs {
-                let mut highlights = None;
-                let mut metadata = None;
-
-                // Fetch full document record
-                if let Some(record) = self.db.get(&doc_id) {
-                    metadata = Some(record.metadata.clone());
-
-                    // Add highlights if enabled and score is above threshold
-                    if self.config.highlight_snippets && score >= self.config.min_score_threshold {
-                        // Extract positions for this document across all terms
-                        let mut doc_term_positions = HashMap::new();
-                        for (term, positions_map) in &term_positions {
-                            if let Some(positions) = positions_map.get(&doc_id) {
-                                doc_term_positions.insert(term.clone(), positions.clone());
-                            }
-                        }
-
-                        let snippets = self.create_highlights(
-                            &record.text,
-                            &parsed_query
-                                .terms
-                                .iter()
-                                .map(|t| t.text.clone())
-                                .collect::<Vec<_>>(),
-                            &doc_term_positions,
-                        );
-
-                        if !snippets.is_empty() {
-                            highlights = Some(snippets);
-                        }
-                    }
-                }
-
-                hits.push(QueryHit {
-                    document_id: doc_id,
-                    score,
-                    highlights,
-                    metadata,
-                });
-            }
-
-            let took_ms = start_time.elapsed().as_millis() as u64;
-
-            let results = QueryResults {
-                hits,
-                total_hits,
-                took_ms,
-            };
-
-            info!(
-                total_hits = total_hits,
-                took_ms = took_ms,
-                "Query returned {} results in {}ms",
-                total_hits, took_ms
-            );
-
-            Ok(results)
-        }
-        .instrument(span)
-        // Run the async block synchronously since the API is sync
-        .now_or_never()
-        .expect("Query execution should never be pending")
+        let start_time = Instant::now();
+        
+        // Create a simple query from the text
+        let mut query = Query::default();
+        query.terms.push(QueryTerm::new(query_text));
+        query.limit = limit;
+        
+        // Execute the query
+        let scored_docs = self.execute(query)?;
+        
+        // Convert to QueryResults format
+        Ok(QueryResults {
+            took_ms: start_time.elapsed().as_millis() as u64,
+            total_hits: scored_docs.len(),
+            hits: scored_docs,
+        })
     }
-
-    /// Execute a JSON-formatted search query
-    pub fn search_json(&self, json_query: &str) -> Result<QueryResults> {
-        // Create a query span for this operation
-        let span = tracing_utils::query_span::<String>("search_json", json_query, None);
-
-        async move {
-            let start_time = Instant::now();
-
-            debug!("Executing JSON search query");
-
-            // Parse the JSON query
-            let parsed_json_query = match parse_json_query(json_query) {
-                Ok(query) => {
-                    debug!("Successfully parsed JSON query: {}", query.query);
-                    query
-                },
-                Err(e) => {
-                    error!("Failed to parse JSON query: {}", e);
-                    return Err(e.context("Failed to parse JSON query"));
-                }
-            };
-
-            // Record additional fields in the current span
-            let span = tracing::Span::current();
-            span.record("query_text", &tracing::field::debug(&parsed_json_query.query));
-            span.record("top_k", &tracing::field::debug(&parsed_json_query.top_k));
-
-            if let Some(filters) = &parsed_json_query.filters {
-                span.record("has_filters", &tracing::field::debug(true));
-                span.record("filter_count", &tracing::field::debug(filters.len()));
-            }
-
-            // Convert to a text query and execute
-            let result = self.search_text(&parsed_json_query.query, parsed_json_query.top_k);
-
-            // TODO: Apply filters from the JSON query
-            if let Some(filters) = &parsed_json_query.filters {
-                debug!("JSON query has {} filters (not yet implemented)", filters.len());
-            }
-
-            let took_ms = start_time.elapsed().as_millis() as u64;
-
-            info!(
-                took_ms = took_ms,
-                "JSON query processed in {}ms",
-                took_ms
-            );
-
-            result
-        }
-        .instrument(span)
-        // Run the async block synchronously since the API is sync
-        .now_or_never()
-        .expect("Query execution should never be pending")
-    }
-
-    /// Get document statistics needed for scoring
-    fn get_document_statistics(&self) -> Result<(usize, f64, HashMap<String, usize>)> {
-        // Access the database to get term and document statistics
-        // This is a simplified implementation that scans all records
-
-        // Open the RECORDS tree
-        let records_tree = match self.db.db().open_tree(crate::db::TREE_RECORDS) {
-            Ok(tree) => tree,
-            Err(e) => {
-                error!("Failed to open RECORDS tree: {}", e);
-                return Err(anyhow!("Failed to open RECORDS tree: {}", e));
-            }
+    
+    /// Compatibility method for the old API - search using JSON
+    pub fn search_json(&self, query_json: Value, limit: Option<usize>) -> Result<QueryResults> {
+        let start_time = Instant::now();
+        
+        // Extract query text from JSON
+        let query_text = match query_json.get("query") {
+            Some(Value::String(s)) => s.clone(),
+            _ => return Err(anyhow!("Invalid query: missing 'query' field")),
         };
+        
+        // Create a simple query
+        let mut query = Query::default();
+        query.terms.push(QueryTerm::new(&query_text));
+        query.limit = limit;
+        
+        // Apply any filters from the JSON
+        if let Some(Value::Array(filters)) = query_json.get("filters") {
+            // Implementation would go here
+            debug!("Filters not yet implemented in unified API");
+        }
+        
+        // Execute the query
+        let scored_docs = self.execute(query)?;
+        
+        // Convert to QueryResults format
+        Ok(QueryResults {
+            took_ms: start_time.elapsed().as_millis() as u64,
+            total_hits: scored_docs.len(),
+            hits: scored_docs,
+        })
+    }
+
+    /// Parse a query into terms
+    fn parse_query(&self, query: Query) -> Result<Query> {
+        // For now we just do minimal validation
+        if query.terms.is_empty() {
+            return Err(anyhow!("Query must have at least one term"));
+        }
+
+        Ok(query)
+    }
+
+    /// Collect document statistics for scoring
+    fn collect_document_statistics(&self) -> Result<(usize, f64, HashMap<String, usize>)> {
+        let span = tracing_utils::db_span("collect_document_statistics");
+        let _enter = span.enter();
+
+        // We need:
+        // 1. Total document count
+        // 2. Average document length
+        // 3. Term frequency across all documents
 
         let mut doc_count = 0;
         let mut total_tokens = 0;
         let mut term_doc_freqs = HashMap::new();
 
-        // Scan all records
-        for item in records_tree.iter() {
-            if let Ok((key, value)) = item {
-                doc_count += 1;
+        // Get the RECORDS tree handle
+        let records_handle = match self.db.open_tree(crate::db::TREE_RECORDS) {
+            Ok(handle) => handle,
+            Err(e) => {
+                error!("Failed to open RECORDS collection: {}", e);
+                return Err(anyhow!("Failed to open RECORDS collection: {}", e));
+            }
+        };
 
-                // Try to deserialize the record
-                if let Ok(archivable) = crate::rkyv_adapter::deserialize::<
-                    crate::object::ArchivableObjectRecord,
-                >(&value)
-                {
-                    let record = ObjectRecord::from(archivable);
+        // Scan all records using our abstracted iterator
+        let records_iter = match records_handle.iter() {
+            Ok(iter) => iter,
+            Err(e) => {
+                error!("Failed to create iterator for RECORDS collection: {}", e);
+                return Err(anyhow!("Failed to create iterator for RECORDS collection: {}", e));
+            }
+        };
 
-                    // Tokenize text (simple whitespace tokenization for now)
-                    let tokens: Vec<&str> = record.text.split_whitespace().collect();
-                    total_tokens += tokens.len();
+        for item in records_iter {
+            match item {
+                Ok((key_vec, value_vec)) => {
+                    doc_count += 1;
 
-                    // Count document frequency for each unique term
-                    let mut seen_terms = std::collections::HashSet::new();
-                    for token in tokens {
-                        let term = token.to_lowercase();
-                        if seen_terms.insert(term.clone()) {
-                            *term_doc_freqs.entry(term).or_insert(0) += 1;
+                    // Try to deserialize the record
+                    if let Ok(archivable) = crate::rkyv_adapter::deserialize::<
+                        crate::object::ArchivableObjectRecord,
+                    >(&value_vec)
+                    {
+                        let record = ObjectRecord::from(archivable);
+
+                        // Tokenize text (simple whitespace tokenization for now)
+                        let tokens: Vec<&str> = record.text.split_whitespace().collect();
+                        total_tokens += tokens.len();
+
+                        // Count document frequency for each unique term
+                        let mut seen_terms = std::collections::HashSet::new();
+                        for token in tokens {
+                            let term = token.to_lowercase();
+                            if seen_terms.insert(term.clone()) {
+                                *term_doc_freqs.entry(term).or_insert(0) += 1;
+                            }
                         }
                     }
+                },
+                Err(e) => {
+                    error!("Error iterating record: {}", e);
                 }
             }
         }
@@ -772,53 +398,82 @@ impl QueryEngine {
 
     /// Get term positions from the index
     fn get_term_positions(&self, term: &str) -> Result<HashMap<String, Vec<TermPosition>>> {
-        let mut result = HashMap::new();
-
-        // Query the inverted index for this term
-        // This is a simplified implementation that scans object index trees
-
-        // Get a list of all object index trees
-        let db = self.db.db();
-        let trees = db.tree_names();
-
+        let mut result_map = HashMap::new();
         let prefix = format!("{}:", crate::db::PREFIX_RECORD_INDEX_TREE);
 
-        for tree_name in trees {
-            let tree_name_str = std::str::from_utf8(&tree_name)?;
-
+        // Define a function to process a tree/partition
+        let process_tree = |name_str: &str, result: &mut HashMap<String, Vec<TermPosition>>| {
             // Skip trees that don't match our prefix pattern
-            if !tree_name_str.starts_with(&prefix) {
-                continue;
+            if !name_str.starts_with(&prefix) {
+                return;
             }
 
             // Extract the object ID from the tree name
-            let object_id = tree_name_str[prefix.len()..].to_string();
+            let object_id = name_str[prefix.len()..].to_string();
 
-            // Open the object's index tree
-            if let Ok(index_tree) = db.open_tree(tree_name) {
+            // Open the object's index tree using our unified API
+            if let Ok(index_handle) = self.db.open_tree(name_str) {
                 // Check if this object contains the term
-                if let Ok(Some(positions_bytes)) = index_tree.get(term.as_bytes()) {
+                if let Ok(Some(positions_bytes)) = index_handle.get(term) {
                     // Deserialize the positions
-                    let positions = crate::db::deserialize_positions(&positions_bytes);
-                    // Convert to term positions
-                    let term_positions: Vec<TermPosition> = positions
-                        .iter()
-                        .map(|&pos| TermPosition {
-                            position: pos,
-                            document_id: object_id.clone(),
-                        })
-                        .collect();
+                    if let Ok(positions) = crate::db::deserialize_positions(&positions_bytes) {
+                        // Convert to term positions
+                        let term_positions: Vec<TermPosition> = positions
+                            .iter()
+                            .map(|&pos| TermPosition {
+                                position: pos as usize, // Convert u64 to usize
+                                document_id: object_id.clone(),
+                            })
+                            .collect();
 
-                    if !term_positions.is_empty() {
-                        result.insert(object_id, term_positions);
+                        if !term_positions.is_empty() {
+                            result.insert(object_id.clone(), term_positions);
+                        }
+                    } else {
+                        error!("Failed to deserialize positions for term '{}' in document '{}'",
+                               term, object_id);
                     }
                 }
             }
+        };
+
+        // Get tree/partition names using a unified approach
+        let tree_names = self.get_storage_names()?;
+        for name_str in tree_names {
+            process_tree(&name_str, &mut result_map);
         }
 
-        debug!("Term '{}' found in {} documents", term, result.len());
+        debug!("Term '{}' found in {} documents", term, result_map.len());
+        Ok(result_map)
+    }
 
-        Ok(result)
+    /// Get storage names (tree names for sled, partition names for fjall)
+    fn get_storage_names(&self) -> Result<Vec<String>> {
+        #[cfg(feature = "use-sled")]
+        {
+            // tree_names() returns Vec<IVec> directly, not a Result
+            let trees = self.db.db().tree_names();
+            let mut result = Vec::new();
+            for tree_name in trees {
+                if let Ok(name_str) = std::str::from_utf8(tree_name.as_ref()) {
+                    result.push(name_str.to_string());
+                } else {
+                    error!("Invalid UTF-8 in tree name");
+                }
+            }
+            Ok(result)
+        }
+
+        #[cfg(feature = "use-fjall")]
+        {
+            match self.db.partition_names() {
+                Ok(partitions) => Ok(partitions),
+                Err(e) => {
+                    error!("Failed to get partition names: {:?}", e);
+                    Err(anyhow!("Failed to get partition names"))
+                }
+            }
+        }
     }
 
     /// Score documents based on term positions
@@ -828,40 +483,70 @@ impl QueryEngine {
         term_positions: &HashMap<String, HashMap<String, Vec<TermPosition>>>,
         doc_count: usize,
         avg_doc_length: f64,
-        term_doc_frequencies: &HashMap<String, usize>,
+        operator: &LogicalOperator,
     ) -> HashMap<String, f64> {
         let mut document_scores = HashMap::new();
-        let mut document_lengths = HashMap::new();
 
-        // First pass: calculate document lengths
+        // Simple BM25 scoring with position bias
+        // For each term, score documents containing it
         for term in terms {
-            if let Some(positions_map) = term_positions.get(term) {
-                for (doc_id, positions) in positions_map {
-                    *document_lengths.entry(doc_id.clone()).or_insert(0) += positions.len();
+            if let Some(positions) = term_positions.get(term) {
+                for (doc_id, term_positions) in positions {
+                    // For simplicity, calculate score as term frequency with position bias
+                    // (positions closer to the start of the document get higher weight)
+                    let tf = term_positions.len() as f64;
+                    
+                    // Position bias - positions closer to the start get higher weight
+                    let position_sum: f64 = term_positions.iter()
+                        .map(|pos| 1.0 / (1.0 + pos.position as f64 * 0.01))
+                        .sum();
+                    
+                    let position_score = position_sum / term_positions.len() as f64;
+                    
+                    // TF-IDF component
+                    let idf = (doc_count as f64 / positions.len() as f64).ln();
+                    
+                    // Combined score
+                    let score = tf * idf * position_score;
+                    
+                    // Accumulate scores based on the logical operator
+                    match operator {
+                        LogicalOperator::And => {
+                            // For AND, we multiply scores 
+                            let entry = document_scores.entry(doc_id.clone()).or_insert(1.0);
+                            *entry *= score;
+                        }
+                        LogicalOperator::Or => {
+                            // For OR, we sum scores
+                            let entry = document_scores.entry(doc_id.clone()).or_insert(0.0);
+                            *entry += score;
+                        }
+                    }
                 }
             }
         }
 
-        // Second pass: score each document for each term
-        for term in terms {
-            if let Some(positions_map) = term_positions.get(term) {
-                let term_freqs = calculate_term_frequencies(positions_map);
-
-                for (doc_id, freq) in term_freqs {
-                    let doc_length = *document_lengths.get(&doc_id).unwrap_or(&0);
-                    let term_doc_freq = *term_doc_frequencies.get(term).unwrap_or(&0);
-
-                    if doc_length > 0 {
-                        let score = self.bm25.score(
-                            freq,
-                            doc_length,
-                            avg_doc_length,
-                            doc_count,
-                            term_doc_freq,
-                        );
-
-                        *document_scores.entry(doc_id).or_insert(0.0) += score;
+        // For AND logic, filter out documents that don't contain all terms
+        if let LogicalOperator::And = operator {
+            let all_docs: std::collections::HashSet<&String> = term_positions.values()
+                .flat_map(|positions| positions.keys())
+                .collect();
+                
+            for term in terms {
+                if let Some(positions) = term_positions.get(term) {
+                    let term_docs: std::collections::HashSet<&String> = positions.keys().collect();
+                    
+                    let missing_docs: Vec<String> = all_docs.difference(&term_docs)
+                        .map(|s| (*s).clone())
+                        .collect();
+                        
+                    for doc_id in missing_docs {
+                        document_scores.remove(&doc_id);
                     }
+                } else {
+                    // This term has no matching documents, so AND logic would return empty
+                    document_scores.clear();
+                    break;
                 }
             }
         }
@@ -869,203 +554,60 @@ impl QueryEngine {
         document_scores
     }
 
-    /// Create highlighted snippets for search results
+    /// Create highlighted snippets for a matched document
     fn create_highlights(
         &self,
-        content: &str,
+        text: &str,
         terms: &[String],
-        positions: &HashMap<String, Vec<TermPosition>>,
+        term_positions: &HashMap<String, Vec<TermPosition>>,
     ) -> Vec<String> {
-        // Implementation of a simple highlighting algorithm
-        if content.is_empty() || terms.is_empty() || positions.is_empty() {
-            return Vec::new();
-        }
-
-        // Split content into words
-        let words: Vec<&str> = content.split_whitespace().collect();
-
-        // Collect all positions for all terms
-        let mut all_positions = Vec::new();
-        for term in terms {
-            if let Some(term_positions) = positions.get(term) {
-                for pos in term_positions {
-                    all_positions.push(pos.position);
-                }
-            }
-        }
-
-        // No positions found
-        if all_positions.is_empty() {
-            return Vec::new();
-        }
-
-        // Sort positions
-        all_positions.sort();
-
-        // Extract snippets around positions with some context
-        let context_size = 5; // Words before/after match
         let mut snippets = Vec::new();
+        let context_size = self.config.snippet_context_size;
 
-        // Track already covered positions to avoid duplicate snippets
-        let mut covered_positions = std::collections::HashSet::new();
+        let words: Vec<&str> = text.split_whitespace().collect();
 
-        for &pos in &all_positions {
-            if covered_positions.contains(&pos) {
-                continue;
-            }
-
-            // Calculate snippet range
-            let start = pos.saturating_sub(context_size);
-            let end = std::cmp::min(pos + context_size + 1, words.len());
-
-            // Mark this and nearby positions as covered
-            for p in start..end {
-                covered_positions.insert(p);
-            }
-
-            // Create the snippet
-            let mut snippet = String::new();
-
-            // Add prefix if not starting from the beginning
-            if start > 0 {
-                snippet.push_str("... ");
-            }
-
-            // Add words with highlighting
-            for i in start..end {
-                // Check if this position is a match
-                let is_match = all_positions.contains(&i);
-
-                if is_match {
-                    snippet.push_str("**"); // Markdown style highlighting
+        // For each matched term, create snippets
+        for term in terms {
+            if let Some(positions) = term_positions.get(term) {
+                for position in positions {
+                    let pos = position.position;
+                    
+                    // Calculate snippet boundaries
+                    let start = if pos > context_size { pos - context_size } else { 0 };
+                    let end = std::cmp::min(pos + context_size + 1, words.len());
+                    
+                    if end > start {
+                        // Create the snippet with highlighting
+                        let prefix = words[start..pos].join(" ");
+                        let matched_term = words[pos];
+                        let suffix = if pos + 1 < end {
+                            words[pos+1..end].join(" ")
+                        } else {
+                            String::new()
+                        };
+                        
+                        // Create prefixed and suffixed strings once to avoid temporary value issues
+                        let formatted_prefix = if prefix.is_empty() { String::new() } else { format!("{} ", prefix) };
+                        let formatted_suffix = if suffix.is_empty() { String::new() } else { format!(" {}", suffix) };
+                        
+                        // Now use the stored strings
+                        let snippet = format!("{}**{}**{}",
+                            formatted_prefix,
+                            matched_term,
+                            formatted_suffix
+                        );
+                        
+                        snippets.push(snippet);
+                    }
+                    
+                    // Limit the number of snippets
+                    if snippets.len() >= 3 {
+                        break;
+                    }
                 }
-
-                if i < words.len() {
-                    snippet.push_str(words[i]);
-                }
-
-                if is_match {
-                    snippet.push_str("**");
-                }
-
-                snippet.push(' ');
-            }
-
-            // Add suffix if not ending at the end
-            if end < words.len() {
-                snippet.push_str("...");
-            }
-
-            snippets.push(snippet);
-
-            // Limit the number of snippets
-            if snippets.len() >= 3 {
-                break;
             }
         }
 
         snippets
-    }
-}
-
-/// Calculate term frequencies from positions
-fn calculate_term_frequencies(
-    positions_map: &HashMap<String, Vec<TermPosition>>,
-) -> HashMap<String, usize> {
-    let mut term_freqs = HashMap::new();
-
-    for (doc_id, positions) in positions_map {
-        term_freqs.insert(doc_id.clone(), positions.len());
-    }
-
-    term_freqs
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_parse_simple_query() {
-        let query = "hello world";
-        let parsed = parse_text_query(query).unwrap();
-
-        assert_eq!(parsed.terms.len(), 2);
-        assert_eq!(parsed.terms[0].text, "hello");
-        assert_eq!(parsed.terms[1].text, "world");
-        assert_eq!(parsed.terms[0].operator, None);
-        assert_eq!(parsed.terms[1].operator, None);
-    }
-
-    #[test]
-    fn test_parse_query_with_operators() {
-        let query = "hello AND world OR fugu";
-        let parsed = parse_text_query(query).unwrap();
-
-        assert_eq!(parsed.terms.len(), 3);
-        assert_eq!(parsed.terms[0].text, "hello");
-        assert_eq!(parsed.terms[1].text, "world");
-        assert_eq!(parsed.terms[2].text, "fugu");
-        assert_eq!(parsed.terms[0].operator, None);
-        assert_eq!(parsed.terms[1].operator, Some(QueryOperator::And));
-        assert_eq!(parsed.terms[2].operator, Some(QueryOperator::Or));
-    }
-
-    #[test]
-    fn test_parse_query_with_phrase() {
-        let query = "hello \"world fugu\"";
-        let parsed = parse_query_with_phrases(query).unwrap();
-
-        assert_eq!(parsed.terms.len(), 2);
-        assert_eq!(parsed.terms[0].text, "hello");
-        assert_eq!(parsed.terms[1].text, "world fugu");
-        assert!(!parsed.terms[0].is_phrase);
-        assert!(parsed.terms[1].is_phrase);
-    }
-
-    #[test]
-    fn test_parse_json_query() {
-        let json = r#"
-        {
-            "query": "hello world",
-            "top_k": 5,
-            "filters": [
-                {
-                    "type": "term",
-                    "field": "category",
-                    "value": "docs"
-                }
-            ]
-        }
-        "#;
-
-        let result = parse_json_query(json);
-        assert!(result.is_ok());
-
-        let query = result.unwrap();
-        assert_eq!(query.query, "hello world");
-        assert_eq!(query.top_k, Some(5));
-        assert!(query.filters.is_some());
-    }
-
-    #[test]
-    fn test_bm25_scoring() {
-        let bm25 = BM25::default();
-
-        // Test with typical values
-        let doc_length = 100;
-        let avg_doc_length = 120.0;
-        let doc_count = 1000;
-        let term_doc_freq = 10;
-
-        // Common term (appears in many docs)
-        let common_score = bm25.score(5, doc_length, avg_doc_length, doc_count, 500);
-
-        // Rare term (appears in few docs)
-        let rare_score = bm25.score(5, doc_length, avg_doc_length, doc_count, 5);
-
-        // Rare terms should score higher than common terms with same frequency
-        assert!(rare_score > common_score);
     }
 }

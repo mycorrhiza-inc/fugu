@@ -8,6 +8,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use std::path::PathBuf;
 use tempfile::tempdir;
 use rand::prelude::*;
 
@@ -53,7 +54,7 @@ fn setup_test_db_with_corpus(doc_count: usize, content_type: &str) -> (FuguDB, t
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let db_path = temp_dir.path().to_str().unwrap();
     let db = sled::open(db_path).expect("Failed to open test database");
-    let fugu_db = FuguDB::new(db);
+    let mut fugu_db = FuguDB::new(db);
     
     // Initialize the database
     fugu_db.init_db();
@@ -130,8 +131,9 @@ fn setup_test_db_with_corpus(doc_count: usize, content_type: &str) -> (FuguDB, t
     }
     
     // Compact the database
-    let mut fugu_db_mut = fugu_db.clone();
+    let mut fugu_db_mut = fugu_db;
     fugu_db_mut.compact();
+    let fugu_db = fugu_db_mut;
 
     (fugu_db, temp_dir)
 }
@@ -311,8 +313,13 @@ fn bench_query_engine_internals(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)))
-        .sample_size(10);  // Reduced sample size since these are more expensive tests
+        .sample_size(20)  // Increased sample size for more reliable profiling
+        .measurement_time(Duration::from_secs(5))  // Longer measurement time for better profiling data
+        .warm_up_time(Duration::from_secs(2))  // Proper warm-up time
+        .with_profiler(PProfProfiler::new(
+            100, // Sampling frequency
+            Output::Flamegraph(None)
+        ));
     targets = bench_text_search, bench_phrase_search, bench_json_query, bench_query_engine_internals
 }
 criterion_main!(benches);

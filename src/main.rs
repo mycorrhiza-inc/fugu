@@ -3,9 +3,16 @@ use tokio::time::{Duration, interval};
 use tracing::{Instrument, debug, error, info};
 
 // Import our crate modules
-use fugu::db::FuguDB;
+use fugu::db::{FuguDB, FuguDBBackend};
 use fugu::server;
 use fugu::tracing_utils;
+
+// Import database backend based on feature flag
+#[cfg(feature = "use-sled")]
+use sled;
+
+#[cfg(feature = "use-fjall")]
+use fjall;
 
 // Main entry point
 #[tokio::main]
@@ -51,40 +58,65 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
 
     // Database initialization - properly separated from HTTP server logic
     info!("Initializing database");
-    let db = match sled::open("fugu_db") {
-        Ok(db) => {
-            info!("Successfully opened database");
-            db
-        }
-        Err(e) => {
-            error!("Failed to open database: {}", e);
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to open database: {}", e),
-            )));
-        }
+
+    // Initialize the appropriate database backend based on feature flags
+    #[cfg(feature = "use-sled")]
+    let mut fdb = {
+        let db = match sled::open("fugu_db") {
+            Ok(db) => {
+                info!("Successfully opened sled database");
+                db
+            }
+            Err(e) => {
+                error!("Failed to open sled database: {}", e);
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to open sled database: {}", e),
+                )));
+            }
+        };
+
+        let fdb = FuguDB::new(db);
+        fdb
     };
 
-    // Create and initialize the primary FuguDB instance
-    let mut fdb = FuguDB::new(db);
+    #[cfg(feature = "use-fjall")]
+    let mut fdb = {
+        // Configure fjall with optimized settings
+        let config = fjall::Config::new("fugu_db")
+            .cache_size(512 * 1024 * 1024)  // 512MB cache for better read performance
+            .max_write_buffer_size(64 * 1024 * 1024)  // 64MB write buffer for better write performance
+            .compaction_workers(4)  // Use 4 threads for compaction
+            .flush_workers(2)  // Use 2 threads for flushing
+            .manual_journal_persist(false)  // Automatic persistence
+            .fsync_ms(Some(100));  // Fsync every 100ms for durability with good performance
+
+        let keyspace = match config.open() {
+            Ok(keyspace) => {
+                info!("Successfully opened fjall keyspace with optimized configuration");
+                keyspace
+            }
+            Err(e) => {
+                error!("Failed to open fjall keyspace: {:?}", e);
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to open fjall keyspace: {:?}", e),
+                )));
+            }
+        };
+
+        let fdb = FuguDB::new(keyspace);
+        fdb
+    };
+
     fdb.init_db();
     info!("Database initialized successfully");
 
-    // Create a clone of the mailbox for the HTTP server
-    let server_mailbox = fdb.mailbox.clone();
+    // With the unified backend, we don't need mailbox or compactor queue anymore
+    // These were part of the old implementation before the backend abstraction
 
-    // Take ownership of the receiver channel (since we only need one receiver)
-    let compactor_queue = fdb.to_compact_queue.take();
-
-    // Create an API instance that shares the same mailbox
-    let server_db = FuguDB::new_api_instance(fdb.db(), server_mailbox);
-
-    // Update the compactor instance with the queue we took from the original
-    if let Some(queue) = compactor_queue {
-        fdb = FuguDB::new_compactor_instance(fdb.db(), fdb.mailbox.clone(), queue);
-    } else {
-        error!("Failed to get compaction queue receiver");
-    }
+    // We just pass the FuguDB instance directly to the server
+    let server_db = fdb.clone();
 
     // Set up compactor shutdown channel
     let (_compactor_shutdown_tx, compactor_shutdown_rx) = oneshot::channel::<()>();
@@ -115,35 +147,38 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Run the compactor service in the background
-async fn run_compactor(mut db: FuguDB, mut shutdown_recv: oneshot::Receiver<()>) {
-    let compactor_span = tracing_utils::compactor_span("service", None);
+async fn run_compactor(db: FuguDB, mut shutdown_recv: oneshot::Receiver<()>) {
+    // Simple compactor implementation for the unified backend
+    let mut interval = interval(Duration::from_secs(60));
 
-    async {
-        let mut interval_timer = interval(Duration::from_millis(200));
-        info!("Compactor service started with 200ms interval");
-
-        loop {
-            tokio::select! {
-                _ = interval_timer.tick() => {
-                    let tick_span = tracing_utils::compactor_span("tick", None);
-                    let _guard = tick_span.enter();
-                    debug!("Compactor tick");
-                    db.compact();
-                },
-                _ = &mut shutdown_recv => {
-                    info!("Compactor received shutdown signal");
-
-                    // Process any remaining items before shutting down
-                    info!("Running final compaction cycle before shutdown");
-                    let final_span = tracing_utils::compactor_span("final_tick", None);
-                    let _final_guard = final_span.enter();
-                    db.compact();
-
-                    break;
+    info!("Starting background compactor service");
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                debug!("Performing periodic maintenance (if needed)");
+                #[cfg(feature = "use-fjall")]
+                {
+                    if let FuguDBBackend::Fjall(ref keyspace) = db.backend {
+                        // Fjall has internal compaction but we can trigger it
+                        debug!("Triggering fjall maintenance");
+                    }
                 }
+
+                #[cfg(feature = "use-sled")]
+                {
+                    if let FuguDBBackend::Sled(ref db) = db.backend {
+                        // For sled we can flush the database periodically
+                        if let Err(e) = db.flush() {
+                            error!("Error during sled flush: {}", e);
+                        }
+                    }
+                }
+            }
+            // Use &mut to avoid moving the receiver in the loop
+            result = &mut shutdown_recv => {
+                info!("Received shutdown signal, stopping compactor service");
+                break;
             }
         }
     }
-    .instrument(compactor_span)
-    .await
 }

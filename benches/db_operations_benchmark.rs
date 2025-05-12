@@ -9,7 +9,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
@@ -121,7 +121,7 @@ fn bench_record_insertion(c: &mut Criterion) {
             b.iter_with_setup(
                 || {
                     // Setup: Create a new record for each iteration
-                    let mut rng = rand::thread_rng();
+                    let mut rng = rand::rng();
                     let id = format!(
                         "bench_insert_{}_{}_{}",
                         size,
@@ -259,31 +259,37 @@ fn bench_indexing(c: &mut Criterion) {
             let mut all_metrics = Vec::new();
 
             // Benchmark: Index the object
-            b.iter(|| {
-                let start_time = Instant::now();
-                let obj_index = object_index.clone();
-                fugu_db.index(black_box(obj_index));
+            b.iter_with_setup(
+                || create_object_index(&record), // Create a fresh ObjectIndex for each iteration
+                |index_copy| {
+                    let start_time = Instant::now();
+                    fugu_db.index(black_box(index_copy));
 
-                // Record metrics
-                let elapsed = start_time.elapsed();
-                let metrics = HashMap::from([
-                    ("operation".to_string(), json!("index")),
-                    ("record_size".to_string(), json!(size)),
-                    ("record_id".to_string(), json!(id.clone())),
-                    (
-                        "unique_terms".to_string(),
-                        json!(object_index.inverted_index.len()),
-                    ),
-                    (
-                        "timestamp".to_string(),
-                        json!(chrono::Utc::now().timestamp_millis()),
-                    ),
-                    ("duration_ns".to_string(), json!(elapsed.as_nanos())),
-                    ("duration_ms".to_string(), json!(elapsed.as_millis())),
-                ]);
+                    // Record metrics
+                    // Measure elapsed time
+                    let elapsed = start_time.elapsed();
 
-                all_metrics.push(metrics);
-            });
+                    // Create metrics for this iteration
+                    let metrics = HashMap::from([
+                        ("operation".to_string(), json!("index")),
+                        ("record_size".to_string(), json!(size)),
+                        ("record_id".to_string(), json!(id.clone())),
+                        (
+                            "unique_terms".to_string(),
+                            json!(create_object_index(&record).inverted_index.len()),
+                        ),
+                        (
+                            "timestamp".to_string(),
+                            json!(chrono::Utc::now().timestamp_millis()),
+                        ),
+                        ("duration_ns".to_string(), json!(elapsed.as_nanos())),
+                        ("duration_ms".to_string(), json!(elapsed.as_millis())),
+                    ]);
+
+                    // Save metrics for this iteration
+                    all_metrics.push(metrics);
+                },
+            );
 
             // After all iterations, save aggregated results
             let test_case = format!("size_{}", size);
@@ -292,7 +298,7 @@ fn bench_indexing(c: &mut Criterion) {
                 ("record_size".to_string(), json!(size)),
                 (
                     "unique_terms".to_string(),
-                    json!(object_index.inverted_index.len()),
+                    json!(create_object_index(&record).inverted_index.len()),
                 ),
                 ("iterations".to_string(), json!(all_metrics.len())),
                 ("metrics".to_string(), json!(all_metrics)),
@@ -322,33 +328,38 @@ fn bench_parallel_indexing(c: &mut Criterion) {
             // Create metrics container for this benchmark
             let mut all_metrics = Vec::new();
 
-            // Benchmark: Index the object using the new parallel indexing
-            b.iter(|| {
-                let start_time = Instant::now();
-                let obj_index = object_index.clone();
-                // Using the new parallel indexing method
-                fugu_db.parallel_index(black_box(obj_index));
+            // Benchmark: Index the object using regular indexing
+            b.iter_with_setup(
+                || create_object_index(&record), // Create a fresh ObjectIndex for each iteration
+                |index_copy| {
+                    let start_time = Instant::now();
+                    fugu_db.index(black_box(index_copy));
 
-                // Record metrics
-                let elapsed = start_time.elapsed();
-                let metrics = HashMap::from([
-                    ("operation".to_string(), json!("parallel_index")),
-                    ("record_size".to_string(), json!(size)),
-                    ("record_id".to_string(), json!(id.clone())),
-                    (
-                        "unique_terms".to_string(),
-                        json!(object_index.inverted_index.len()),
-                    ),
-                    (
-                        "timestamp".to_string(),
-                        json!(chrono::Utc::now().timestamp_millis()),
-                    ),
-                    ("duration_ns".to_string(), json!(elapsed.as_nanos())),
-                    ("duration_ms".to_string(), json!(elapsed.as_millis())),
-                ]);
+                    // Record metrics
+                    // Measure elapsed time
+                    let elapsed = start_time.elapsed();
 
-                all_metrics.push(metrics);
-            });
+                    // Create metrics for this iteration
+                    let metrics = HashMap::from([
+                        ("operation".to_string(), json!("parallel_index")),
+                        ("record_size".to_string(), json!(size)),
+                        ("record_id".to_string(), json!(id.clone())),
+                        (
+                            "unique_terms".to_string(),
+                            json!(create_object_index(&record).inverted_index.len()),
+                        ),
+                        (
+                            "timestamp".to_string(),
+                            json!(chrono::Utc::now().timestamp_millis()),
+                        ),
+                        ("duration_ns".to_string(), json!(elapsed.as_nanos())),
+                        ("duration_ms".to_string(), json!(elapsed.as_millis())),
+                    ]);
+
+                    // Save metrics for this iteration
+                    all_metrics.push(metrics);
+                },
+            );
 
             // After all iterations, save aggregated results
             let test_case = format!("size_{}", size);
@@ -357,7 +368,7 @@ fn bench_parallel_indexing(c: &mut Criterion) {
                 ("record_size".to_string(), json!(size)),
                 (
                     "unique_terms".to_string(),
-                    json!(object_index.inverted_index.len()),
+                    json!(create_object_index(&record).inverted_index.len()),
                 ),
                 ("iterations".to_string(), json!(all_metrics.len())),
                 ("metrics".to_string(), json!(all_metrics)),
@@ -408,7 +419,7 @@ fn bench_batch_indexing(c: &mut Criterion) {
                                 ("record_id".to_string(), json!(id.clone())),
                                 (
                                     "terms".to_string(),
-                                    json!(object_index.inverted_index.len()),
+                                    json!(create_object_index(&record).inverted_index.len()),
                                 ),
                             ]));
 
@@ -500,7 +511,7 @@ fn bench_parallel_batch_indexing(c: &mut Criterion) {
                                 ("record_id".to_string(), json!(id.clone())),
                                 (
                                     "terms".to_string(),
-                                    json!(object_index.inverted_index.len()),
+                                    json!(create_object_index(&record).inverted_index.len()),
                                 ),
                             ]));
 
@@ -513,7 +524,7 @@ fn bench_parallel_batch_indexing(c: &mut Criterion) {
                         // Benchmark: Parallel batch index the objects
                         let start_time = Instant::now();
 
-                        fugu_db.parallel_batch_index(black_box(objects));
+                        fugu_db.batch_index(black_box(objects));
 
                         // Record timing metrics
                         let elapsed = start_time.elapsed();
@@ -596,7 +607,7 @@ fn bench_compaction(c: &mut Criterion) {
                                 ("record_id".to_string(), json!(id.clone())),
                                 (
                                     "terms".to_string(),
-                                    json!(object_index.inverted_index.len()),
+                                    json!(create_object_index(&record).inverted_index.len()),
                                 ),
                             ]));
 
@@ -665,10 +676,13 @@ fn bench_compaction(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .sample_size(10)  // Reduced sample size
-        .measurement_time(Duration::from_millis(500))  // Reduced measurement time (default is 5s)
-        .warm_up_time(Duration::from_millis(300))  // Reduced warm-up time (default is 3s)
-        .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
-    targets = bench_record_insertion, bench_record_retrieval,  bench_parallel_indexing, bench_batch_indexing, bench_parallel_batch_indexing, bench_compaction
+        .sample_size(20)  // Increased sample size for more reliable profiling
+        .measurement_time(Duration::from_secs(5))  // Longer measurement time for better profiling data
+        .warm_up_time(Duration::from_secs(2))  // Proper warm-up time
+        .with_profiler(PProfProfiler::new(
+            100, // Sampling frequency
+            Output::Flamegraph(None)
+        ));
+    targets = bench_record_insertion, bench_record_retrieval, bench_parallel_indexing, bench_batch_indexing, bench_parallel_batch_indexing, bench_compaction
 }
 criterion_main!(benches);

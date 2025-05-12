@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
@@ -238,8 +238,8 @@ fn bench_large_document_indexing(c: &mut Criterion) {
                 // Benchmark: Index the large document
                 let start_time = Instant::now();
                 
-                // Using parallel indexing
-                fugu_db.parallel_index(black_box(object_index));
+                // Using regular indexing as parallel_index doesn't exist
+                fugu_db.index(black_box(object_index));
                 
                 // Record metrics
                 let elapsed = start_time.elapsed();
@@ -270,10 +270,13 @@ fn bench_large_document_indexing(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .sample_size(10)  // Reduced sample size to save time
-        .measurement_time(Duration::from_millis(1000))  // 1s measurement time
-        .warm_up_time(Duration::from_millis(500))  // 500ms warm-up time
-        .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+        .sample_size(20)  // Increased sample size for more reliable profiling
+        .measurement_time(Duration::from_secs(5))  // Longer measurement time for better profiling data
+        .warm_up_time(Duration::from_secs(2))  // Proper warm-up time
+        .with_profiler(PProfProfiler::new(
+            100, // Sampling frequency
+            Output::Flamegraph(None)
+        ));
     targets = bench_large_document_indexing
 }
 criterion_main!(benches);

@@ -4,6 +4,8 @@ use fugu::rkyv_adapter;
 use fugu::db::{serialize_positions, deserialize_positions};
 use serde_json::json;
 use pprof::criterion::{Output, PProfProfiler};
+use std::time::Duration;
+use std::path::PathBuf;
 
 // Generate test records of different sizes
 fn create_test_record(id: &str, text_size: usize) -> ObjectRecord {
@@ -165,7 +167,14 @@ fn bench_positions(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+    config = Criterion::default()
+        .sample_size(20)  // Increased sample size for more reliable profiling
+        .measurement_time(Duration::from_secs(5))  // Longer measurement time for better profiling data
+        .warm_up_time(Duration::from_secs(2))  // Proper warm-up time
+        .with_profiler(PProfProfiler::new(
+            100, // Sampling frequency
+            Output::Flamegraph(None)
+        ));
     targets = bench_serialize, bench_deserialize, bench_ser_deser_cycle, bench_adapter_vs_bincode, bench_positions
 }
 criterion_main!(benches);

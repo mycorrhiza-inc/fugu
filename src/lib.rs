@@ -9,6 +9,8 @@ pub mod server;
 mod query_test;
 pub mod rkyv_adapter;
 pub mod tracing_utils;
+#[cfg(all(feature = "use-sled", feature = "use-fjall"))]
+pub mod migration;
 
 pub use object::{ObjectIndex, ObjectRecord};
 pub use query::{QueryConfig, QueryEngine, QueryHit, QueryResults};

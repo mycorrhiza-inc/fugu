@@ -5,6 +5,7 @@ mod query_tests {
     use crate::query::*;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     // Helper to create a test database with sample data
@@ -13,9 +14,21 @@ mod query_tests {
         let temp_dir = tempdir().expect("Failed to create temporary directory");
         let db_path = temp_dir.path().to_str().unwrap();
 
-        // Open database
-        let db = sled::open(db_path).expect("Failed to open test database");
-        let fugudb = FuguDB::new(db);
+        // Open database based on the enabled feature
+        #[cfg(feature = "use-sled")]
+        let fugudb = {
+            let db = sled::open(db_path).expect("Failed to open test sled database");
+            FuguDB::new(db)
+        };
+
+        #[cfg(feature = "use-fjall")]
+        let fugudb = {
+            let keyspace = fjall::Config::new(db_path)
+                .cache_size(64 * 1024 * 1024)  // 64MB cache for test
+                .open()
+                .expect("Failed to open test fjall keyspace");
+            FuguDB::new(keyspace)
+        };
 
         // Initialize database trees
         fugudb.init_db();
@@ -39,9 +52,8 @@ mod query_tests {
             },
         ];
 
-        // Get RECORDS tree
+        // Get RECORDS tree using our unified API
         let records_tree = fugudb
-            .db()
             .open_tree(crate::db::TREE_RECORDS)
             .expect("Failed to open RECORDS tree");
 
@@ -54,7 +66,7 @@ mod query_tests {
             let serialized = crate::rkyv_adapter::serialize(&archivable)
                 .expect("Failed to serialize test document");
             records_tree
-                .insert(doc.id.as_bytes(), serialized.to_vec())
+                .insert(doc.id.as_bytes(), serialized)
                 .expect("Failed to insert test document");
 
             // Create and index document terms
@@ -102,7 +114,7 @@ mod query_tests {
         let doc_ids: Vec<String> = results
             .hits
             .iter()
-            .map(|hit| hit.document_id.clone())
+            .map(|hit| hit.id.clone())
             .collect();
 
         assert!(doc_ids.contains(&"doc1".to_string()));
@@ -113,7 +125,7 @@ mod query_tests {
 
         // Documents with both terms should score higher
         assert!(results.hits.len() > 0);
-        assert_eq!(results.hits[0].document_id, "doc1");
+        assert_eq!(results.hits[0].id, "doc1");
 
         // Test query with no matches
         let results = engine.search_text("nonexistent term", None).unwrap();
@@ -138,14 +150,15 @@ mod query_tests {
         }
         "#;
 
-        let results = engine.search_json(json_query).unwrap();
+        let query_json: serde_json::Value = serde_json::from_str(json_query).unwrap();
+        let results = engine.search_json(query_json, None).unwrap();
 
         // Should respect top_k limit
         assert!(results.hits.len() <= 2);
 
         // Should find documents with both terms
         if !results.hits.is_empty() {
-            assert_eq!(results.hits[0].document_id, "doc1");
+            assert_eq!(results.hits[0].id, "doc1");
         }
     }
 
