@@ -7,10 +7,59 @@ use pprof::criterion::{Output, PProfProfiler};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io::Write;
 use tempfile::tempdir;
 use rand::prelude::*;
+
+// Helper function to calculate percentiles
+fn percentile(sorted_values: &[u128], percentile: f64) -> u128 {
+    if sorted_values.is_empty() {
+        return 0;
+    }
+
+    let index = (sorted_values.len() as f64 * percentile).ceil() as usize - 1;
+    let bounded_index = index.min(sorted_values.len() - 1);
+    sorted_values[bounded_index]
+}
+
+// Directory for saving benchmark intermediate results
+const RESULTS_DIR: &str = "./benchmark_results";
+
+// Ensure results directory exists
+fn ensure_results_dir() -> std::io::Result<()> {
+    if !std::path::Path::new(RESULTS_DIR).exists() {
+        fs::create_dir_all(RESULTS_DIR)?;
+    }
+    Ok(())
+}
+
+// Helper to save intermediate results
+fn save_intermediate_results(
+    benchmark_name: &str,
+    test_case: &str,
+    metrics: &HashMap<String, serde_json::Value>,
+) -> std::io::Result<()> {
+    ensure_results_dir()?;
+
+    // Create benchmark subdirectory
+    let benchmark_dir = format!("{}/{}", RESULTS_DIR, benchmark_name);
+    if !std::path::Path::new(&benchmark_dir).exists() {
+        fs::create_dir_all(&benchmark_dir)?;
+    }
+
+    // Create results file
+    let timestamp = chrono::Utc::now().timestamp();
+    let file_path = format!("{}/{}_{}.json", benchmark_dir, test_case, timestamp);
+
+    let json = serde_json::to_string_pretty(metrics)?;
+    let mut file = File::create(file_path)?;
+    file.write_all(json.as_bytes())?;
+
+    Ok(())
+}
 
 // Generate a test record with controlled text content
 fn create_test_record(id: &str, content: &str) -> ObjectRecord {
@@ -53,9 +102,24 @@ fn create_object_index(record: &ObjectRecord) -> ObjectIndex {
 fn setup_test_db_with_corpus(doc_count: usize, content_type: &str) -> (FuguDB, tempfile::TempDir) {
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let db_path = temp_dir.path().to_str().unwrap();
-    let db = sled::open(db_path).expect("Failed to open test database");
-    let mut fugu_db = FuguDB::new(db);
-    
+
+    // Create FuguDB instance based on enabled feature
+    #[cfg(feature = "use-sled")]
+    let mut fugu_db = {
+        let db = sled::open(db_path).expect("Failed to open test sled database");
+        FuguDB::new(db)
+    };
+
+    #[cfg(feature = "use-fjall")]
+    let mut fugu_db = {
+        let keyspace = fjall::Config::new(db_path)
+            .cache_size(64 * 1024 * 1024)  // 64MB cache for test
+            .fsync_ms(Some(100))  // Fsync every 100ms
+            .open()
+            .expect("Failed to open test fjall keyspace");
+        FuguDB::new(keyspace)
+    };
+
     // Initialize the database
     fugu_db.init_db();
     
@@ -119,11 +183,11 @@ fn setup_test_db_with_corpus(doc_count: usize, content_type: &str) -> (FuguDB, t
         let id = format!("bench_query_{}_{}", content_type, i);
         let record = create_test_record(&id, &content);
         
-        // Add to the database 
-        let records_tree = fugu_db.db().open_tree(fugu::db::TREE_RECORDS).unwrap();
+        // Add to the database - use our unified API
+        let records_tree = fugu_db.open_tree(fugu::db::TREE_RECORDS).unwrap();
         let archivable = ArchivableObjectRecord::from(&record);
         let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-        records_tree.insert(record.id.as_bytes(), serialized.to_vec()).unwrap();
+        records_tree.insert(record.id.as_bytes(), serialized).unwrap();
         
         // Create index
         let object_index = create_object_index(&record);
@@ -257,7 +321,9 @@ fn bench_json_query(c: &mut Criterion) {
             query, 
             |b, query| {
                 b.iter(|| {
-                    let result = engine.search_json(black_box(query));
+                    // Convert string to serde_json::Value and pass limit None
+                    let query_json: serde_json::Value = serde_json::from_str(query).unwrap();
+                    let result = engine.search_json(black_box(query_json), None);
                     assert!(result.is_ok());
                 });
             }
@@ -313,13 +379,17 @@ fn bench_query_engine_internals(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .sample_size(20)  // Increased sample size for more reliable profiling
+        .sample_size(50)  // Increased sample size for more reliable percentile statistics
         .measurement_time(Duration::from_secs(5))  // Longer measurement time for better profiling data
         .warm_up_time(Duration::from_secs(2))  // Proper warm-up time
         .with_profiler(PProfProfiler::new(
             100, // Sampling frequency
             Output::Flamegraph(None)
-        ));
+        ))
+        // Add percentile measurements for p90, p95 and p99
+        .significance_level(0.01)
+        .noise_threshold(0.02)
+        .configure_from_args();
     targets = bench_text_search, bench_phrase_search, bench_json_query, bench_query_engine_internals
 }
 criterion_main!(benches);

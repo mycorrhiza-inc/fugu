@@ -40,8 +40,23 @@ fn create_object_index(record: &ObjectRecord) -> ObjectIndex {
 fn setup_temp_db() -> (FuguDB, tempfile::TempDir) {
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let db_path = temp_dir.path().to_str().unwrap();
-    let db = sled::open(db_path).expect("Failed to open test database");
-    let fugu_db = FuguDB::new(db);
+
+    // Create FuguDB instance based on enabled feature
+    #[cfg(feature = "use-sled")]
+    let fugu_db = {
+        let db = sled::open(db_path).expect("Failed to open test sled database");
+        FuguDB::new(db)
+    };
+
+    #[cfg(feature = "use-fjall")]
+    let fugu_db = {
+        let keyspace = fjall::Config::new(db_path)
+            .cache_size(64 * 1024 * 1024)  // 64MB cache for test
+            .fsync_ms(Some(100))  // Fsync every 100ms
+            .open()
+            .expect("Failed to open test fjall keyspace");
+        FuguDB::new(keyspace)
+    };
 
     // Initialize the database
     fugu_db.init_db();
@@ -270,13 +285,17 @@ fn bench_large_document_indexing(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .sample_size(20)  // Increased sample size for more reliable profiling
+        .sample_size(50)  // Increased sample size for more reliable percentile statistics
         .measurement_time(Duration::from_secs(5))  // Longer measurement time for better profiling data
         .warm_up_time(Duration::from_secs(2))  // Proper warm-up time
         .with_profiler(PProfProfiler::new(
             100, // Sampling frequency
             Output::Flamegraph(None)
-        ));
+        ))
+        // Add percentile measurements for p90, p95 and p99
+        .significance_level(0.01)
+        .noise_threshold(0.02)
+        .configure_from_args();
     targets = bench_large_document_indexing
 }
 criterion_main!(benches);
