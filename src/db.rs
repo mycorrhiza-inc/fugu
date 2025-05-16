@@ -1,597 +1,1103 @@
-use crate::object::ArchivableObjectRecord;
-use crate::tracing_utils;
-use crate::{ObjectIndex, ObjectRecord, rkyv_adapter};
+use anyhow::{Context, Result, anyhow};
+use fjall;
+use fjall::KvSeparationOptions;
 use serde::{Deserialize, Serialize};
-use sled;
-use tokio::sync::mpsc;
-use tracing::{Instrument, debug, error, info};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
+use tracing::{debug, error, info, warn};
 
-// Define constants for tree names
-pub const PREFIX_FILTER_INDEX: &'static str = "FILTER_INDEX";
-pub const PREFIX_RECORD_INDEX_TREE: &'static str = "_INDEX";
-pub const TREE_FILTERS: &'static str = "FILTERS";
-pub const TREE_RECORDS: &'static str = "RECORDS";
-pub const TREE_GLOBAL_INDEX: &'static str = "INDEX";
+use fjall::GarbageCollection;
 
-/*
-* OBJECT:
- * text: ""
- * metadata: {}
- * created_at: DATE
- * updated_at: DATE
-*
-*/
+// Constants for tree/partition names
+pub const TREE_RECORDS: &str = "records";
+pub const TREE_FILTERS: &str = "filters";
+pub const TREE_GLOBAL_INDEX: &str = "global_index";
+pub const PREFIX_FILTER_INDEX: &str = "filter#";
+pub const PREFIX_RECORD_INDEX_TREE: &str = "index#";
 
-// Serializable types for database
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct IndexPosition {
-    pub key: String,
-    pub position: usize,
+// Database handle abstraction
+#[derive(Clone)]
+pub enum FuguDBBackend {
+    Fjall(fjall::Keyspace),
 }
 
-impl IndexPosition {
-    pub fn from_bytes(&self, _b: &[u8]) -> IndexPosition {
-        todo!()
-    }
-    pub fn index(&self) -> String {
-        self.key.clone()
-    }
-    pub fn position(&self) -> usize {
-        self.position
-    }
+// Tree handle abstraction
+#[derive(Clone)]
+pub enum TreeHandle {
+    Fjall(fjall::PartitionHandle),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct IndexVec {
-    pub v: Vec<IndexPosition>,
+// Batch operation abstraction
+#[derive(Clone)]
+pub enum BatchOperation {
+    Fjall(Arc<fjall::Batch>), // Use Arc to provide Clone for fjall::Batch
 }
 
+/// Unified database wrapper that works with either sled or fjall
+#[derive(Clone)]
 pub struct FuguDB {
-    pub db: sled::Db,
-    pub to_compact_queue: Option<mpsc::Receiver<String>>, // queue of keys, Option to allow for sharing
-    pub mailbox: mpsc::Sender<String>,
-    // Using Option to allow for multiple instances to share the same channel
+    pub backend: FuguDBBackend,
+    // Cache open trees/partitions for better performance
+    trees: HashMap<String, TreeHandle>,
 }
 
-// Helper functions
-pub fn serialize_positions(input: &Vec<usize>) -> Vec<u8> {
-    match rkyv_adapter::serialize(input) {
-        Ok(bytes) => bytes.to_vec(),
-        Err(e) => {
-            error!("Error serializing positions: {:?}", e);
-            // Return an empty byte vector as fallback
-            Vec::new()
-        }
-    }
-}
-pub fn deserialize_positions(input: &[u8]) -> Vec<usize> {
-    match rkyv_adapter::deserialize::<Vec<usize>>(input) {
-        Ok(positions) => positions,
-        Err(e) => {
-            error!("Error deserializing positions: {:?}", e);
-            // Return an empty Vec as fallback
-            Vec::new()
-        }
-    }
-}
-// Custom merge operator for token positions
-pub fn merge_token_positions(
-    _key: &[u8],
-    old_value: Option<&[u8]>,
-    new_value: &[u8],
-) -> Option<Vec<u8>> {
-    // Handle the case where old_value is None
-    if old_value.is_none() {
-        return Some(new_value.to_vec());
-    }
-
-    // Get the old value safely
-    let old_value_bytes = match old_value {
-        Some(bytes) => bytes,
-        None => {
-            // This shouldn't happen as we checked above, but just in case
-            return Some(new_value.to_vec());
-        }
-    };
-
-    // Safely attempt to deserialize old values
-    let oldvec: Vec<u32> = match rkyv_adapter::deserialize::<Vec<u32>>(old_value_bytes) {
-        Ok(vec) => vec,
-        Err(e) => {
-            // If deserialization fails, log the error and return only the new value
-            error!("Error deserializing old value in merge: {:?}", e);
-            return Some(new_value.to_vec());
-        }
-    };
-
-    // Safely attempt to deserialize new values
-    let newvec: Vec<u32> = match rkyv_adapter::deserialize::<Vec<u32>>(new_value) {
-        Ok(vec) => vec,
-        Err(e) => {
-            // If deserialization fails, log the error and return only the old value
-            error!("Error deserializing new value in merge: {:?}", e);
-            return old_value.map(|v| v.to_vec());
-        }
-    };
-
-    // Join the vectors
-    let mut joined = oldvec.clone();
-    joined.extend(newvec);
-
-    // Safely serialize the merged values
-    match rkyv_adapter::serialize(&joined) {
-        Ok(bytes) => Some(bytes.to_vec()),
-        Err(e) => {
-            // If serialization fails, log the error and return null
-            error!("Error serializing merged value: {:?}", e);
-            None
-        }
-    }
-}
-
-// Implementation of FuguDB
 impl FuguDB {
-    // Initialize database trees
+    pub fn new(keyspace: fjall::Keyspace) -> Self {
+        Self {
+            backend: FuguDBBackend::Fjall(keyspace),
+            trees: HashMap::new(),
+        }
+    }
+
+    /// Initialize the database by creating necessary trees/partitions
     pub fn init_db(&self) {
-        let span = tracing_utils::db_span("init_trees");
-        let _enter = span.enter();
+        // Create standard trees if they don't exist
+        let standard_trees = [TREE_RECORDS, TREE_FILTERS, TREE_GLOBAL_INDEX];
+        for tree_name in standard_trees.iter() {
+            if let Err(e) = self.open_tree(tree_name) {
+                error!("Failed to create tree {}: {:?}", tree_name, e);
+            }
+        }
+    }
 
-        let trees = [TREE_GLOBAL_INDEX, TREE_FILTERS, TREE_RECORDS];
+    /// Compact the database to reclaim space
+    pub fn compact(&mut self) -> anyhow::Result<()> {
+        let start = Instant::now();
+        info!("Starting database compaction");
 
-        for tree_name in trees.iter() {
-            match self.db.open_tree(*tree_name) {
-                Ok(tree) => {
-                    if let Err(e) = tree.flush() {
-                        error!("Failed to flush tree {}: {}", tree_name, e);
+        match &self.backend {
+            FuguDBBackend::Fjall(keyspace) => {
+                keyspace
+                    .persist(fjall::PersistMode::SyncAll)
+                    .map_err(|e| anyhow!("Failed to persist fjall keyspace: {:?}", e))?;
+
+                // First get a list of all partitions
+                let partitions = keyspace.list_partitions();
+
+                // Perform maintenance on each partition
+                for partition_name in &partitions {
+                    debug!("Triggering maintenance for partition: {}", partition_name);
+
+                    // Try to get the partition handle, if it exists
+                    if let Ok(partition) = keyspace.open_partition(
+                        partition_name,
+                        fjall::PartitionCreateOptions::default()
+                            .with_kv_separation(KvSeparationOptions::default())
+                            .with_kv_separation(KvSeparationOptions::default()),
+                    ) {
+                        // Fjall uses garbage collection methods instead of maintenance
+                        // We'll use both space amplification and staleness-based approaches for thorough cleanup
+
+                        // First, perform garbage collection with space amplification target (1.5 is a reasonable value)
+                        if let Err(e) = partition.gc_with_space_amp_target(1.5) {
+                            warn!(
+                                "Error during space-based GC for partition {}: {:?}",
+                                partition_name, e
+                            );
+                        }
+
+                        // Then use staleness threshold for any remaining garbage (0.8 is fairly aggressive)
+                        if let Err(e) = partition.gc_with_staleness_threshold(0.8) {
+                            warn!(
+                                "Error during staleness-based GC for partition {}: {:?}",
+                                partition_name, e
+                            );
+                        }
+
+                        // Finally, drop any fully stale segments
+                        if let Err(e) = partition.gc_drop_stale_segments() {
+                            warn!(
+                                "Error dropping stale segments for partition {}: {:?}",
+                                partition_name, e
+                            );
+                        } else {
+                            debug!(
+                                "Successfully ran garbage collection on partition: {}",
+                                partition_name
+                            );
+                        }
                     }
                 }
-                Err(e) => {
-                    error!("Failed to open tree {}: {}", tree_name, e);
+
+                // Keyspace doesn't have maintenance or GC methods directly
+                // We'll just make sure changes are persisted
+                if let Err(e) = keyspace.persist(fjall::PersistMode::SyncAll) {
+                    warn!("Error during keyspace persistence: {:?}", e);
+                } else {
+                    debug!("Successfully persisted keyspace changes");
+                }
+
+                // Clear internal tree cache to ensure fresh handles
+                self.trees.clear();
+
+                info!("Fjall compaction completed in {:?}", start.elapsed());
+                Ok(())
+            }
+        }
+    }
+
+    /// Compacts a specific tree/partition by name
+    /// This allows for targeted compaction of specific hot partitions
+    pub fn compact_tree(&mut self, tree_name: &str) -> anyhow::Result<()> {
+        let start = Instant::now();
+        debug!("Starting targeted compaction for tree: {}", tree_name);
+        match &self.backend {
+            FuguDBBackend::Fjall(keyspace) => {
+                // Open the partition
+                let partition = keyspace
+                    .open_partition(
+                        tree_name,
+                        fjall::PartitionCreateOptions::default()
+                            .with_kv_separation(KvSeparationOptions::default()),
+                    )
+                    .map_err(|e| {
+                        anyhow!("Failed to open fjall partition {}: {:?}", tree_name, e)
+                    })?;
+
+                // First, ensure all data is persisted for this partition
+
+                keyspace
+                    .persist(fjall::PersistMode::SyncAll)
+                    .map_err(|e| anyhow!("Failed to persist fjall keyspace: {:?}", e))?;
+
+                // Fjall now uses garbage collection methods instead of maintenance
+                // First, perform space-based GC
+                partition.gc_with_space_amp_target(1.5).map_err(|e| {
+                    anyhow!(
+                        "Failed to run space-based GC for fjall partition {}: {:?}",
+                        tree_name,
+                        e
+                    )
+                })?;
+
+                // Then staleness-based GC
+                partition.gc_with_staleness_threshold(0.8).map_err(|e| {
+                    anyhow!(
+                        "Failed to run staleness-based GC for fjall partition {}: {:?}",
+                        tree_name,
+                        e
+                    )
+                })?;
+
+                // Finally drop fully stale segments
+                partition.gc_drop_stale_segments().map_err(|e| {
+                    anyhow!(
+                        "Failed to drop stale segments for fjall partition {}: {:?}",
+                        tree_name,
+                        e
+                    )
+                })?;
+
+                // Remove the tree from our cache to ensure we get a fresh handle next time
+                self.trees.remove(tree_name);
+
+                debug!(
+                    "Fjall partition {} maintenance completed in {:?}",
+                    tree_name,
+                    start.elapsed()
+                );
+
+                Ok(())
+            }
+        }
+    }
+
+    /// Lightweight maintenance operation that doesn't do a full compaction
+    /// This is useful for regular housekeeping without the overhead of full compaction
+    pub fn maintenance(&self) -> anyhow::Result<()> {
+        let start = Instant::now();
+
+        match &self.backend {
+            FuguDBBackend::Fjall(keyspace) => {
+                // For fjall, ensure everything is persisted since there's no direct maintenance method
+                keyspace
+                    .persist(fjall::PersistMode::SyncAll)
+                    .map_err(|e| anyhow!("Failed to persist fjall keyspace: {:?}", e))?;
+
+                // We'll do basic maintenance on each partition
+                for partition_name in keyspace.list_partitions() {
+                    if let Ok(partition) = keyspace.open_partition(
+                        &partition_name,
+                        fjall::PartitionCreateOptions::default()
+                            .with_kv_separation(KvSeparationOptions::default()),
+                    ) {
+                        // First try to drop any completely stale segments which is a lightweight operation
+                        if let Err(e) = partition.gc_drop_stale_segments() {
+                            warn!(
+                                "Failed to drop stale segments for partition {}: {:?}",
+                                partition_name, e
+                            );
+                        }
+                    }
+                }
+
+                // Also ensure data is persisted
+                keyspace
+                    .persist(fjall::PersistMode::SyncAll)
+                    .map_err(|e| anyhow!("Failed to persist fjall keyspace: {:?}", e))?;
+
+                debug!("Fjall maintenance completed in {:?}", start.elapsed());
+                Ok(())
+            }
+            #[allow(unreachable_patterns)]
+            _ => {
+                error!("Unknown database backend in maintenance()");
+                Err(anyhow!("Unknown database backend in maintenance()"))
+            }
+        }
+    }
+
+    /// Access to the raw backend for operations not covered by the unified API
+    pub fn keyspace(&self) -> &fjall::Keyspace {
+        match &self.backend {
+            FuguDBBackend::Fjall(keyspace) => keyspace,
+        }
+    }
+
+    pub fn partition_names(&self) -> Vec<String> {
+        match &self.backend {
+            FuguDBBackend::Fjall(keyspace) => {
+                // Fjall's list_partitions returns a Vec directly, not a Result
+                let partitions = keyspace.list_partitions();
+
+                // Convert each partition name string to String
+                partitions.into_iter().map(|p| p.to_string()).collect()
+            }
+            _ => panic!("Not using fjall backend"),
+        }
+    }
+
+    /// Open (or create if it doesn't exist) a tree/partition
+    pub fn open_tree(&self, name: &str) -> Result<TreeHandle> {
+        match &self.backend {
+            FuguDBBackend::Fjall(keyspace) => {
+                match keyspace.open_partition(
+                    name,
+                    fjall::PartitionCreateOptions::default()
+                        .with_kv_separation(KvSeparationOptions::default()),
+                ) {
+                    Ok(partition_handle) => Ok(TreeHandle::Fjall(partition_handle)),
+                    Err(e) => {
+                        tracing::error!("Failed to open fjall partition: {:?}", e);
+                        Err(anyhow::anyhow!("Failed to open fjall partition: {:?}", e))
+                    }
                 }
             }
         }
-
-        debug!("Initialized database trees");
     }
 
-    /// Get an object by its ID
-    ///
-    /// This method retrieves an object from the RECORDS tree by its ID and deserializes it.
-    /// Returns None if the object doesn't exist or if deserialization fails.
-    ///
-    /// If this is a dummy_item with serialization issues, it will automatically attempt to repair it.
-    pub fn get(&self, object_id: &str) -> Option<ObjectRecord> {
-        let span = tracing_utils::db_span("get_object");
-        let _enter = span.enter();
+    /// Create a new batch operation
+    pub fn create_batch(&self) -> BatchOperation {
+        match &self.backend {
+            FuguDBBackend::Fjall(keyspace) => {
+                // Fjall batches should be created with with_capacity instead of default
+                let batch = fjall::Batch::with_capacity(keyspace.clone(), 32); // reasonable starting capacity
+                BatchOperation::Fjall(Arc::new(batch))
+            }
+        }
+    }
 
-        debug!("Retrieving object with ID: {}", object_id);
+    /// Apply a batch of operations
+    pub fn apply_batch(&self, tree: &TreeHandle, batch: BatchOperation) -> Result<()> {
+        match (&self.backend, batch, tree) {
+            (FuguDBBackend::Fjall(keyspace), BatchOperation::Fjall(batch_arc), _) => {
+                match Arc::try_unwrap(batch_arc) {
+                    Ok(batch) => {
+                        // According to the fjall documentation, Batch has its own commit method
+                        // that we should use directly instead of calling through keyspace
+                        batch.commit().map_err(|e| {
+                            anyhow::anyhow!("Failed to commit fjall batch: {:?}", e)
+                        })?;
 
-        // Get the RECORDS tree
-        let records_tree = match self.db.open_tree(TREE_RECORDS) {
+                        // Ensure all changes are persisted
+                        keyspace.persist(fjall::PersistMode::SyncAll).map_err(|e| {
+                            anyhow::anyhow!("Failed to persist batch changes: {:?}", e)
+                        })?;
+                        Ok(())
+                    }
+                    Err(arc_batch) => {
+                        // In the rare case we can't get exclusive ownership, create a new batch
+                        warn!("Could not unwrap Arc<Batch> for exclusive use");
+
+                        // Since we can't easily extract operations from the original batch,
+                        // this is a limitation with our approach. In a real implementation,
+                        // we might need a different strategy for handling batches.
+                        Err(anyhow::anyhow!("Failed to unwrap batch for application"))
+                    }
+                }
+            }
+            _ => Err(anyhow::anyhow!(
+                "Mismatched database backend and batch type"
+            )),
+        }
+    }
+
+    /// Direct get method for convenience (assumes TREE_RECORDS)
+    /// Returns the deserialized ObjectRecord if found and successfully deserialized
+    pub fn get(&self, key: &str) -> Option<crate::object::ObjectRecord> {
+        if let Ok(tree) = self.open_tree(TREE_RECORDS) {
+            if let Ok(Some(data)) = tree.get(key) {
+                // Try to deserialize the record
+                if let Ok(archivable) =
+                    crate::rkyv_adapter::deserialize::<crate::object::ArchivableObjectRecord>(&data)
+                {
+                    return Some(crate::object::ObjectRecord::from(archivable));
+                }
+            }
+        }
+        None
+    }
+
+    /// Index a single object
+    pub fn index(&self, object_index: crate::object::ObjectIndex) {
+        // Get the object ID for logging
+        let object_id = &object_index.object_id;
+        tracing::info!("Indexing object: {}", object_id);
+
+        // Create or get the index tree for this object
+        let index_tree_name = format!("{}{}", PREFIX_RECORD_INDEX_TREE, object_id);
+        tracing::info!("openning partition : {}", index_tree_name);
+        let index_tree = match self.open_tree(&index_tree_name) {
             Ok(tree) => tree,
             Err(e) => {
-                error!("Failed to open RECORDS tree: {}", e);
-                return None;
+                tracing::error!("Failed to open index tree for {}: {:?}", object_id, e);
+                return;
             }
         };
+        tracing::info!("partition opened : {}", index_tree_name);
 
-        // Try to get the record by ID
-        match records_tree.get(object_id.as_bytes()) {
-            Ok(Some(value)) => {
-                // Try to deserialize the value using our adapter
-                match rkyv_adapter::deserialize::<ArchivableObjectRecord>(&value) {
-                    Ok(archivable) => {
-                        // Convert to regular ObjectRecord
-                        let record = ObjectRecord::from(archivable);
-                        debug!("Successfully retrieved object with ID: {}", object_id);
-                        Some(record)
-                    }
-                    Err(e) => {
-                        error!("Failed to deserialize object {}: {}", object_id, e);
+        // Process each term in the inverted index
+        // For fjall backend, we'll handle term position merges differently
+        // since we don't have sled's merge operators
+        match &self.backend {
+            FuguDBBackend::Fjall(_) => {
+                // For fjall, we need to use read-modify-write pattern for each term
+                for (term, positions) in &object_index.inverted_index {
+                    // Read current value if it exists
+                    let current_positions = match index_tree.get(term) {
+                        Ok(Some(bytes)) => {
+                            match deserialize_positions(&bytes) {
+                                Ok(pos) => pos,
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to deserialize existing positions for term '{}': {:?}",
+                                        term,
+                                        e
+                                    );
+                                    Vec::new() // Start with empty if we can't deserialize
+                                }
+                            }
+                        }
+                        Ok(None) => Vec::new(), // No existing positions
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to get existing positions for term '{}': {:?}",
+                                term,
+                                e
+                            );
+                            Vec::new() // Start with empty if there's an error
+                        }
+                    };
 
-                        // If this is a dummy item with known format issues, try to repair it
-                        if object_id.contains("dummy_item") {
-                            info!("Attempting to repair corrupted dummy item: {}", object_id);
+                    // Merge existing positions with new positions
+                    let mut merged_positions = current_positions;
+                    // Convert positions to u64 for merging (matching our serialization format)
+                    let positions_u64: Vec<u64> = positions.iter().map(|&p| p as u64).collect();
+                    merged_positions.extend(positions_u64);
 
-                            // Create a fresh dummy object with the same ID
-                            let mut replacement =
-                                crate::create_dummy_object(Some(object_id.to_string()));
-
-                            // Add auto_repaired flag to metadata
-                            if let serde_json::Value::Object(ref mut map) = replacement.metadata {
-                                map.insert(
-                                    "auto_repaired".to_string(),
-                                    serde_json::Value::Bool(true),
+                    // Serialize and write back the merged positions
+                    match serialize_positions(&merged_positions) {
+                        Ok(serialized) => {
+                            if let Err(e) = index_tree.insert(term, serialized) {
+                                tracing::error!(
+                                    "Failed to insert merged positions for term '{}': {:?}",
+                                    term,
+                                    e
                                 );
                             }
-
-                            // Convert to ArchivableObjectRecord for storage
-                            let archivable = ArchivableObjectRecord::from(&replacement);
-
-                            // Serialize it using our adapter
-                            match rkyv_adapter::serialize(&archivable) {
-                                Ok(serialized) => {
-                                    // Try to replace the corrupted record
-                                    if let Err(err) = records_tree
-                                        .insert(object_id.as_bytes(), serialized.to_vec())
-                                    {
-                                        error!("Failed to replace corrupted record: {}", err);
-                                        None
-                                    } else {
-                                        info!(
-                                            "Successfully repaired corrupted record: {}",
-                                            object_id
-                                        );
-                                        Some(replacement)
-                                    }
-                                }
-                                Err(err) => {
-                                    error!("Failed to serialize replacement record: {}", err);
-                                    None
-                                }
-                            }
-                        } else {
-                            None
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to serialize merged positions for term '{}': {:?}",
+                                term,
+                                e
+                            );
                         }
                     }
                 }
             }
-            Ok(None) => {
-                debug!("Object with ID '{}' not found", object_id);
-                None
-            }
-            Err(e) => {
-                error!("Error retrieving object {}: {}", object_id, e);
-                None
-            }
+            #[allow(unreachable_patterns)]
+            _ => tracing::error!("Unknown database backend in index()"),
         }
     }
 
-    // Create a new FuguDB instance with a new channel
-    pub fn new(db: sled::Db) -> FuguDB {
-        let span = tracing_utils::db_span("new");
-        let _enter = span.enter();
+    /// Index multiple objects in batch
+    pub fn batch_index(&self, object_indices: Vec<crate::object::ObjectIndex>) {
+        let mut partitions_and_objects = HashMap::new();
 
-        let (s, r) = mpsc::channel::<String>(1000);
-        debug!("Created database channel with capacity 1000");
+        // First, group objects by their index partitions
+        for object_index in &object_indices {
+            let object_id = &object_index.object_id;
+            let index_tree_name = format!("{}:{}", PREFIX_RECORD_INDEX_TREE, object_id);
 
-        FuguDB {
-            db,
-            to_compact_queue: Some(r),
-            mailbox: s,
-        }
-    }
-
-    // Create a FuguDB instance with existing sender but no receiver (for API server)
-    pub fn new_api_instance(db: sled::Db, mailbox: mpsc::Sender<String>) -> FuguDB {
-        let span = tracing_utils::db_span("new_api_instance");
-        let _enter = span.enter();
-
-        debug!("Created API database instance with shared channel");
-
-        FuguDB {
-            db,
-            to_compact_queue: None, // API server doesn't need the receiver
-            mailbox,
-        }
-    }
-
-    // Create a FuguDB instance with existing channel for compactor
-    pub fn new_compactor_instance(
-        db: sled::Db,
-        mailbox: mpsc::Sender<String>,
-        queue: mpsc::Receiver<String>,
-    ) -> FuguDB {
-        let span = tracing_utils::db_span("new_compactor_instance");
-        let _enter = span.enter();
-
-        debug!("Created compactor database instance with shared channel");
-
-        FuguDB {
-            db,
-            to_compact_queue: Some(queue),
-            mailbox,
-        }
-    }
-
-    // Get a cloned reference to the database
-    pub fn db(&self) -> sled::Db {
-        self.db.clone()
-    }
-
-    fn parse_metadata(&self, object: ObjectRecord) {
-        let metadata = object.metadata;
-    }
-
-    pub fn add_record(object: ObjectRecord) {}
-
-    // Index an object
-    fn index_object(&self, object: ObjectIndex) -> String {
-        // TODO: index metadata for filtering
-        let span = tracing_utils::db_span("db_object_index");
-        let _enter = span.enter();
-
-        // Create a new tree for the object
-
-        let treekey = format!("{}:{}", PREFIX_RECORD_INDEX_TREE, object.object_id);
-
-        let newtree = match self.db().open_tree(treekey.clone()) {
-            Ok(tree) => tree,
-            Err(e) => {
-                error!("Failed to open tree for object {}: {}", object.object_id, e);
-                // Return early with the tree key, we can't proceed without a tree
-                return treekey;
-            }
-        };
-
-        let mut batch = sled::Batch::default();
-
-        // Add each term to the batch
-        for term in object.inverted_index.keys() {
-            if let Some(positions) = object.inverted_index.get(term) {
-                let _ = batch.insert(term.as_bytes(), serialize_positions(positions));
-            } else {
-                error!("Term not found in inverted index: {}", term);
-            }
-        }
-
-        // Apply the batch
-        // TODO: actually handle this
-        match newtree.apply_batch(batch) {
-            Ok(_) => treekey,
-            Err(_) => treekey,
-        }
-    }
-
-    // Public method to index an object and queue it for compaction
-    pub fn index(&self, object: ObjectIndex) {
-        let span = tracing_utils::db_span("db_index");
-        let _enter = span.enter();
-
-        let id = object.object_id.clone();
-        let _ = self.index_object(object);
-        self.enqueue_for_compact(vec![id]);
-    }
-
-    // Index a batch of objects
-    pub fn batch_index(&self, objects: Vec<ObjectIndex>) {
-        let span = tracing_utils::db_span("db_batch_index");
-        let _enter = span.enter();
-
-        let mut queue: Vec<String> = vec![];
-
-        for i in objects {
-            let id = i.object_id.clone();
-            // Make sure that the tree exists
-            let _ = self.index_object(i);
-            queue.push(id);
-        }
-
-        info!("Batch insertion complete. Inserted {} records", queue.len());
-        self.enqueue_for_compact(queue);
-        debug!("Sent batch to compaction queue");
-    }
-
-    // Add objects to the compaction queue
-    fn enqueue_for_compact(&self, objects: Vec<String>) {
-        let span = tracing_utils::db_span("enqueue_for_compact");
-        let _enter = span.enter();
-
-        debug!("Enqueuing {} objects for compaction", objects.len());
-
-        for object_id in objects {
-            match self.mailbox.try_send(object_id.clone()) {
-                Ok(_) => {
-                    debug!(
-                        "Successfully added object {} to compaction queue",
-                        object_id
-                    );
+            // Create each partition if it doesn't exist
+            match self.open_tree(&index_tree_name) {
+                Ok(tree) => {
+                    partitions_and_objects
+                        .entry(index_tree_name)
+                        .or_insert_with(Vec::new)
+                        .push(object_index);
                 }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    error!(
-                        "Failed to add object to compaction queue (queue full): {}",
-                        object_id.clone()
-                    );
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    error!(
-                        "Failed to add object to compaction queue (channel closed): {}",
-                        object_id.clone()
-                    );
-                }
-            }
-        }
-    }
-
-    // Compact the database
-    pub fn compact(&mut self) {
-        // Drain the compaction queue if we have a receiver
-        let mut objects_to_compact = Vec::new();
-
-        if let Some(ref mut queue) = self.to_compact_queue {
-            // Use try_recv in a loop to get all available items
-            loop {
-                match queue.try_recv() {
-                    Ok(object_id) => {
-                        info!("Received object {} for compaction", object_id);
-                        objects_to_compact.push(object_id);
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                        debug!("No more items in compaction queue");
-                        break;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        error!("Compaction queue channel disconnected");
-                        break;
-                    }
-                }
-            }
-        } else {
-            debug!("This instance does not have a compaction queue receiver");
-        }
-
-        let objects_count = objects_to_compact.len();
-        if objects_count <= 0 {
-            debug!("No objects to compact");
-            return;
-        }
-
-        // Create a span for the compaction operation
-        let span = tracing_utils::compactor_span("compact", Some(objects_count));
-        let _enter = span.enter();
-        info!("Running compactor! Compacting {} objects", objects_count);
-
-        // Process each object
-        for object_id in objects_to_compact {
-            // Open the unprocessed tree
-            let unprocessed = match self.db().open_tree(format!(
-                "{}:{}",
-                PREFIX_RECORD_INDEX_TREE,
-                object_id.clone()
-            )) {
-                Ok(tree) => tree,
                 Err(e) => {
-                    error!("Failed to open tree for compaction: {}", e);
-                    continue;
+                    tracing::error!("Failed to open index tree for {}: {:?}", object_id, e);
                 }
-            };
+            }
+        }
 
-            // Iterate through the tree and merge terms
-            let mut iter = unprocessed.iter();
-            loop {
-                match iter.next() {
-                    Some(Ok((key, val))) => {
-                        // Open the term tree
-                        let term_tree = match self.db().open_tree(&key) {
-                            Ok(tree) => tree,
+        // Now process each partition's objects
+        for (index_tree_name, objects) in partitions_and_objects {
+            // Open the tree for this partition
+            if let Ok(index_tree) = self.open_tree(&index_tree_name) {
+                // Process each object one by one since we need the read-modify-write pattern
+                for object_ref in objects {
+                    // Since we have borrowed the object_indices, we need to work with references
+                    let object_index = object_ref;
+
+                    // For each term in the inverted index
+                    for (term, positions) in &object_index.inverted_index {
+                        // Read current value if it exists
+                        let current_positions = match index_tree.get(term) {
+                            Ok(Some(bytes)) => {
+                                match deserialize_positions(&bytes) {
+                                    Ok(pos) => pos,
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to deserialize existing positions for term '{}': {:?}",
+                                            term,
+                                            e
+                                        );
+                                        Vec::new() // Start with empty if we can't deserialize
+                                    }
+                                }
+                            }
+                            Ok(None) => Vec::new(), // No existing positions
                             Err(e) => {
-                                error!("Failed to open term tree: {}", e);
-                                continue;
+                                tracing::error!(
+                                    "Failed to get existing positions for term '{}': {:?}",
+                                    term,
+                                    e
+                                );
+                                Vec::new() // Start with empty if there's an error
                             }
                         };
 
-                        // Set the merge operator
-                        term_tree.set_merge_operator(merge_token_positions);
+                        // Merge existing positions with new positions
+                        let mut merged_positions = current_positions;
+                        // Convert positions to u64 for merging
+                        let positions_u64: Vec<u64> = positions.iter().map(|&p| p as u64).collect();
+                        merged_positions.extend(positions_u64);
 
-                        // Merge the value
-                        if let Err(e) = term_tree.merge(object_id.clone(), val) {
-                            error!("Failed to merge term: {}", e);
+                        // Serialize and write back the merged positions
+                        match serialize_positions(&merged_positions) {
+                            Ok(serialized) => {
+                                if let Err(e) = index_tree.insert(term, serialized) {
+                                    tracing::error!(
+                                        "Failed to insert merged positions for term '{}': {:?}",
+                                        term,
+                                        e
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to serialize merged positions for term '{}': {:?}",
+                                    term,
+                                    e
+                                );
+                            }
                         }
                     }
-                    Some(Err(e)) => {
-                        error!("Error during compaction: {}", e);
-                        break;
+                }
+            }
+        }
+
+        // Final persistence to ensure all changes are saved
+
+        match &self.backend {
+            FuguDBBackend::Fjall(keyspace) => {
+                if let Err(e) = keyspace.persist(fjall::PersistMode::SyncAll) {
+                    tracing::error!("Failed to persist batch indexing changes: {:?}", e);
+                }
+            }
+        }
+    }
+}
+
+impl TreeHandle {
+    /// Insert a key-value pair
+    pub fn insert<K, V>(&self, key: K, value: V) -> Result<Option<Vec<u8>>>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        match self {
+            TreeHandle::Fjall(partition) => {
+                let key_str = std::str::from_utf8(key.as_ref())
+                    .map_err(|e| anyhow::anyhow!("Invalid UTF-8 key: {}", e))?;
+                let prev = partition
+                    .get(key_str)
+                    .map_err(|e| anyhow::anyhow!("Failed to get from fjall partition: {:?}", e))?;
+                partition
+                    .insert(key_str, value.as_ref().to_vec())
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to insert into fjall partition: {:?}", e)
+                    })?;
+                Ok(prev.map(|bytes| bytes.to_vec()))
+            }
+        }
+    }
+
+    /// Get a value by key
+    pub fn get<K>(&self, key: K) -> Result<Option<Vec<u8>>>
+    where
+        K: AsRef<[u8]>,
+    {
+        match self {
+            TreeHandle::Fjall(partition) => {
+                let key_str = std::str::from_utf8(key.as_ref())
+                    .map_err(|e| anyhow::anyhow!("Invalid UTF-8 key: {}", e))?;
+                partition
+                    .get(key_str)
+                    .map_err(|e| anyhow::anyhow!("Failed to get from fjall partition: {:?}", e))
+                    .map(|opt| opt.map(|bytes| bytes.to_vec()))
+            }
+        }
+    }
+
+    /// Remove a key-value pair
+    pub fn remove<K>(&self, key: K) -> Result<Option<Vec<u8>>>
+    where
+        K: AsRef<[u8]>,
+    {
+        match self {
+            TreeHandle::Fjall(partition) => {
+                let key_str = std::str::from_utf8(key.as_ref())
+                    .map_err(|e| anyhow::anyhow!("Invalid UTF-8 key: {}", e))?;
+                let prev = partition
+                    .get(key_str)
+                    .map_err(|e| anyhow::anyhow!("Failed to get from fjall partition: {:?}", e))?;
+                partition.remove(key_str).map_err(|e| {
+                    anyhow::anyhow!("Failed to remove from fjall partition: {:?}", e)
+                })?;
+                Ok(prev.map(|bytes| bytes.to_vec()))
+            }
+        }
+    }
+
+    /// Iterate over all key-value pairs - unified API
+    ///
+    /// For sled, this returns the iterator directly.
+    /// For fjall, this requires creating the iterator first.
+    /// We'll have to handle the result type differently in the calling code.
+    pub fn iter(&self) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_>> {
+        match self {
+            TreeHandle::Fjall(partition) => {
+                // In newer versions of fjall, iter() returns an iterator directly
+                // without wrapping it in a Result
+                let fjall_iter = partition.iter();
+
+                // Convert the Fjall iterator into our unified iterator type
+                // Fjall uses a Result<(StrView, Vec<u8>), Error> for its items
+                let boxed_iter = Box::new(fjall_iter.map(move |item_result| {
+                    match item_result {
+                        Ok((key, value)) => {
+                            // Convert key to bytes - in fjall, key is a Slice
+                            // From the docs, Slice implements Deref<Target=[u8]>
+                            // So we can just dereference it to get the raw bytes
+                            let key_bytes = key.to_vec();
+                            Ok((key_bytes, value.to_vec()))
+                        }
+                        Err(e) => Err(anyhow::anyhow!(
+                            "Failed to get item from fjall iterator: {:?}",
+                            e
+                        )),
                     }
-                    None => break,
-                }
-            }
+                }));
 
-            info!("Compacted object: {}", object_id);
+                Ok(boxed_iter)
+            }
+            #[allow(unreachable_patterns)]
+            _ => Err(anyhow::anyhow!("Unknown database backend")),
         }
     }
 }
 
-// A background compaction service
-pub async fn run_compactor(
-    mut db: FuguDB,
-    mut shutdown_signal: tokio::sync::oneshot::Receiver<()>,
-) {
-    let span = tracing_utils::compactor_span("service", None);
+impl BatchOperation {
+    /// Add an insert operation to the batch
+    pub fn insert<K, V>(&mut self, tree: &TreeHandle, key: K, value: V)
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        match (self, tree) {
+            (BatchOperation::Fjall(batch_arc), TreeHandle::Fjall(partition)) => {
+                let key_str = match std::str::from_utf8(key.as_ref()) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => String::from_utf8_lossy(key.as_ref()).to_string(),
+                };
 
-    async {
-        info!("Starting compactor service");
-
-        // Create an interval for periodic compaction
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(200));
-
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    // Run the compaction cycle
-                    debug!("Running scheduled compaction cycle");
-
-                    // Run compaction and log any issues
-                    db.compact();
-                }
-                _ = &mut shutdown_signal => {
-                    info!("Received shutdown signal for compactor service");
-
-                    // Final compaction cycle before shutdown to ensure all items are processed
-                    info!("Running final compaction cycle before shutdown");
-                    db.compact();
-
-                    break;
-                }
+                // Access the batch through the Arc, we need mutable access
+                // We use get_mut() as we have exclusive access to the Arc
+                let batch = Arc::get_mut(batch_arc).expect("Cannot get mutable reference to batch");
+                batch.insert(partition, key_str, value.as_ref().to_vec());
+            }
+            _ => {
+                // Mismatched backend, this will be caught when applying the batch
+                debug!("Mismatched database backend and tree type for batch insert");
             }
         }
-
-        info!("Compactor service shut down");
     }
-    .instrument(span)
-    .await
+
+    /// Add a remove operation to the batch
+    pub fn remove<K>(&mut self, tree: &TreeHandle, key: K)
+    where
+        K: AsRef<[u8]>,
+    {
+        match (self, tree) {
+            (BatchOperation::Fjall(batch_arc), TreeHandle::Fjall(partition)) => {
+                let key_str = match std::str::from_utf8(key.as_ref()) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => String::from_utf8_lossy(key.as_ref()).to_string(),
+                };
+
+                // Access the batch through the Arc, we need mutable access
+                let batch = Arc::get_mut(batch_arc).expect("Cannot get mutable reference to batch");
+                batch.remove(partition, key_str);
+            }
+            _ => {
+                // Mismatched backend, this will be caught when applying the batch
+                debug!("Mismatched database backend and tree type for batch remove");
+            }
+        }
+    }
 }
 
+// Helper function to serialize positions to a byte vector
+pub fn serialize_positions(positions: &Vec<u64>) -> Result<Vec<u8>> {
+    crate::rkyv_adapter::serialize(positions)
+        .map_err(|e| anyhow!("Failed to serialize positions: {}", e))
+}
+
+// Helper function for backward compatibility with usize positions
+pub fn serialize_positions_from_usize(positions: &[usize]) -> Result<Vec<u8>> {
+    // Convert to u64 as that's what our serialization format expects
+    let positions_u64: Vec<u64> = positions.iter().map(|&p| p as u64).collect();
+    serialize_positions(&positions_u64)
+}
+
+// Helper function to deserialize positions from a byte slice
+pub fn deserialize_positions(bytes: &[u8]) -> Result<Vec<u64>> {
+    crate::rkyv_adapter::deserialize(bytes)
+        .map_err(|e| anyhow!("Failed to deserialize positions: {}", e))
+}
+
+// Tests for the unified database API
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use std::thread;
+    use std::time::Duration;
     use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn test_get_object() {
+    #[test]
+    fn test_unified_api_basic_operations() {
         // Create a temporary directory for the test database
         let temp_dir = tempdir().expect("Failed to create temporary directory");
         let temp_path = temp_dir.path().to_str().unwrap();
 
-        // Open a test database
-        let db = sled::open(temp_path).expect("Failed to open test database");
-        let fugu_db = FuguDB::new(db);
+        // Initialize the appropriate database backend based on feature flags
+        let keyspace = fjall::Config::new(temp_path)
+            .cache_size(64 * 1024 * 1024) // 64MB cache for test
+            .open()
+            .expect("Failed to open test keyspace");
 
-        // Initialize database trees
+        let fugu_db = FuguDB::new(keyspace);
+
+        // Initialize database
         fugu_db.init_db();
 
-        // Create a test object
-        let test_id = "test_object_1";
-        let test_object = crate::ObjectRecord {
-            id: test_id.to_string(),
-            text: "This is a test object".to_string(),
-            metadata: json!({
-                "test": true,
-                "purpose": "unit testing"
-            }),
-        };
-
-        // Get the RECORDS tree and insert the test object
-        let records_tree = fugu_db
-            .db()
+        // Test open_tree method
+        let tree_handle = fugu_db
             .open_tree(TREE_RECORDS)
             .expect("Failed to open RECORDS tree");
-        let archivable = ArchivableObjectRecord::from(&test_object);
-        let serialized =
-            rkyv_adapter::serialize(&archivable).expect("Failed to serialize test object");
-        records_tree
-            .insert(test_id.as_bytes(), serialized.to_vec())
-            .expect("Failed to insert test object");
 
-        // Test the get method
-        let retrieved_object = fugu_db.get(test_id);
-        assert!(retrieved_object.is_some(), "Failed to retrieve test object");
+        // Test insert operation
+        let test_key = "test_key";
+        let test_value = "test_value";
+        tree_handle
+            .insert(test_key, test_value.as_bytes())
+            .expect("Failed to insert test value");
 
-        let retrieved_object = retrieved_object.unwrap();
+        // Test get operation
+        let result = tree_handle.get(test_key).expect("Failed to get test value");
+
+        assert!(result.is_some(), "Expected Some value, got None");
+        let value_bytes = result.unwrap();
+        let value_str =
+            std::str::from_utf8(&value_bytes).expect("Failed to convert bytes to string");
+
         assert_eq!(
-            retrieved_object.id, test_id,
-            "Retrieved object ID doesn't match"
-        );
-        assert_eq!(
-            retrieved_object.text, "This is a test object",
-            "Retrieved object text doesn't match"
+            value_str, test_value,
+            "Retrieved value doesn't match inserted value"
         );
 
-        // Test retrieving a non-existent object
-        let non_existent = fugu_db.get("non_existent_id");
+        // Test remove operation
+        tree_handle
+            .remove(test_key)
+            .expect("Failed to remove test value");
+
+        // Verify removal
+        let result_after_removal = tree_handle
+            .get(test_key)
+            .expect("Failed to get test value after removal");
+
         assert!(
-            non_existent.is_none(),
-            "Non-existent object should return None"
+            result_after_removal.is_none(),
+            "Expected None after removal, got Some"
         );
+    }
+
+    #[test]
+    fn test_unified_api_batch_operations() {
+        // Create a temporary directory for the test database
+        let temp_dir = tempdir().expect("Failed to create temporary directory");
+        let temp_path = temp_dir.path().to_str().unwrap();
+
+        // Initialize the appropriate database backend based on feature flags
+        let keyspace = fjall::Config::new(temp_path)
+            .cache_size(64 * 1024 * 1024) // 64MB cache for test
+            .open()
+            .expect("Failed to open test keyspace");
+
+        // Create FuguDB instance
+        let fugu_db = FuguDB::new(keyspace);
+
+        // Initialize database
+        fugu_db.init_db();
+
+        // Test open_tree method
+        let tree_handle = fugu_db
+            .open_tree(TREE_RECORDS)
+            .expect("Failed to open RECORDS tree");
+
+        // Create a batch
+        let mut batch = fugu_db.create_batch();
+
+        // Add multiple operations to the batch
+        let test_keys = ["batch_key1", "batch_key2", "batch_key3"];
+        let test_values = ["batch_value1", "batch_value2", "batch_value3"];
+
+        for i in 0..3 {
+            batch.insert(&tree_handle, test_keys[i], test_values[i].as_bytes());
+        }
+
+        // Apply the batch
+        fugu_db
+            .apply_batch(&tree_handle, batch)
+            .expect("Failed to apply batch");
+
+        // Verify all items were inserted
+        for i in 0..3 {
+            let result = tree_handle
+                .get(test_keys[i])
+                .expect("Failed to get batch value");
+
+            assert!(
+                result.is_some(),
+                "Expected Some value for {}, got None",
+                test_keys[i]
+            );
+            let value_bytes = result.unwrap();
+            let value_str =
+                std::str::from_utf8(&value_bytes).expect("Failed to convert bytes to string");
+
+            assert_eq!(
+                value_str, test_values[i],
+                "Retrieved value doesn't match inserted value for {}",
+                test_keys[i]
+            );
+        }
+
+        // Create another batch for removal
+        let mut removal_batch = fugu_db.create_batch();
+        for key in test_keys.iter() {
+            removal_batch.remove(&tree_handle, *key);
+        }
+
+        // Apply the removal batch
+        fugu_db
+            .apply_batch(&tree_handle, removal_batch)
+            .expect("Failed to apply removal batch");
+
+        // Verify all items were removed
+        for key in test_keys.iter() {
+            let result = tree_handle
+                .get(*key)
+                .expect("Failed to get value after batch removal");
+
+            assert!(
+                result.is_none(),
+                "Expected None after batch removal, got Some for {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_error_handling() {
+        // Create a temporary directory for the test database
+        let temp_dir = tempdir().expect("Failed to create temporary directory");
+        let temp_path = temp_dir.path().to_str().unwrap();
+
+        // Initialize the appropriate database backend based on feature flags
+        let keyspace = fjall::Config::new(temp_path)
+            .cache_size(64 * 1024 * 1024) // 64MB cache for test
+            .open()
+            .expect("Failed to open test keyspace");
+
+        // Create FuguDB instance
+        let fugu_db = FuguDB::new(keyspace);
+
+        // Initialize database
+        fugu_db.init_db();
+
+        // Test error handling for non-existent tree/partition
+        let non_existent_tree = fugu_db.open_tree("NON_EXISTENT_TREE_TEST");
+
+        // This should succeed since we're opening a non-existent tree (which should be created)
+        assert!(
+            non_existent_tree.is_ok(),
+            "Opening non-existent tree should succeed, but got error"
+        );
+
+        // Test error handling in get operation with invalid key
+        {
+            // In fjall, we can test with a non-existent object ID
+            let result = fugu_db.get("definitely_not_existing_object_id");
+            assert!(
+                result.is_none(),
+                "Expected None for non-existent object, got Some"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compaction() {
+        // Create a temporary directory for the test database
+        let temp_dir = tempdir().expect("Failed to create temporary directory");
+        let temp_path = temp_dir.path().to_str().unwrap();
+
+        // Initialize the appropriate database backend based on feature flags
+        let keyspace = fjall::Config::new(temp_path)
+            .cache_size(64 * 1024 * 1024) // 64MB cache for test
+            .open()
+            .expect("Failed to open test keyspace");
+
+        // Create FuguDB instance
+        let mut fugu_db = FuguDB::new(keyspace);
+
+        // Initialize database
+        fugu_db.init_db();
+
+        // Test open_tree method
+        let tree_handle = fugu_db
+            .open_tree(TREE_RECORDS)
+            .expect("Failed to open RECORDS tree");
+
+        // Insert a large number of values to make compaction meaningful
+        let test_values: Vec<_> = (0..1000)
+            .map(|i| (format!("key_{}", i), format!("value_{}", i)))
+            .collect();
+
+        for (key, value) in &test_values {
+            tree_handle
+                .insert(key, value.as_bytes())
+                .expect("Failed to insert test value");
+        }
+
+        // Now delete half the values to create "holes" in the database
+        for i in 0..500 {
+            let key = format!("key_{}", i);
+            tree_handle
+                .remove(&key)
+                .expect("Failed to remove test value");
+        }
+
+        // Perform full compaction and verify it completes without error
+        assert!(
+            fugu_db.compact().is_ok(),
+            "Full compaction should succeed without error"
+        );
+
+        // Test maintenance method
+        assert!(
+            fugu_db.maintenance().is_ok(),
+            "Maintenance should succeed without error"
+        );
+
+        // Test compact_tree on specific trees
+        assert!(
+            fugu_db.compact_tree(TREE_RECORDS).is_ok(),
+            "Compacting specific tree should succeed without error"
+        );
+
+        // Verify data is still accessible after compaction
+        for i in 500..1000 {
+            let key = format!("key_{}", i);
+            let result = tree_handle
+                .get(&key)
+                .expect("Failed to get test value after compaction");
+
+            assert!(
+                result.is_some(),
+                "Expected Some value for {} after compaction, got None",
+                key
+            );
+            let value_bytes = result.unwrap();
+            let value_str =
+                std::str::from_utf8(&value_bytes).expect("Failed to convert bytes to string");
+
+            assert_eq!(
+                value_str,
+                format!("value_{}", i),
+                "Retrieved value doesn't match inserted value for {} after compaction",
+                key
+            );
+        }
+
+        // Also verify deleted values are still gone
+        for i in 0..500 {
+            let key = format!("key_{}", i);
+            let result = tree_handle
+                .get(&key)
+                .expect("Failed to check deleted value after compaction");
+
+            assert!(
+                result.is_none(),
+                "Expected None for deleted key {} after compaction, got Some",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_compaction_stress() {
+        // Create a temporary directory for the test database
+        let temp_dir = tempdir().expect("Failed to create temporary directory");
+        let temp_path = temp_dir.path().to_str().unwrap();
+
+        // Initialize the appropriate database backend based on feature flags
+        let keyspace = fjall::Config::new(temp_path)
+            .cache_size(64 * 1024 * 1024) // 64MB cache for test
+            .open()
+            .expect("Failed to open test keyspace");
+
+        // Create FuguDB instance
+        let mut fugu_db = FuguDB::new(keyspace);
+
+        // Initialize database
+        fugu_db.init_db();
+
+        // Create multiple trees for the test
+        let trees = ["test_tree1", "test_tree2", "test_tree3"];
+        let mut handles = Vec::new();
+
+        for tree_name in &trees {
+            let handle = fugu_db
+                .open_tree(tree_name)
+                .expect(&format!("Failed to open tree {}", tree_name));
+            handles.push(handle);
+        }
+
+        // Spawn multiple threads to do concurrent writes and compactions
+        let threads: Vec<_> = (0..3)
+            .map(|thread_idx| {
+                let mut db_clone = fugu_db.clone();
+                let tree_handle = handles[thread_idx % 3].clone();
+                let tree_name = trees[thread_idx % 3].to_string();
+
+                thread::spawn(move || {
+                    // Insert some data
+                    for i in 0..100 {
+                        let key = format!("thread{}_key_{}", thread_idx, i);
+                        let value = format!("thread{}_value_{}", thread_idx, i);
+
+                        tree_handle
+                            .insert(&key, value.as_bytes())
+                            .expect("Failed to insert in stress test");
+
+                        // Occasionally perform maintenance operations
+                        if i % 20 == 0 {
+                            db_clone.maintenance().expect("Maintenance should succeed");
+                        }
+
+                        if i % 50 == 0 {
+                            db_clone
+                                .compact_tree(&tree_name)
+                                .expect("Tree compaction should succeed");
+                        }
+
+                        // Small delay to allow other threads to run
+                        thread::sleep(Duration::from_millis(1));
+                    }
+
+                    // Delete some data to create fragmentation
+                    for i in 0..50 {
+                        let key = format!("thread{}_key_{}", thread_idx, i);
+                        tree_handle
+                            .remove(&key)
+                            .expect("Failed to remove in stress test");
+                    }
+
+                    // One final compaction
+                    db_clone.compact().expect("Full compaction should succeed");
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for thread in threads {
+            thread.join().expect("Thread should complete successfully");
+        }
+
+        // Verify data integrity after all the concurrent operations
+        for (idx, handle) in handles.iter().enumerate() {
+            for i in 50..100 {
+                // We only check keys that weren't deleted
+                let key = format!("thread{}_key_{}", idx, i);
+                let result = handle
+                    .get(&key)
+                    .expect("Failed to get value after stress test");
+
+                assert!(
+                    result.is_some(),
+                    "Expected Some value for {} after stress test, got None",
+                    key
+                );
+
+                let value_bytes = result.unwrap();
+                let value_str =
+                    std::str::from_utf8(&value_bytes).expect("Failed to convert bytes to string");
+
+                assert_eq!(
+                    value_str,
+                    format!("thread{}_value_{}", idx, i),
+                    "Retrieved value doesn't match inserted value for {} after stress test",
+                    key
+                );
+            }
+        }
     }
 }

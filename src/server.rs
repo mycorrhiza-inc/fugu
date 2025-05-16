@@ -184,27 +184,30 @@ async fn ingest_object(
     }
 
     // Check if the object already exists in the database
-    let records_tree = match state.db.db().open_tree(crate::db::TREE_RECORDS) {
-        Ok(tree) => tree,
+    let records_handle = match state.db.open_tree(crate::db::TREE_RECORDS) {
+        Ok(handle) => handle,
         Err(e) => {
-            error!("Failed to open RECORDS tree: {}", e);
+            error!("Failed to open RECORDS collection: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
-                    "error": format!("Failed to open RECORDS tree: {}", e),
+                    "error": format!("Failed to open RECORDS collection: {}", e),
                     "status": "error"
                 })),
             );
         }
     };
 
-    let existing_object = if let Ok(Some(data)) = records_tree.get(object_id.as_bytes()) {
-        debug!("Object with ID '{}' already exists, will be updated", object_id);
+    let existing_object = if let Ok(Some(data)) = records_handle.get(&object_id) {
+        debug!(
+            "Object with ID '{}' already exists, will be updated",
+            object_id
+        );
         match rkyv_adapter::deserialize::<ArchivableObjectRecord>(&data) {
             Ok(archivable) => {
                 debug!("Successfully deserialized existing object");
                 Some(archivable)
-            },
+            }
             Err(e) => {
                 debug!("Could not deserialize existing object: {}", e);
                 None
@@ -241,7 +244,11 @@ async fn ingest_object(
 
     // Create variables for response
     let object_id_for_response = object_id.clone();
-    let operation_type = if existing_object.is_some() { "update" } else { "create" };
+    let operation_type = if existing_object.is_some() {
+        "update"
+    } else {
+        "create"
+    };
 
     // Clone the object for background task
     let object_clone = object.clone();
@@ -265,10 +272,10 @@ async fn ingest_object(
 
         // Add the record to the RECORDS tree
         info!("Adding object to RECORDS tree: {}", object_id);
-        let records_tree = match db_state.db().open_tree(crate::db::TREE_RECORDS) {
-            Ok(tree) => tree,
+        let records_handle = match db_state.open_tree(crate::db::TREE_RECORDS) {
+            Ok(handle) => handle,
             Err(e) => {
-                error!("Failed to open RECORDS tree: {}", e);
+                error!("Failed to open RECORDS collection: {}", e);
                 return;
             }
         };
@@ -277,11 +284,15 @@ async fn ingest_object(
         let archivable = ArchivableObjectRecord::from(&object_clone);
         match rkyv_adapter::serialize(&archivable) {
             Ok(serialized) => {
-                // Insert the record into the tree
-                if let Err(e) = records_tree.insert(object_id.as_bytes(), serialized.to_vec()) {
-                    error!("Failed to insert record into RECORDS tree: {}", e);
+                // Insert the record using our abstracted handle
+                let object_id_clone = object_id.clone();
+                if let Err(e) = records_handle.insert(object_id_clone, serialized.to_vec()) {
+                    error!("Failed to insert record into RECORDS collection: {}", e);
                 } else {
-                    info!("Successfully added record to RECORDS tree: {}", object_id);
+                    info!(
+                        "Successfully added record to RECORDS collection: {}",
+                        object_id
+                    );
                 }
             }
             Err(e) => {
@@ -315,7 +326,10 @@ async fn batch_ingest(
     let span = tracing_utils::server_span("/batch-ingest", "POST");
     let _guard = span.enter();
 
-    debug!("Batch ingest endpoint called with {} objects", payload.objects.len());
+    debug!(
+        "Batch ingest endpoint called with {} objects",
+        payload.objects.len()
+    );
 
     // Validate the batch
     if payload.objects.is_empty() {
@@ -334,14 +348,14 @@ async fn batch_ingest(
     let mut error_count = 0;
 
     // Open the RECORDS tree once for checking existing objects
-    let records_tree = match state.db.db().open_tree(crate::db::TREE_RECORDS) {
-        Ok(tree) => tree,
+    let records_handle = match state.db.open_tree(crate::db::TREE_RECORDS) {
+        Ok(handle) => handle,
         Err(e) => {
-            error!("Failed to open RECORDS tree: {}", e);
+            error!("Failed to open RECORDS collection: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
-                    "error": format!("Failed to open RECORDS tree: {}", e),
+                    "error": format!("Failed to open RECORDS collection: {}", e),
                     "status": "error"
                 })),
             );
@@ -364,8 +378,11 @@ async fn batch_ingest(
         }
 
         // Check if the object already exists
-        let operation = if let Ok(Some(_)) = records_tree.get(object_id.as_bytes()) {
-            debug!("Object with ID '{}' already exists, will be updated", object_id);
+        let operation = if let Ok(Some(_)) = records_handle.get(&object_id) {
+            debug!(
+                "Object with ID '{}' already exists, will be updated",
+                object_id
+            );
             "update"
         } else {
             debug!("Object with ID '{}' is new", object_id);
@@ -420,10 +437,10 @@ async fn batch_ingest(
 
         // Store all objects in the RECORDS tree
         info!("Adding objects to RECORDS tree");
-        let records_tree = match db_state.db().open_tree(crate::db::TREE_RECORDS) {
-            Ok(tree) => tree,
+        let records_handle = match db_state.open_tree(crate::db::TREE_RECORDS) {
+            Ok(handle) => handle,
             Err(e) => {
-                error!("Failed to open RECORDS tree: {}", e);
+                error!("Failed to open RECORDS collection: {}", e);
                 return;
             }
         };
@@ -435,10 +452,14 @@ async fn batch_ingest(
             match rkyv_adapter::serialize(&archivable) {
                 Ok(serialized) => {
                     // Insert the record into the tree
-                    if let Err(e) = records_tree.insert(object.id.as_bytes(), serialized.to_vec()) {
-                        error!("Failed to insert record into RECORDS tree: {}", e);
+                    let id_clone = object.id.clone();
+                    if let Err(e) = records_handle.insert(id_clone, serialized.to_vec()) {
+                        error!("Failed to insert record into RECORDS collection: {}", e);
                     } else {
-                        debug!("Successfully added record to RECORDS tree: {}", object.id);
+                        debug!(
+                            "Successfully added record to RECORDS collection: {}",
+                            object.id
+                        );
                     }
                 }
                 Err(e) => {
@@ -472,7 +493,10 @@ async fn ingest_file(
     let span = tracing_utils::server_span("/ingest-file", "POST");
     let _guard = span.enter();
 
-    debug!("File ingest endpoint called for file: {}", payload.file_path);
+    debug!(
+        "File ingest endpoint called for file: {}",
+        payload.file_path
+    );
 
     // Try to read the file
     let file_content = match tokio::fs::read_to_string(&payload.file_path).await {
@@ -514,22 +538,25 @@ async fn ingest_file(
     };
 
     // Check if the object already exists in the database
-    let records_tree = match state.db.db().open_tree(crate::db::TREE_RECORDS) {
-        Ok(tree) => tree,
+    let records_handle = match state.db.open_tree(crate::db::TREE_RECORDS) {
+        Ok(handle) => handle,
         Err(e) => {
-            error!("Failed to open RECORDS tree: {}", e);
+            error!("Failed to open RECORDS collection: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
-                    "error": format!("Failed to open RECORDS tree: {}", e),
+                    "error": format!("Failed to open RECORDS collection: {}", e),
                     "status": "error"
                 })),
             );
         }
     };
 
-    let operation = if let Ok(Some(_)) = records_tree.get(object_id.as_bytes()) {
-        debug!("File object with ID '{}' already exists, will be updated", object_id);
+    let operation = if let Ok(Some(_)) = records_handle.get(&object_id) {
+        debug!(
+            "File object with ID '{}' already exists, will be updated",
+            object_id
+        );
         "update"
     } else {
         debug!("File object with ID '{}' is new", object_id);
@@ -546,26 +573,26 @@ async fn ingest_file(
     if let serde_json::Value::Object(ref mut map) = metadata {
         map.insert(
             "file_path".to_string(),
-            serde_json::Value::String(payload.file_path.clone())
+            serde_json::Value::String(payload.file_path.clone()),
         );
 
         map.insert(
             "ingested_at".to_string(),
-            serde_json::Value::String(chrono::Utc::now().to_rfc3339())
+            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
         );
 
         // Add namespace if provided
         if let Some(namespace) = payload.namespace {
             map.insert(
                 "namespace".to_string(),
-                serde_json::Value::String(namespace)
+                serde_json::Value::String(namespace),
             );
         }
 
         // Add file size
         map.insert(
             "file_size_bytes".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(file_content.len() as u64))
+            serde_json::Value::Number(serde_json::Number::from(file_content.len() as u64)),
         );
     }
 
@@ -627,10 +654,10 @@ async fn ingest_file(
 
         // Add the record to the RECORDS tree
         info!("Adding file object to RECORDS tree: {}", object_id);
-        let records_tree = match db_state.db().open_tree(crate::db::TREE_RECORDS) {
-            Ok(tree) => tree,
+        let records_handle = match db_state.open_tree(crate::db::TREE_RECORDS) {
+            Ok(handle) => handle,
             Err(e) => {
-                error!("Failed to open RECORDS tree: {}", e);
+                error!("Failed to open RECORDS collection: {}", e);
                 return;
             }
         };
@@ -640,10 +667,14 @@ async fn ingest_file(
         match rkyv_adapter::serialize(&archivable) {
             Ok(serialized) => {
                 // Insert the record into the tree
-                if let Err(e) = records_tree.insert(object_id.as_bytes(), serialized.to_vec()) {
-                    error!("Failed to insert record into RECORDS tree: {}", e);
+                let obj_id_clone = object_id.clone();
+                if let Err(e) = records_handle.insert(obj_id_clone, serialized.to_vec()) {
+                    error!("Failed to insert record into RECORDS collection: {}", e);
                 } else {
-                    info!("Successfully added file record to RECORDS tree: {}", object_id);
+                    info!(
+                        "Successfully added file record to RECORDS tree: {}",
+                        object_id
+                    );
                 }
             }
             Err(e) => {
@@ -772,14 +803,14 @@ async fn list_object_terms(
     debug!("List terms endpoint called for object ID: {}", object_id);
 
     // Get a reference to the db
-    let db = state.db.db();
+    let db_handle = state.db.clone();
 
     // Construct the tree name for the object index
     let tree_name = format!("{}:{}", PREFIX_RECORD_INDEX_TREE, object_id);
 
     // Try to open the tree for the object
-    let object_tree = match db.open_tree(tree_name) {
-        Ok(tree) => tree,
+    let object_handle = match db_handle.open_tree(&tree_name) {
+        Ok(handle) => handle,
         Err(e) => {
             error!("Failed to open tree for object {}: {}", object_id, e);
             return Json(json!({
@@ -792,7 +823,15 @@ async fn list_object_terms(
     let mut terms = Vec::new();
 
     // Iterate through all terms in the tree
-    let iter = object_tree.iter();
+    let iter = match object_handle.iter() {
+        Ok(it) => it,
+        Err(e) => {
+            error!("Failed to create iterator for object partition: {}", e);
+            return Json(json!({
+                "error": format!("Failed to create iterator for object partition: {}", e)
+            }));
+        }
+    };
     for item in iter {
         match item {
             Ok((key, value)) => {
@@ -842,13 +881,20 @@ async fn list_global_terms(State(state): State<Arc<AppState>>) -> Json<Value> {
     debug!("Global terms endpoint called");
 
     // Get a reference to the db
-    let db = state.db.db();
+    let db_handle = state.db.clone();
 
     // We'll try to get the names of all objects
     let mut all_object_trees = Vec::new();
 
-    // Get all tree names - this is not a Result, it returns a Vec directly
-    let tree_names = db.tree_names();
+    // We need a helper function to get tree names depending on which backend we're using
+    // This will be different depending on which backend is active
+
+    let tree_names_result = db_handle.partition_names();
+
+    let tree_names = tree_names_result
+        .into_iter()
+        .map(|name| name.into_bytes())
+        .collect::<Vec<_>>();
 
     // Iterate through all trees to find objects
     for name in tree_names {
@@ -869,10 +915,17 @@ async fn list_global_terms(State(state): State<Arc<AppState>>) -> Json<Value> {
     for object_id in all_object_trees {
         let tree_name = format!("{}:{}", PREFIX_RECORD_INDEX_TREE, object_id);
 
-        match db.open_tree(tree_name.clone()) {
-            Ok(tree) => {
+        match db_handle.open_tree(&tree_name) {
+            Ok(tree_handle) => {
                 // Process each term in the tree
-                for item in tree.iter() {
+                let term_iter = match tree_handle.iter() {
+                    Ok(it) => it,
+                    Err(e) => {
+                        error!("Failed to create iterator for tree {}: {}", tree_name, e);
+                        continue;
+                    }
+                };
+                for item in term_iter {
                     match item {
                         Ok((key, value)) => {
                             if let Ok(term) = std::str::from_utf8(&key) {
@@ -994,7 +1047,7 @@ pub async fn create_dummy_record(
 
     // Log the creation of the demo index
     info!(
-        "Index added with ID: {}, containing {} unique terms",
+        "Index parsed with ID: {}, containing {} unique terms",
         demo_object.id,
         inverted_index.len()
     );
@@ -1028,19 +1081,19 @@ pub async fn create_dummy_record(
 
         // Add the record to the RECORDS tree
         info!("Adding demo object to RECORDS tree: {}", demo_object.id);
-        let records_tree = match db_state.db().open_tree(crate::db::TREE_RECORDS) {
-            Ok(tree) => tree,
+        let records_handle = match db_state.open_tree(crate::db::TREE_RECORDS) {
+            Ok(handle) => handle,
             Err(e) => {
-                error!("Failed to open RECORDS tree: {}", e);
+                error!("Failed to open RECORDS collection: {}", e);
                 return;
             }
         };
 
         // First, check if this ID already exists and remove it if it does
         // This helps prevent any serialization issues with existing corrupted records
-        if let Ok(Some(_)) = records_tree.get(demo_object.id.as_bytes()) {
+        if let Ok(Some(_)) = records_handle.get(&demo_object.id) {
             info!("Removing existing record with ID: {}", demo_object.id);
-            if let Err(e) = records_tree.remove(demo_object.id.as_bytes()) {
+            if let Err(e) = records_handle.remove(&demo_object.id) {
                 error!("Failed to remove existing record: {}", e);
             }
         }
@@ -1050,12 +1103,12 @@ pub async fn create_dummy_record(
         match rkyv_adapter::serialize(&archivable) {
             Ok(serialized) => {
                 // Insert the record into the tree
-                if let Err(e) = records_tree.insert(demo_object.id.as_bytes(), serialized.to_vec())
-                {
-                    error!("Failed to insert record into RECORDS tree: {}", e);
+                let demo_id_clone = demo_object.id.clone();
+                if let Err(e) = records_handle.insert(demo_id_clone, serialized.to_vec()) {
+                    error!("Failed to insert record into RECORDS collection: {}", e);
                 } else {
                     info!(
-                        "Successfully added record to RECORDS tree: {}",
+                        "Successfully added record to RECORDS collection: {}",
                         demo_object.id
                     );
                 }
@@ -1096,15 +1149,15 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
     debug!("List objects endpoint called");
 
     // Get a reference to the db
-    let db = state.db.db();
+    let db_handle = state.db.clone();
 
     // Get the RECORDS tree
-    let records_tree = match db.open_tree(TREE_RECORDS) {
-        Ok(tree) => tree,
+    let records_handle = match db_handle.open_tree(TREE_RECORDS) {
+        Ok(handle) => handle,
         Err(e) => {
-            error!("Failed to open RECORDS tree: {}", e);
+            error!("Failed to open RECORDS collection: {}", e);
             return Json(json!({
-                "error": format!("Failed to open RECORDS tree: {}", e)
+                "error": format!("Failed to open RECORDS collection: {}", e)
             }));
         }
     };
@@ -1113,7 +1166,15 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
     let mut objects = Vec::new();
 
     // Iterate through all records
-    let iter = records_tree.iter();
+    let iter = match records_handle.iter() {
+        Ok(it) => it,
+        Err(e) => {
+            error!("Failed to create iterator for RECORDS collection: {}", e);
+            return Json(json!({
+                "error": format!("Failed to create iterator for RECORDS collection: {}", e)
+            }));
+        }
+    };
     for item in iter {
         match item {
             Ok((key, value)) => {
@@ -1152,7 +1213,7 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
                                     Ok(serialized) => {
                                         // Try to replace the corrupted record
                                         if let Err(err) =
-                                            records_tree.insert(key.clone(), serialized.to_vec())
+                                            records_handle.insert(key_str, serialized.to_vec())
                                         {
                                             error!("Failed to replace corrupted record: {}", err);
                                         } else {

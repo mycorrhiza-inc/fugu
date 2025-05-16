@@ -9,10 +9,25 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
+
+// Import database backend based on feature flag
+use fjall;
+use fjall::KvSeparationOptions;
+
+// Helper function to calculate percentiles
+fn percentile(sorted_values: &[u128], percentile: f64) -> u128 {
+    if sorted_values.is_empty() {
+        return 0;
+    }
+
+    let index = (sorted_values.len() as f64 * percentile).ceil() as usize - 1;
+    let bounded_index = index.min(sorted_values.len() - 1);
+    sorted_values[bounded_index]
+}
 
 // Directory for saving benchmark intermediate results
 const RESULTS_DIR: &str = "./benchmark_results";
@@ -61,12 +76,15 @@ fn create_object_index(record: &ObjectRecord) -> ObjectIndex {
     }
 }
 
-// Setup a temporary database for benchmarking
+// Setup a temporary fjall database for benchmarking
 fn setup_temp_db() -> (FuguDB, tempfile::TempDir) {
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let db_path = temp_dir.path().to_str().unwrap();
-    let db = sled::open(db_path).expect("Failed to open test database");
-    let fugu_db = FuguDB::new(db);
+    let keyspace = fjall::Config::new(db_path)
+        .temporary(true) // Use temporary flag for benchmarks
+        .open()
+        .expect("Failed to open test fjall keyspace");
+    let fugu_db = FuguDB::new(keyspace);
 
     // Initialize the database
     fugu_db.init_db();
@@ -109,7 +127,7 @@ fn save_intermediate_results(
 
 // Benchmark record insertion
 fn bench_record_insertion(c: &mut Criterion) {
-    let mut group = c.benchmark_group("record_insertion");
+    let mut group = c.benchmark_group("record_insertion_fjall");
 
     for size in [100, 1000].iter() {
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
@@ -121,7 +139,7 @@ fn bench_record_insertion(c: &mut Criterion) {
             b.iter_with_setup(
                 || {
                     // Setup: Create a new record for each iteration
-                    let mut rng = rand::thread_rng();
+                    let mut rng = rand::rng();
                     let id = format!(
                         "bench_insert_{}_{}_{}",
                         size,
@@ -146,27 +164,66 @@ fn bench_record_insertion(c: &mut Criterion) {
                     // Benchmark: Insert the record into the database
                     let start_time = Instant::now();
 
-                    let records_tree = fugu_db.db().open_tree(TREE_RECORDS).unwrap();
+                    // Use the appropriate database implementation
+                    let records_partition = fugu_db
+                        .keyspace()
+                        .open_partition(
+                            TREE_RECORDS,
+                            fjall::PartitionCreateOptions::default()
+                                .with_kv_separation(KvSeparationOptions::default()),
+                        )
+                        .unwrap();
                     let archivable = ArchivableObjectRecord::from(&record);
                     let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-                    let _ = records_tree.insert(record.id.as_bytes(), serialized.to_vec());
+                    let _ = records_partition.insert(&record.id, serialized.to_vec());
 
                     // Record timing metrics
                     let elapsed = start_time.elapsed();
                     metrics.insert("duration_ns".to_string(), json!(elapsed.as_nanos()));
                     metrics.insert("duration_ms".to_string(), json!(elapsed.as_millis()));
 
+                    metrics.insert("db_backend".to_string(), json!("fjall"));
+
                     // Save metrics for this iteration
                     all_metrics.push(metrics);
                 },
             );
 
-            // After all iterations, save aggregated results
+            // Calculate percentile statistics from the collected metrics
+            let mut durations_ns: Vec<u128> = all_metrics
+                .iter()
+                .filter_map(|m| {
+                    m.get("duration_ns")
+                        .and_then(|d| d.as_u64().map(|d| d as u128))
+                })
+                .collect();
+
+            // Sort durations for percentile calculations
+            durations_ns.sort_unstable();
+
+            // Calculate percentiles if we have data
+            let (p90, p95, p99) = if !durations_ns.is_empty() {
+                (
+                    percentile(&durations_ns, 0.90),
+                    percentile(&durations_ns, 0.95),
+                    percentile(&durations_ns, 0.99),
+                )
+            } else {
+                (0, 0, 0)
+            };
+
+            // After all iterations, save aggregated results with percentiles
             let test_case = format!("size_{}", size);
             let aggregated = HashMap::from([
                 ("test_case".to_string(), json!(test_case)),
                 ("record_size".to_string(), json!(size)),
                 ("iterations".to_string(), json!(all_metrics.len())),
+                ("p90_ns".to_string(), json!(p90)),
+                ("p95_ns".to_string(), json!(p95)),
+                ("p99_ns".to_string(), json!(p99)),
+                ("p90_ms".to_string(), json!(p90 as f64 / 1_000_000.0)),
+                ("p95_ms".to_string(), json!(p95 as f64 / 1_000_000.0)),
+                ("p99_ms".to_string(), json!(p99 as f64 / 1_000_000.0)),
                 ("metrics".to_string(), json!(all_metrics)),
             ]);
 
@@ -181,7 +238,7 @@ fn bench_record_insertion(c: &mut Criterion) {
 
 // Benchmark record retrieval
 fn bench_record_retrieval(c: &mut Criterion) {
-    let mut group = c.benchmark_group("record_retrieval");
+    let mut group = c.benchmark_group("record_retrieval_fjall");
 
     for size in [100, 1000].iter() {
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
@@ -190,12 +247,18 @@ fn bench_record_retrieval(c: &mut Criterion) {
             let id = format!("bench_retrieve_{}", size);
             let record = create_test_record(&id, size);
 
-            // Insert the record
-            let records_tree = fugu_db.db().open_tree(TREE_RECORDS).unwrap();
+            let records_partition = fugu_db
+                .keyspace()
+                .open_partition(
+                    TREE_RECORDS,
+                    fjall::PartitionCreateOptions::default()
+                        .with_kv_separation(KvSeparationOptions::default()),
+                )
+                .unwrap();
             let archivable = ArchivableObjectRecord::from(&record);
             let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-            records_tree
-                .insert(record.id.as_bytes(), serialized.to_vec())
+            records_partition
+                .insert(&record.id, serialized.to_vec())
                 .unwrap();
 
             // Create metrics container for this benchmark
@@ -225,12 +288,41 @@ fn bench_record_retrieval(c: &mut Criterion) {
                 all_metrics.push(metrics);
             });
 
-            // After all iterations, save aggregated results
+            // Calculate percentile statistics
+            let mut durations_ns: Vec<u128> = all_metrics
+                .iter()
+                .filter_map(|m| {
+                    m.get("duration_ns")
+                        .and_then(|d| d.as_u64().map(|d| d as u128))
+                })
+                .collect();
+
+            // Sort durations for percentile calculations
+            durations_ns.sort_unstable();
+
+            // Calculate percentiles if we have data
+            let (p90, p95, p99) = if !durations_ns.is_empty() {
+                (
+                    percentile(&durations_ns, 0.90),
+                    percentile(&durations_ns, 0.95),
+                    percentile(&durations_ns, 0.99),
+                )
+            } else {
+                (0, 0, 0)
+            };
+
+            // After all iterations, save aggregated results with percentiles
             let test_case = format!("size_{}", size);
             let aggregated = HashMap::from([
                 ("test_case".to_string(), json!(test_case)),
                 ("record_size".to_string(), json!(size)),
                 ("iterations".to_string(), json!(all_metrics.len())),
+                ("p90_ns".to_string(), json!(p90)),
+                ("p95_ns".to_string(), json!(p95)),
+                ("p99_ns".to_string(), json!(p99)),
+                ("p90_ms".to_string(), json!(p90 as f64 / 1_000_000.0)),
+                ("p95_ms".to_string(), json!(p95 as f64 / 1_000_000.0)),
+                ("p99_ms".to_string(), json!(p99 as f64 / 1_000_000.0)),
                 ("metrics".to_string(), json!(all_metrics)),
             ]);
 
@@ -245,7 +337,7 @@ fn bench_record_retrieval(c: &mut Criterion) {
 
 // Benchmark indexing operation
 fn bench_indexing(c: &mut Criterion) {
-    let mut group = c.benchmark_group("indexing");
+    let mut group = c.benchmark_group("indexing_fjall");
 
     for size in [100, 1000].iter() {
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
@@ -259,42 +351,77 @@ fn bench_indexing(c: &mut Criterion) {
             let mut all_metrics = Vec::new();
 
             // Benchmark: Index the object
-            b.iter(|| {
-                let start_time = Instant::now();
-                let obj_index = object_index.clone();
-                fugu_db.index(black_box(obj_index));
+            b.iter_with_setup(
+                || create_object_index(&record), // Create a fresh ObjectIndex for each iteration
+                |index_copy| {
+                    let start_time = Instant::now();
+                    fugu_db.index(black_box(index_copy));
 
-                // Record metrics
-                let elapsed = start_time.elapsed();
-                let metrics = HashMap::from([
-                    ("operation".to_string(), json!("index")),
-                    ("record_size".to_string(), json!(size)),
-                    ("record_id".to_string(), json!(id.clone())),
-                    (
-                        "unique_terms".to_string(),
-                        json!(object_index.inverted_index.len()),
-                    ),
-                    (
-                        "timestamp".to_string(),
-                        json!(chrono::Utc::now().timestamp_millis()),
-                    ),
-                    ("duration_ns".to_string(), json!(elapsed.as_nanos())),
-                    ("duration_ms".to_string(), json!(elapsed.as_millis())),
-                ]);
+                    // Record metrics
+                    // Measure elapsed time
+                    let elapsed = start_time.elapsed();
 
-                all_metrics.push(metrics);
-            });
+                    // Create metrics for this iteration
+                    let metrics = HashMap::from([
+                        ("operation".to_string(), json!("index")),
+                        ("record_size".to_string(), json!(size)),
+                        ("record_id".to_string(), json!(id.clone())),
+                        (
+                            "unique_terms".to_string(),
+                            json!(create_object_index(&record).inverted_index.len()),
+                        ),
+                        (
+                            "timestamp".to_string(),
+                            json!(chrono::Utc::now().timestamp_millis()),
+                        ),
+                        ("duration_ns".to_string(), json!(elapsed.as_nanos())),
+                        ("duration_ms".to_string(), json!(elapsed.as_millis())),
+                    ]);
 
-            // After all iterations, save aggregated results
+                    // Save metrics for this iteration
+                    all_metrics.push(metrics);
+                },
+            );
+
+            // Calculate percentile statistics
+            let mut durations_ns: Vec<u128> = all_metrics
+                .iter()
+                .filter_map(|m| {
+                    m.get("duration_ns")
+                        .and_then(|d| d.as_u64().map(|d| d as u128))
+                })
+                .collect();
+
+            // Sort durations for percentile calculations
+            durations_ns.sort_unstable();
+
+            // Calculate percentiles if we have data
+            let (p90, p95, p99) = if !durations_ns.is_empty() {
+                (
+                    percentile(&durations_ns, 0.90),
+                    percentile(&durations_ns, 0.95),
+                    percentile(&durations_ns, 0.99),
+                )
+            } else {
+                (0, 0, 0)
+            };
+
+            // After all iterations, save aggregated results with percentiles
             let test_case = format!("size_{}", size);
             let aggregated = HashMap::from([
                 ("test_case".to_string(), json!(test_case)),
                 ("record_size".to_string(), json!(size)),
                 (
                     "unique_terms".to_string(),
-                    json!(object_index.inverted_index.len()),
+                    json!(create_object_index(&record).inverted_index.len()),
                 ),
                 ("iterations".to_string(), json!(all_metrics.len())),
+                ("p90_ns".to_string(), json!(p90)),
+                ("p95_ns".to_string(), json!(p95)),
+                ("p99_ns".to_string(), json!(p99)),
+                ("p90_ms".to_string(), json!(p90 as f64 / 1_000_000.0)),
+                ("p95_ms".to_string(), json!(p95 as f64 / 1_000_000.0)),
+                ("p99_ms".to_string(), json!(p99 as f64 / 1_000_000.0)),
                 ("metrics".to_string(), json!(all_metrics)),
             ]);
 
@@ -309,7 +436,7 @@ fn bench_indexing(c: &mut Criterion) {
 
 // Benchmark parallel indexing operation
 fn bench_parallel_indexing(c: &mut Criterion) {
-    let mut group = c.benchmark_group("parallel_indexing");
+    let mut group = c.benchmark_group("parallel_indexing_fjall");
 
     for size in [100, 1000].iter() {
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
@@ -322,44 +449,78 @@ fn bench_parallel_indexing(c: &mut Criterion) {
             // Create metrics container for this benchmark
             let mut all_metrics = Vec::new();
 
-            // Benchmark: Index the object using the new parallel indexing
-            b.iter(|| {
-                let start_time = Instant::now();
-                let obj_index = object_index.clone();
-                // Using the new parallel indexing method
-                fugu_db.parallel_index(black_box(obj_index));
+            // Benchmark: Index the object using regular indexing
+            b.iter_with_setup(
+                || create_object_index(&record), // Create a fresh ObjectIndex for each iteration
+                |index_copy| {
+                    let start_time = Instant::now();
+                    fugu_db.index(black_box(index_copy));
 
-                // Record metrics
-                let elapsed = start_time.elapsed();
-                let metrics = HashMap::from([
-                    ("operation".to_string(), json!("parallel_index")),
-                    ("record_size".to_string(), json!(size)),
-                    ("record_id".to_string(), json!(id.clone())),
-                    (
-                        "unique_terms".to_string(),
-                        json!(object_index.inverted_index.len()),
-                    ),
-                    (
-                        "timestamp".to_string(),
-                        json!(chrono::Utc::now().timestamp_millis()),
-                    ),
-                    ("duration_ns".to_string(), json!(elapsed.as_nanos())),
-                    ("duration_ms".to_string(), json!(elapsed.as_millis())),
-                ]);
+                    // Record metrics
+                    // Measure elapsed time
+                    let elapsed = start_time.elapsed();
 
-                all_metrics.push(metrics);
-            });
+                    // Create metrics for this iteration
+                    let metrics = HashMap::from([
+                        ("operation".to_string(), json!("parallel_index")),
+                        ("record_size".to_string(), json!(size)),
+                        ("record_id".to_string(), json!(id.clone())),
+                        (
+                            "unique_terms".to_string(),
+                            json!(create_object_index(&record).inverted_index.len()),
+                        ),
+                        (
+                            "timestamp".to_string(),
+                            json!(chrono::Utc::now().timestamp_millis()),
+                        ),
+                        ("duration_ns".to_string(), json!(elapsed.as_nanos())),
+                        ("duration_ms".to_string(), json!(elapsed.as_millis())),
+                    ]);
 
-            // After all iterations, save aggregated results
+                    // Save metrics for this iteration
+                    all_metrics.push(metrics);
+                },
+            );
+
+            // Calculate percentile statistics
+            let mut durations_ns: Vec<u128> = all_metrics
+                .iter()
+                .filter_map(|m| {
+                    m.get("duration_ns")
+                        .and_then(|d| d.as_u64().map(|d| d as u128))
+                })
+                .collect();
+
+            // Sort durations for percentile calculations
+            durations_ns.sort_unstable();
+
+            // Calculate percentiles if we have data
+            let (p90, p95, p99) = if !durations_ns.is_empty() {
+                (
+                    percentile(&durations_ns, 0.90),
+                    percentile(&durations_ns, 0.95),
+                    percentile(&durations_ns, 0.99),
+                )
+            } else {
+                (0, 0, 0)
+            };
+
+            // After all iterations, save aggregated results with percentiles
             let test_case = format!("size_{}", size);
             let aggregated = HashMap::from([
                 ("test_case".to_string(), json!(test_case)),
                 ("record_size".to_string(), json!(size)),
                 (
                     "unique_terms".to_string(),
-                    json!(object_index.inverted_index.len()),
+                    json!(create_object_index(&record).inverted_index.len()),
                 ),
                 ("iterations".to_string(), json!(all_metrics.len())),
+                ("p90_ns".to_string(), json!(p90)),
+                ("p95_ns".to_string(), json!(p95)),
+                ("p99_ns".to_string(), json!(p99)),
+                ("p90_ms".to_string(), json!(p90 as f64 / 1_000_000.0)),
+                ("p95_ms".to_string(), json!(p95 as f64 / 1_000_000.0)),
+                ("p99_ms".to_string(), json!(p99 as f64 / 1_000_000.0)),
                 ("metrics".to_string(), json!(all_metrics)),
             ]);
 
@@ -375,7 +536,7 @@ fn bench_parallel_indexing(c: &mut Criterion) {
 
 // Benchmark batch indexing
 fn bench_batch_indexing(c: &mut Criterion) {
-    let mut group = c.benchmark_group("batch_indexing");
+    let mut group = c.benchmark_group("batch_indexing_fjall");
 
     for batch_size in [10, 50, 100].iter() {
         group.bench_with_input(
@@ -408,7 +569,7 @@ fn bench_batch_indexing(c: &mut Criterion) {
                                 ("record_id".to_string(), json!(id.clone())),
                                 (
                                     "terms".to_string(),
-                                    json!(object_index.inverted_index.len()),
+                                    json!(create_object_index(&record).inverted_index.len()),
                                 ),
                             ]));
 
@@ -445,12 +606,41 @@ fn bench_batch_indexing(c: &mut Criterion) {
                     },
                 );
 
-                // After all iterations, save aggregated results
+                // Calculate percentile statistics
+                let mut durations_ns: Vec<u128> = all_metrics
+                    .iter()
+                    .filter_map(|m| {
+                        m.get("duration_ns")
+                            .and_then(|d| d.as_u64().map(|d| d as u128))
+                    })
+                    .collect();
+
+                // Sort durations for percentile calculations
+                durations_ns.sort_unstable();
+
+                // Calculate percentiles if we have data
+                let (p90, p95, p99) = if !durations_ns.is_empty() {
+                    (
+                        percentile(&durations_ns, 0.90),
+                        percentile(&durations_ns, 0.95),
+                        percentile(&durations_ns, 0.99),
+                    )
+                } else {
+                    (0, 0, 0)
+                };
+
+                // After all iterations, save aggregated results with percentiles
                 let test_case = format!("batch_size_{}", batch_size);
                 let aggregated = HashMap::from([
                     ("test_case".to_string(), json!(test_case)),
                     ("batch_size".to_string(), json!(batch_size)),
                     ("iterations".to_string(), json!(all_metrics.len())),
+                    ("p90_ns".to_string(), json!(p90)),
+                    ("p95_ns".to_string(), json!(p95)),
+                    ("p99_ns".to_string(), json!(p99)),
+                    ("p90_ms".to_string(), json!(p90 as f64 / 1_000_000.0)),
+                    ("p95_ms".to_string(), json!(p95 as f64 / 1_000_000.0)),
+                    ("p99_ms".to_string(), json!(p99 as f64 / 1_000_000.0)),
                     ("metrics".to_string(), json!(all_metrics)),
                 ]);
 
@@ -467,7 +657,7 @@ fn bench_batch_indexing(c: &mut Criterion) {
 
 // Benchmark parallel batch indexing
 fn bench_parallel_batch_indexing(c: &mut Criterion) {
-    let mut group = c.benchmark_group("parallel_batch_indexing");
+    let mut group = c.benchmark_group("parallel_batch_indexing_fjall");
 
     for batch_size in [10, 50, 100].iter() {
         group.bench_with_input(
@@ -500,7 +690,7 @@ fn bench_parallel_batch_indexing(c: &mut Criterion) {
                                 ("record_id".to_string(), json!(id.clone())),
                                 (
                                     "terms".to_string(),
-                                    json!(object_index.inverted_index.len()),
+                                    json!(create_object_index(&record).inverted_index.len()),
                                 ),
                             ]));
 
@@ -513,7 +703,7 @@ fn bench_parallel_batch_indexing(c: &mut Criterion) {
                         // Benchmark: Parallel batch index the objects
                         let start_time = Instant::now();
 
-                        fugu_db.parallel_batch_index(black_box(objects));
+                        fugu_db.batch_index(black_box(objects));
 
                         // Record timing metrics
                         let elapsed = start_time.elapsed();
@@ -537,12 +727,41 @@ fn bench_parallel_batch_indexing(c: &mut Criterion) {
                     },
                 );
 
-                // After all iterations, save aggregated results
+                // Calculate percentile statistics
+                let mut durations_ns: Vec<u128> = all_metrics
+                    .iter()
+                    .filter_map(|m| {
+                        m.get("duration_ns")
+                            .and_then(|d| d.as_u64().map(|d| d as u128))
+                    })
+                    .collect();
+
+                // Sort durations for percentile calculations
+                durations_ns.sort_unstable();
+
+                // Calculate percentiles if we have data
+                let (p90, p95, p99) = if !durations_ns.is_empty() {
+                    (
+                        percentile(&durations_ns, 0.90),
+                        percentile(&durations_ns, 0.95),
+                        percentile(&durations_ns, 0.99),
+                    )
+                } else {
+                    (0, 0, 0)
+                };
+
+                // After all iterations, save aggregated results with percentiles
                 let test_case = format!("batch_size_{}", batch_size);
                 let aggregated = HashMap::from([
                     ("test_case".to_string(), json!(test_case)),
                     ("batch_size".to_string(), json!(batch_size)),
                     ("iterations".to_string(), json!(all_metrics.len())),
+                    ("p90_ns".to_string(), json!(p90)),
+                    ("p95_ns".to_string(), json!(p95)),
+                    ("p99_ns".to_string(), json!(p99)),
+                    ("p90_ms".to_string(), json!(p90 as f64 / 1_000_000.0)),
+                    ("p95_ms".to_string(), json!(p95 as f64 / 1_000_000.0)),
+                    ("p99_ms".to_string(), json!(p99 as f64 / 1_000_000.0)),
                     ("metrics".to_string(), json!(all_metrics)),
                 ]);
 
@@ -560,7 +779,7 @@ fn bench_parallel_batch_indexing(c: &mut Criterion) {
 
 // Benchmark compaction process
 fn bench_compaction(c: &mut Criterion) {
-    let mut group = c.benchmark_group("compaction");
+    let mut group = c.benchmark_group("compaction_fjall");
 
     for doc_count in [10, 50, 100].iter() {
         group.bench_with_input(
@@ -583,12 +802,19 @@ fn bench_compaction(c: &mut Criterion) {
                             let record = create_test_record(&id, 1000);
                             let object_index = create_object_index(&record);
 
-                            // Add to DB and index
-                            let records_tree = fugu_db.db().open_tree(TREE_RECORDS).unwrap();
+                            // Add to DB and index using the appropriate implementation
+                            let records_partition = fugu_db
+                                .keyspace()
+                                .open_partition(
+                                    TREE_RECORDS,
+                                    fjall::PartitionCreateOptions::default()
+                                        .with_kv_separation(KvSeparationOptions::default()),
+                                )
+                                .unwrap();
                             let archivable = ArchivableObjectRecord::from(&record);
                             let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-                            records_tree
-                                .insert(record.id.as_bytes(), serialized.to_vec())
+                            records_partition
+                                .insert(&record.id, serialized.to_vec())
                                 .unwrap();
 
                             // Track object details
@@ -596,7 +822,7 @@ fn bench_compaction(c: &mut Criterion) {
                                 ("record_id".to_string(), json!(id.clone())),
                                 (
                                     "terms".to_string(),
-                                    json!(object_index.inverted_index.len()),
+                                    json!(create_object_index(&record).inverted_index.len()),
                                 ),
                             ]));
 
@@ -643,12 +869,41 @@ fn bench_compaction(c: &mut Criterion) {
                     },
                 );
 
-                // After all iterations, save aggregated results
+                // Calculate percentile statistics
+                let mut durations_ns: Vec<u128> = all_metrics
+                    .iter()
+                    .filter_map(|m| {
+                        m.get("duration_ns")
+                            .and_then(|d| d.as_u64().map(|d| d as u128))
+                    })
+                    .collect();
+
+                // Sort durations for percentile calculations
+                durations_ns.sort_unstable();
+
+                // Calculate percentiles if we have data
+                let (p90, p95, p99) = if !durations_ns.is_empty() {
+                    (
+                        percentile(&durations_ns, 0.90),
+                        percentile(&durations_ns, 0.95),
+                        percentile(&durations_ns, 0.99),
+                    )
+                } else {
+                    (0, 0, 0)
+                };
+
+                // After all iterations, save aggregated results with percentiles
                 let test_case = format!("doc_count_{}", doc_count);
                 let aggregated = HashMap::from([
                     ("test_case".to_string(), json!(test_case)),
                     ("doc_count".to_string(), json!(doc_count)),
                     ("iterations".to_string(), json!(all_metrics.len())),
+                    ("p90_ns".to_string(), json!(p90)),
+                    ("p95_ns".to_string(), json!(p95)),
+                    ("p99_ns".to_string(), json!(p99)),
+                    ("p90_ms".to_string(), json!(p90 as f64 / 1_000_000.0)),
+                    ("p95_ms".to_string(), json!(p95 as f64 / 1_000_000.0)),
+                    ("p99_ms".to_string(), json!(p99 as f64 / 1_000_000.0)),
                     ("metrics".to_string(), json!(all_metrics)),
                 ]);
 
@@ -665,10 +920,17 @@ fn bench_compaction(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .sample_size(10)  // Reduced sample size
-        .measurement_time(Duration::from_millis(500))  // Reduced measurement time (default is 5s)
-        .warm_up_time(Duration::from_millis(300))  // Reduced warm-up time (default is 3s)
-        .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
-    targets = bench_record_insertion, bench_record_retrieval,  bench_parallel_indexing, bench_batch_indexing, bench_parallel_batch_indexing, bench_compaction
+        .sample_size(50)  // Increased sample size for more reliable percentile statistics
+        .measurement_time(Duration::from_secs(5))  // Longer measurement time for better profiling data
+        .warm_up_time(Duration::from_secs(2))  // Proper warm-up time
+        .with_profiler(PProfProfiler::new(
+            100, // Sampling frequency
+            Output::Flamegraph(None)
+        ))
+        // Add percentile measurements for p90, p95 and p99
+        .significance_level(0.01)
+        .noise_threshold(0.02)
+        .configure_from_args();
+    targets = bench_record_insertion, bench_record_retrieval, bench_parallel_indexing, bench_batch_indexing, bench_parallel_batch_indexing, bench_compaction
 }
 criterion_main!(benches);

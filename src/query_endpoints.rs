@@ -1,3 +1,4 @@
+use crate::tracing_utils;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -7,8 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tracing::{debug, error, info, Instrument};
-use crate::tracing_utils;
+use tracing::{Instrument, debug, error, info};
 use urlencoding::decode;
 
 use crate::query::{QueryConfig, QueryEngine, QueryResults};
@@ -163,8 +163,14 @@ pub async fn query_json_post(
             "boost": payload.boost
         });
 
+        // Get top_k value before moving json_query
+        let top_k = json_query
+            .get("top_k")
+            .and_then(|k| k.as_u64())
+            .map(|v| v as usize);
+
         // Execute the query
-        match engine.search_json(&json_query.to_string()) {
+        match engine.search_json(json_query, top_k) {
             Ok(results) => {
                 info!(
                     total_hits = results.total_hits,
@@ -283,12 +289,16 @@ pub async fn query_advanced_post(
             "Advanced query with custom configuration"
         );
 
+        // Store the default limit for use after config is moved
+        let default_limit = config.default_limit;
+
+        // Create query engine with the config
         let engine = QueryEngine::new(state.db.clone(), config);
 
         // Execute the query based on type
         if has_filters || has_boost {
             // JSON query with advanced features
-            match engine.search_json(&payload.to_string()) {
+            match engine.search_json(payload.clone(), Some(default_limit)) {
                 Ok(results) => {
                     info!(
                         total_hits = results.total_hits,

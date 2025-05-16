@@ -6,10 +6,13 @@ pub mod query_endpoints;
 pub mod server;
 // pub mod time_index;
 #[cfg(test)]
+mod document_statistics_test;
+#[cfg(test)]
 mod query_test;
 pub mod rkyv_adapter;
+#[cfg(test)]
+mod test_inverted_index;
 pub mod tracing_utils;
-
 pub use object::{ObjectIndex, ObjectRecord};
 pub use query::{QueryConfig, QueryEngine, QueryHit, QueryResults};
 
