@@ -1,18 +1,18 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use fugu::db::FuguDB;
-use fugu::object::{ObjectRecord, ArchivableObjectRecord, ObjectIndex};
-use fugu::query::{QueryEngine, QueryConfig};
+use fugu::object::{ArchivableObjectRecord, ObjectIndex, ObjectRecord};
+use fugu::query::{QueryConfig, QueryEngine};
 use fugu::rkyv_adapter;
 use pprof::criterion::{Output, PProfProfiler};
+use rand::prelude::*;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use std::path::PathBuf;
 use std::fs::{self, File};
 use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
-use rand::prelude::*;
 
 // Helper function to calculate percentiles
 fn percentile(sorted_values: &[u128], percentile: f64) -> u128 {
@@ -81,7 +81,7 @@ fn create_test_record(id: &str, content: &str) -> ObjectRecord {
 // Create an ObjectIndex from a record by tokenizing its text
 fn create_object_index(record: &ObjectRecord) -> ObjectIndex {
     let mut inverted_index: HashMap<String, Vec<usize>> = HashMap::new();
-    
+
     // Simple word tokenization and position tracking
     let words: Vec<&str> = record.text.split_whitespace().collect();
     for (pos, word) in words.iter().enumerate() {
@@ -91,7 +91,7 @@ fn create_object_index(record: &ObjectRecord) -> ObjectIndex {
             .or_insert_with(Vec::new);
         positions.push(pos);
     }
-    
+
     ObjectIndex {
         object_id: record.id.clone(),
         inverted_index,
@@ -103,18 +103,10 @@ fn setup_test_db_with_corpus(doc_count: usize, content_type: &str) -> (FuguDB, t
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let db_path = temp_dir.path().to_str().unwrap();
 
-    // Create FuguDB instance based on enabled feature
-    #[cfg(feature = "use-sled")]
-    let mut fugu_db = {
-        let db = sled::open(db_path).expect("Failed to open test sled database");
-        FuguDB::new(db)
-    };
-
-    #[cfg(feature = "use-fjall")]
     let mut fugu_db = {
         let keyspace = fjall::Config::new(db_path)
-            .cache_size(64 * 1024 * 1024)  // 64MB cache for test
-            .fsync_ms(Some(100))  // Fsync every 100ms
+            .cache_size(64 * 1024 * 1024) // 64MB cache for test
+            .fsync_ms(Some(100)) // Fsync every 100ms
             .open()
             .expect("Failed to open test fjall keyspace");
         FuguDB::new(keyspace)
@@ -122,7 +114,7 @@ fn setup_test_db_with_corpus(doc_count: usize, content_type: &str) -> (FuguDB, t
 
     // Initialize the database
     fugu_db.init_db();
-    
+
     // Content samples based on the requested type
     let samples = match content_type {
         "technical" => vec![
@@ -169,31 +161,33 @@ fn setup_test_db_with_corpus(doc_count: usize, content_type: &str) -> (FuguDB, t
             "Fifth text sample ensures adequate corpus diversity",
         ],
     };
-    
+
     // Generate and insert records
     for i in 0..doc_count {
         // Select a sample (with rotation if needed)
         let sample_idx = i % samples.len();
         let base_content = samples[sample_idx];
-        
+
         // Create record with repeating content to reach desired size
         let repeat_factor = (1000 / base_content.len()).max(1);
         let content = base_content.repeat(repeat_factor);
-        
+
         let id = format!("bench_query_{}_{}", content_type, i);
         let record = create_test_record(&id, &content);
-        
+
         // Add to the database - use our unified API
         let records_tree = fugu_db.open_tree(fugu::db::TREE_RECORDS).unwrap();
         let archivable = ArchivableObjectRecord::from(&record);
         let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-        records_tree.insert(record.id.as_bytes(), serialized).unwrap();
-        
+        records_tree
+            .insert(record.id.as_bytes(), serialized)
+            .unwrap();
+
         // Create index
         let object_index = create_object_index(&record);
         fugu_db.index(object_index);
     }
-    
+
     // Compact the database
     let mut fugu_db_mut = fugu_db;
     fugu_db_mut.compact();
@@ -214,27 +208,33 @@ fn bench_text_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("text_search");
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(5));
-    
+
     // Test different corpus sizes
     for doc_count in [10, 50, 100].iter() {
         // Test with different content types
         for content_type in ["technical", "literary", "random"].iter() {
             group.bench_with_input(
-                BenchmarkId::new(content_type.to_string(), doc_count), 
-                &(*content_type, *doc_count), 
+                BenchmarkId::new(content_type.to_string(), doc_count),
+                &(*content_type, *doc_count),
                 |b, &(content_type, doc_count)| {
                     // Setup the test database
                     let (fugu_db, _temp_dir) = setup_test_db_with_corpus(doc_count, content_type);
                     let engine = create_query_engine(fugu_db, None);
-                    
+
                     // Select appropriate query terms based on content type
                     let query_terms = match content_type {
-                        "technical" => vec!["database", "performance", "serialization", "rust programming", "memory"],
+                        "technical" => vec![
+                            "database",
+                            "performance",
+                            "serialization",
+                            "rust programming",
+                            "memory",
+                        ],
                         "literary" => vec!["time", "years", "remember", "pleasure", "morning"],
                         "random" => vec!["quick", "fox jumps", "sphinx", "wizards", "opal"],
                         _ => vec!["sample", "text", "words"],
                     };
-                    
+
                     // Run benchmarks with random term selection
                     b.iter(|| {
                         let mut rng = rand::rng();
@@ -243,11 +243,11 @@ fn bench_text_search(c: &mut Criterion) {
                         let result = engine.search_text(black_box(term), Some(10));
                         assert!(result.is_ok());
                     });
-                }
+                },
             );
         }
     }
-    
+
     group.finish();
 }
 
@@ -256,33 +256,29 @@ fn bench_phrase_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("phrase_search");
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(5));
-    
+
     // Create a larger corpus for phrase searching
     let doc_count = 50;
     let (fugu_db, _temp_dir) = setup_test_db_with_corpus(doc_count, "technical");
     let engine = create_query_engine(fugu_db, None);
-    
+
     // Test different phrase lengths
     let phrases = [
-        "database",  // Single term
-        "database performance",  // Two terms
-        "database performance optimization",  // Three terms
-        "\"database performance optimization techniques\"",  // Quoted phrase
+        "database",                                         // Single term
+        "database performance",                             // Two terms
+        "database performance optimization",                // Three terms
+        "\"database performance optimization techniques\"", // Quoted phrase
     ];
-    
+
     for (i, phrase) in phrases.iter().enumerate() {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(i+1), 
-            phrase, 
-            |b, phrase| {
-                b.iter(|| {
-                    let result = engine.search_text(black_box(phrase), Some(10));
-                    assert!(result.is_ok());
-                });
-            }
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(i + 1), phrase, |b, phrase| {
+            b.iter(|| {
+                let result = engine.search_text(black_box(phrase), Some(10));
+                assert!(result.is_ok());
+            });
+        });
     }
-    
+
     group.finish();
 }
 
@@ -291,12 +287,12 @@ fn bench_json_query(c: &mut Criterion) {
     let mut group = c.benchmark_group("json_query");
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(5));
-    
+
     // Create a test database
     let doc_count = 50;
     let (fugu_db, _temp_dir) = setup_test_db_with_corpus(doc_count, "technical");
     let engine = create_query_engine(fugu_db, None);
-    
+
     // Test different JSON query complexities
     let queries = [
         r#"{"query": "database", "top_k": 5}"#,
@@ -314,29 +310,25 @@ fn bench_json_query(c: &mut Criterion) {
             ]
         }"#,
     ];
-    
+
     for (i, query) in queries.iter().enumerate() {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(i+1), 
-            query, 
-            |b, query| {
-                b.iter(|| {
-                    // Convert string to serde_json::Value and pass limit None
-                    let query_json: serde_json::Value = serde_json::from_str(query).unwrap();
-                    let result = engine.search_json(black_box(query_json), None);
-                    assert!(result.is_ok());
-                });
-            }
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(i + 1), query, |b, query| {
+            b.iter(|| {
+                // Convert string to serde_json::Value and pass limit None
+                let query_json: serde_json::Value = serde_json::from_str(query).unwrap();
+                let result = engine.search_json(black_box(query_json), None);
+                assert!(result.is_ok());
+            });
+        });
     }
-    
+
     group.finish();
 }
 
 // Benchmark the query engine's internal operations
 fn bench_query_engine_internals(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_engine_internals");
-    
+
     // Test with different BM25 parameter configurations
     let configs = [
         QueryConfig {
@@ -357,22 +349,18 @@ fn bench_query_engine_internals(c: &mut Criterion) {
     ];
 
     for (i, config) in configs.iter().enumerate() {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(i+1),
-            config,
-            |b, config| {
-                // Create a fresh database for each test
-                let (fugu_db, _temp_dir) = setup_test_db_with_corpus(100, "technical");
-                let engine = create_query_engine(fugu_db, Some(config.clone()));
-                
-                b.iter(|| {
-                    let result = engine.search_text(black_box("database performance"), Some(10));
-                    assert!(result.is_ok());
-                });
-            }
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(i + 1), config, |b, config| {
+            // Create a fresh database for each test
+            let (fugu_db, _temp_dir) = setup_test_db_with_corpus(100, "technical");
+            let engine = create_query_engine(fugu_db, Some(config.clone()));
+
+            b.iter(|| {
+                let result = engine.search_text(black_box("database performance"), Some(10));
+                assert!(result.is_ok());
+            });
+        });
     }
-    
+
     group.finish();
 }
 
@@ -393,3 +381,4 @@ criterion_group! {
     targets = bench_text_search, bench_phrase_search, bench_json_query, bench_query_engine_internals
 }
 criterion_main!(benches);
+

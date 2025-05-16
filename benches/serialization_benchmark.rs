@@ -1,14 +1,14 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use fugu::object::{ObjectRecord, ArchivableObjectRecord};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use fugu::db::{deserialize_positions, serialize_positions};
+use fugu::object::{ArchivableObjectRecord, ObjectRecord};
 use fugu::rkyv_adapter;
-use fugu::db::{serialize_positions, deserialize_positions};
-use serde_json::json;
 use pprof::criterion::{Output, PProfProfiler};
-use std::time::{Duration, Instant};
-use std::path::PathBuf;
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 // Helper function to calculate percentiles
 fn percentile(sorted_values: &[u128], percentile: f64) -> u128 {
@@ -108,7 +108,10 @@ fn bench_serialize(c: &mut Criterion) {
                         ("operation".to_string(), json!("serialize")),
                         ("record_size".to_string(), json!(size)),
                         ("serialized_size".to_string(), json!(serialized.len())),
-                        ("timestamp".to_string(), json!(chrono::Utc::now().timestamp_millis())),
+                        (
+                            "timestamp".to_string(),
+                            json!(chrono::Utc::now().timestamp_millis()),
+                        ),
                         ("duration_ns".to_string(), json!(elapsed.as_nanos())),
                         ("duration_ms".to_string(), json!(elapsed.as_millis())),
                     ]);
@@ -122,7 +125,10 @@ fn bench_serialize(c: &mut Criterion) {
             // Calculate percentile statistics
             let mut durations_ns: Vec<u128> = all_metrics
                 .iter()
-                .filter_map(|m| m.get("duration_ns").and_then(|d| d.as_u64().map(|d| d as u128)))
+                .filter_map(|m| {
+                    m.get("duration_ns")
+                        .and_then(|d| d.as_u64().map(|d| d as u128))
+                })
                 .collect();
 
             // Sort durations for percentile calculations
@@ -133,7 +139,7 @@ fn bench_serialize(c: &mut Criterion) {
                 (
                     percentile(&durations_ns, 0.90),
                     percentile(&durations_ns, 0.95),
-                    percentile(&durations_ns, 0.99)
+                    percentile(&durations_ns, 0.99),
                 )
             } else {
                 (0, 0, 0)
@@ -159,90 +165,99 @@ fn bench_serialize(c: &mut Criterion) {
             }
         });
     }
-    
+
     group.finish();
 }
 
 // Benchmark deserialization
 fn bench_deserialize(c: &mut Criterion) {
     let mut group = c.benchmark_group("deserialize");
-    
+
     for size in [100, 1000, 10_000, 100_000].iter() {
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
             let record = create_test_record(&format!("bench_{}", size), size);
             let archivable = ArchivableObjectRecord::from(&record);
             let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-            
+
             b.iter(|| {
-                let result = rkyv_adapter::deserialize::<ArchivableObjectRecord>(black_box(&serialized));
+                let result =
+                    rkyv_adapter::deserialize::<ArchivableObjectRecord>(black_box(&serialized));
                 assert!(result.is_ok());
                 result.unwrap()
             });
         });
     }
-    
+
     group.finish();
 }
 
 // Benchmark full serialization + deserialization cycle
 fn bench_ser_deser_cycle(c: &mut Criterion) {
     let mut group = c.benchmark_group("ser_deser_cycle");
-    
+
     for size in [100, 1000, 10_000, 100_000].iter() {
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
             let record = create_test_record(&format!("bench_{}", size), size);
             let archivable = ArchivableObjectRecord::from(&record);
-            
+
             b.iter(|| {
                 // Serialize
                 let serialized = rkyv_adapter::serialize(black_box(&archivable)).unwrap();
-                
+
                 // Deserialize
-                let deserialized = rkyv_adapter::deserialize::<ArchivableObjectRecord>(black_box(&serialized)).unwrap();
-                
+                let deserialized =
+                    rkyv_adapter::deserialize::<ArchivableObjectRecord>(black_box(&serialized))
+                        .unwrap();
+
                 // Convert back to ObjectRecord
                 let _final_record = ObjectRecord::from(deserialized);
             });
         });
     }
-    
+
     group.finish();
 }
 
 // Benchmark comparing rkyv_adapter vs direct bincode usage
 fn bench_adapter_vs_bincode(c: &mut Criterion) {
     let mut group = c.benchmark_group("adapter_vs_bincode");
-    
+
     for size in [1000, 10_000, 100_000].iter() {
         let record = create_test_record(&format!("bench_{}", size), *size);
         let archivable = ArchivableObjectRecord::from(&record);
-        
+
         // Using rkyv_adapter
         group.bench_with_input(
-            BenchmarkId::new("rkyv_adapter", size), 
-            &archivable, 
+            BenchmarkId::new("rkyv_adapter", size),
+            &archivable,
             |b, record| {
                 b.iter(|| {
                     let serialized = rkyv_adapter::serialize(black_box(record)).unwrap();
-                    let _deserialized = rkyv_adapter::deserialize::<ArchivableObjectRecord>(&serialized).unwrap();
+                    let _deserialized =
+                        rkyv_adapter::deserialize::<ArchivableObjectRecord>(&serialized).unwrap();
                 });
-            }
+            },
         );
-        
+
         // Using bincode directly
         group.bench_with_input(
-            BenchmarkId::new("bincode_direct", size), 
-            &archivable, 
+            BenchmarkId::new("bincode_direct", size),
+            &archivable,
             |b, record| {
                 b.iter(|| {
-                    let serialized = bincode::serde::encode_to_vec(black_box(record), bincode::config::standard()).unwrap();
-                    let (_deserialized, _): (ArchivableObjectRecord, usize) = 
-                        bincode::serde::decode_from_slice(&serialized, bincode::config::standard()).unwrap();
+                    let serialized = bincode::serde::encode_to_vec(
+                        black_box(record),
+                        bincode::config::standard(),
+                    )
+                    .unwrap();
+                    let (_deserialized, _): (ArchivableObjectRecord, usize) =
+                        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+                            .unwrap();
                 });
-            }
+            },
         );
     }
-    
+
     group.finish();
 }
 
@@ -252,25 +267,21 @@ fn bench_positions(c: &mut Criterion) {
 
     // Test small position vectors (should benefit from caching)
     for size in [1, 2, 5, 10, 50].iter() {
-        let positions: Vec<usize> = (0..*size).collect();
-        let serialized = serialize_positions(&positions);
+        let positions: Vec<u64> = (0..*size).collect();
+        let serialized = serialize_positions(&positions).unwrap();
 
         // Test serialization with cache
-        group.bench_with_input(
-            BenchmarkId::new("serialize", size),
-            &positions,
-            |b, pos| {
-                b.iter(|| serialize_positions(black_box(pos)));
-            }
-        );
+        group.bench_with_input(BenchmarkId::new("serialize", size), &positions, |b, pos| {
+            b.iter(|| serialize_positions(pos));
+        });
 
         // Test deserialization with cache
         group.bench_with_input(
             BenchmarkId::new("deserialize", size),
             &serialized,
             |b, ser| {
-                b.iter(|| deserialize_positions(black_box(ser)));
-            }
+                b.iter(|| deserialize_positions(ser));
+            },
         );
     }
 
@@ -294,3 +305,4 @@ criterion_group! {
     targets = bench_serialize, bench_deserialize, bench_ser_deser_cycle, bench_adapter_vs_bincode, bench_positions
 }
 criterion_main!(benches);
+

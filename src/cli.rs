@@ -44,26 +44,6 @@ enum Commands {
         #[arg(required = true)]
         id: String,
     },
-
-    #[cfg(all(feature = "use-sled", feature = "use-fjall"))]
-    /// Migrate data from sled to fjall
-    Migrate {
-        /// Source sled database path
-        #[arg(short, long, default_value = "fugu_db")]
-        source: String,
-
-        /// Destination fjall database path
-        #[arg(short, long, default_value = "fugu_db_fjall")]
-        destination: String,
-
-        /// Verify data after migration
-        #[arg(short, long, default_value = "true")]
-        verify: bool,
-
-        /// Delete source database after successful migration
-        #[arg(short, long, default_value = "false")]
-        delete_source: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -208,36 +188,6 @@ pub async fn run_cli() -> Result<(), Box<dyn Error>> {
                     Ok::<(), Box<dyn Error>>(())
                 }
                 .instrument(get_span)
-                .await?
-            }
-            #[cfg(all(feature = "use-sled", feature = "use-fjall"))]
-            Commands::Migrate { source, destination, verify, delete_source } => {
-                let migrate_span = tracing::span!(tracing::Level::INFO, "migrate_command");
-
-                async {
-                    info!("Executing migration from sled to fjall");
-                    info!("Source: {}, Destination: {}", source, destination);
-                    info!("Verify: {}, Delete source: {}", verify, delete_source);
-
-                    println!("Starting migration from sled to fjall");
-                    println!("Source: {}", source);
-                    println!("Destination: {}", destination);
-                    println!("Verify after migration: {}", verify);
-                    println!("Delete source after migration: {}", delete_source);
-
-                    // Call the migration function
-                    match crate::migration::migrate_cmd(source, destination, *verify, *delete_source) {
-                        Ok(_) => {
-                            println!("Migration completed successfully!");
-                            Ok(())
-                        }
-                        Err(e) => {
-                            println!("Migration failed: {}", e);
-                            Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn Error>)
-                        }
-                    }
-                }
-                .instrument(migrate_span)
                 .await?
             }
         }

@@ -199,12 +199,15 @@ async fn ingest_object(
     };
 
     let existing_object = if let Ok(Some(data)) = records_handle.get(&object_id) {
-        debug!("Object with ID '{}' already exists, will be updated", object_id);
+        debug!(
+            "Object with ID '{}' already exists, will be updated",
+            object_id
+        );
         match rkyv_adapter::deserialize::<ArchivableObjectRecord>(&data) {
             Ok(archivable) => {
                 debug!("Successfully deserialized existing object");
                 Some(archivable)
-            },
+            }
             Err(e) => {
                 debug!("Could not deserialize existing object: {}", e);
                 None
@@ -241,7 +244,11 @@ async fn ingest_object(
 
     // Create variables for response
     let object_id_for_response = object_id.clone();
-    let operation_type = if existing_object.is_some() { "update" } else { "create" };
+    let operation_type = if existing_object.is_some() {
+        "update"
+    } else {
+        "create"
+    };
 
     // Clone the object for background task
     let object_clone = object.clone();
@@ -282,7 +289,10 @@ async fn ingest_object(
                 if let Err(e) = records_handle.insert(object_id_clone, serialized.to_vec()) {
                     error!("Failed to insert record into RECORDS collection: {}", e);
                 } else {
-                    info!("Successfully added record to RECORDS collection: {}", object_id);
+                    info!(
+                        "Successfully added record to RECORDS collection: {}",
+                        object_id
+                    );
                 }
             }
             Err(e) => {
@@ -316,7 +326,10 @@ async fn batch_ingest(
     let span = tracing_utils::server_span("/batch-ingest", "POST");
     let _guard = span.enter();
 
-    debug!("Batch ingest endpoint called with {} objects", payload.objects.len());
+    debug!(
+        "Batch ingest endpoint called with {} objects",
+        payload.objects.len()
+    );
 
     // Validate the batch
     if payload.objects.is_empty() {
@@ -366,7 +379,10 @@ async fn batch_ingest(
 
         // Check if the object already exists
         let operation = if let Ok(Some(_)) = records_handle.get(&object_id) {
-            debug!("Object with ID '{}' already exists, will be updated", object_id);
+            debug!(
+                "Object with ID '{}' already exists, will be updated",
+                object_id
+            );
             "update"
         } else {
             debug!("Object with ID '{}' is new", object_id);
@@ -440,7 +456,10 @@ async fn batch_ingest(
                     if let Err(e) = records_handle.insert(id_clone, serialized.to_vec()) {
                         error!("Failed to insert record into RECORDS collection: {}", e);
                     } else {
-                        debug!("Successfully added record to RECORDS collection: {}", object.id);
+                        debug!(
+                            "Successfully added record to RECORDS collection: {}",
+                            object.id
+                        );
                     }
                 }
                 Err(e) => {
@@ -474,7 +493,10 @@ async fn ingest_file(
     let span = tracing_utils::server_span("/ingest-file", "POST");
     let _guard = span.enter();
 
-    debug!("File ingest endpoint called for file: {}", payload.file_path);
+    debug!(
+        "File ingest endpoint called for file: {}",
+        payload.file_path
+    );
 
     // Try to read the file
     let file_content = match tokio::fs::read_to_string(&payload.file_path).await {
@@ -531,7 +553,10 @@ async fn ingest_file(
     };
 
     let operation = if let Ok(Some(_)) = records_handle.get(&object_id) {
-        debug!("File object with ID '{}' already exists, will be updated", object_id);
+        debug!(
+            "File object with ID '{}' already exists, will be updated",
+            object_id
+        );
         "update"
     } else {
         debug!("File object with ID '{}' is new", object_id);
@@ -548,26 +573,26 @@ async fn ingest_file(
     if let serde_json::Value::Object(ref mut map) = metadata {
         map.insert(
             "file_path".to_string(),
-            serde_json::Value::String(payload.file_path.clone())
+            serde_json::Value::String(payload.file_path.clone()),
         );
 
         map.insert(
             "ingested_at".to_string(),
-            serde_json::Value::String(chrono::Utc::now().to_rfc3339())
+            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
         );
 
         // Add namespace if provided
         if let Some(namespace) = payload.namespace {
             map.insert(
                 "namespace".to_string(),
-                serde_json::Value::String(namespace)
+                serde_json::Value::String(namespace),
             );
         }
 
         // Add file size
         map.insert(
             "file_size_bytes".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(file_content.len() as u64))
+            serde_json::Value::Number(serde_json::Number::from(file_content.len() as u64)),
         );
     }
 
@@ -646,7 +671,10 @@ async fn ingest_file(
                 if let Err(e) = records_handle.insert(obj_id_clone, serialized.to_vec()) {
                     error!("Failed to insert record into RECORDS collection: {}", e);
                 } else {
-                    info!("Successfully added file record to RECORDS tree: {}", object_id);
+                    info!(
+                        "Successfully added file record to RECORDS tree: {}",
+                        object_id
+                    );
                 }
             }
             Err(e) => {
@@ -860,22 +888,13 @@ async fn list_global_terms(State(state): State<Arc<AppState>>) -> Json<Value> {
 
     // We need a helper function to get tree names depending on which backend we're using
     // This will be different depending on which backend is active
-    #[cfg(feature = "use-sled")]
-    let tree_names = db_handle.db().tree_names();
 
-    #[cfg(feature = "use-fjall")]
     let tree_names_result = db_handle.partition_names();
 
-    #[cfg(feature = "use-fjall")]
-    let tree_names = match tree_names_result {
-        Ok(names) => names.into_iter().map(|name| name.into_bytes()).collect::<Vec<_>>(),
-        Err(e) => {
-            error!("Failed to get partition names: {:?}", e);
-            return Json(json!({
-                "error": "Failed to get partition names"
-            }));
-        }
-    };
+    let tree_names = tree_names_result
+        .into_iter()
+        .map(|name| name.into_bytes())
+        .collect::<Vec<_>>();
 
     // Iterate through all trees to find objects
     for name in tree_names {
@@ -1028,7 +1047,7 @@ pub async fn create_dummy_record(
 
     // Log the creation of the demo index
     info!(
-        "Index added with ID: {}, containing {} unique terms",
+        "Index parsed with ID: {}, containing {} unique terms",
         demo_object.id,
         inverted_index.len()
     );
@@ -1085,8 +1104,7 @@ pub async fn create_dummy_record(
             Ok(serialized) => {
                 // Insert the record into the tree
                 let demo_id_clone = demo_object.id.clone();
-                if let Err(e) = records_handle.insert(demo_id_clone, serialized.to_vec())
-                {
+                if let Err(e) = records_handle.insert(demo_id_clone, serialized.to_vec()) {
                     error!("Failed to insert record into RECORDS collection: {}", e);
                 } else {
                     info!(

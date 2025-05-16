@@ -1,17 +1,13 @@
+use std::time::Instant;
 use tokio::sync::oneshot;
 use tokio::time::{Duration, interval};
-use tracing::{Instrument, debug, error, info};
+use tracing::{Instrument, debug, error, info, warn};
 
 // Import our crate modules
 use fugu::db::{FuguDB, FuguDBBackend};
 use fugu::server;
 use fugu::tracing_utils;
 
-// Import database backend based on feature flag
-#[cfg(feature = "use-sled")]
-use sled;
-
-#[cfg(feature = "use-fjall")]
 use fjall;
 
 // Main entry point
@@ -59,37 +55,15 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
     // Database initialization - properly separated from HTTP server logic
     info!("Initializing database");
 
-    // Initialize the appropriate database backend based on feature flags
-    #[cfg(feature = "use-sled")]
-    let mut fdb = {
-        let db = match sled::open("fugu_db") {
-            Ok(db) => {
-                info!("Successfully opened sled database");
-                db
-            }
-            Err(e) => {
-                error!("Failed to open sled database: {}", e);
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to open sled database: {}", e),
-                )));
-            }
-        };
-
-        let fdb = FuguDB::new(db);
-        fdb
-    };
-
-    #[cfg(feature = "use-fjall")]
     let mut fdb = {
         // Configure fjall with optimized settings
         let config = fjall::Config::new("fugu_db")
-            .cache_size(512 * 1024 * 1024)  // 512MB cache for better read performance
-            .max_write_buffer_size(64 * 1024 * 1024)  // 64MB write buffer for better write performance
-            .compaction_workers(4)  // Use 4 threads for compaction
-            .flush_workers(2)  // Use 2 threads for flushing
-            .manual_journal_persist(false)  // Automatic persistence
-            .fsync_ms(Some(100));  // Fsync every 100ms for durability with good performance
+            .cache_size(512 * 1024 * 1024) // 512MB cache for better read performance
+            .max_write_buffer_size(64 * 1024 * 1024) // 64MB write buffer for better write performance
+            .compaction_workers(4) // Use 4 threads for compaction
+            .flush_workers(2) // Use 2 threads for flushing
+            .manual_journal_persist(false) // Automatic persistence
+            .fsync_ms(Some(100)); // Fsync every 100ms for durability with good performance
 
         let keyspace = match config.open() {
             Ok(keyspace) => {
@@ -147,36 +121,89 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Run the compactor service in the background
-async fn run_compactor(db: FuguDB, mut shutdown_recv: oneshot::Receiver<()>) {
-    // Simple compactor implementation for the unified backend
-    let mut interval = interval(Duration::from_secs(60));
+async fn run_compactor(mut db: FuguDB, mut shutdown_recv: oneshot::Receiver<()>) {
+    // Compactor implementation with adaptive scheduling for different backends
+    // Default to compacting every 60 seconds
+    let mut maintenance_interval = interval(Duration::from_secs(60));
+
+    // For full compaction, use a longer interval (every 10 minutes)
+    let mut full_compaction_interval = interval(Duration::from_secs(600));
+
+    // Track last full compaction time
+    let mut last_full_compaction = Instant::now();
 
     info!("Starting background compactor service");
+
     loop {
         tokio::select! {
-            _ = interval.tick() => {
-                debug!("Performing periodic maintenance (if needed)");
-                #[cfg(feature = "use-fjall")]
-                {
-                    if let FuguDBBackend::Fjall(ref keyspace) = db.backend {
-                        // Fjall has internal compaction but we can trigger it
-                        debug!("Triggering fjall maintenance");
-                    }
+            _ = maintenance_interval.tick() => {
+                let now = Instant::now();
+                debug!("Performing periodic maintenance");
+
+                // Use our unified maintenance API for lightweight operations
+                if let Err(e) = db.maintenance() {
+                    error!("Error during database maintenance: {:?}", e);
+                } else {
+                    debug!("Periodic maintenance completed in {:?}", now.elapsed());
                 }
 
-                #[cfg(feature = "use-sled")]
-                {
-                    if let FuguDBBackend::Sled(ref db) = db.backend {
-                        // For sled we can flush the database periodically
-                        if let Err(e) = db.flush() {
-                            error!("Error during sled flush: {}", e);
+                // Check our standard trees for targeted maintenance every few cycles
+                static mut CYCLE_COUNT: u8 = 0;
+                unsafe {
+                    CYCLE_COUNT = (CYCLE_COUNT + 1) % 5; // Every 5 cycles
+                    if CYCLE_COUNT == 0 {
+                        // Perform targeted maintenance on the most important trees
+                        let important_trees = [
+                            "records",
+                            "filters",
+                            "global_index"
+                        ];
+
+                        for tree_name in &important_trees {
+                            debug!("Performing targeted maintenance on {}", tree_name);
+                            if let Err(e) = db.compact_tree(tree_name) {
+                                warn!("Error during targeted maintenance of {}: {:?}", tree_name, e);
+                            }
                         }
                     }
                 }
             }
+
+            _ = full_compaction_interval.tick() => {
+                let now = Instant::now();
+                info!("Starting full database compaction");
+
+                // For both backends, perform a full compaction using our unified API
+                if let Err(e) = db.compact() {
+                    error!("Error during full database compaction: {:?}", e);
+                } else {
+                    info!("Full database compaction completed in {:?}", now.elapsed());
+                }
+
+                last_full_compaction = Instant::now();
+            }
+
             // Use &mut to avoid moving the receiver in the loop
             result = &mut shutdown_recv => {
-                info!("Received shutdown signal, stopping compactor service");
+                info!("Received shutdown signal, performing final maintenance before stopping");
+
+                // Do a final compaction before shutting down
+                if let Err(e) = db.compact() {
+                    error!("Error during final compaction: {:?}", e);
+                } else {
+                    info!("Final compaction completed successfully");
+                }
+
+                // Force persistence for fjall
+                if let FuguDBBackend::Fjall(ref keyspace) = db.backend {
+                    if let Err(e) = keyspace.persist(fjall::PersistMode::SyncAll) {
+                        error!("Error during final fjall persistence: {:?}", e);
+                    } else {
+                        debug!("Successfully persisted fjall data on shutdown");
+                    }
+                }
+
+                info!("Compactor service shutdown complete");
                 break;
             }
         }

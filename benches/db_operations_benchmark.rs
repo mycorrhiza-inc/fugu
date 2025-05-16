@@ -15,11 +15,8 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 // Import database backend based on feature flag
-#[cfg(feature = "use-sled")]
-use sled;
-
-#[cfg(feature = "use-fjall")]
 use fjall;
+use fjall::KvSeparationOptions;
 
 // Helper function to calculate percentiles
 fn percentile(sorted_values: &[u128], percentile: f64) -> u128 {
@@ -79,21 +76,6 @@ fn create_object_index(record: &ObjectRecord) -> ObjectIndex {
     }
 }
 
-#[cfg(feature = "use-sled")]
-// Setup a temporary sled database for benchmarking
-fn setup_temp_db() -> (FuguDB, tempfile::TempDir) {
-    let temp_dir = tempdir().expect("Failed to create temporary directory");
-    let db_path = temp_dir.path().to_str().unwrap();
-    let db = sled::open(db_path).expect("Failed to open test sled database");
-    let fugu_db = FuguDB::new(db);
-
-    // Initialize the database
-    fugu_db.init_db();
-
-    (fugu_db, temp_dir)
-}
-
-#[cfg(feature = "use-fjall")]
 // Setup a temporary fjall database for benchmarking
 fn setup_temp_db() -> (FuguDB, tempfile::TempDir) {
     let temp_dir = tempdir().expect("Failed to create temporary directory");
@@ -145,10 +127,6 @@ fn save_intermediate_results(
 
 // Benchmark record insertion
 fn bench_record_insertion(c: &mut Criterion) {
-    #[cfg(feature = "use-sled")]
-    let mut group = c.benchmark_group("record_insertion_sled");
-
-    #[cfg(feature = "use-fjall")]
     let mut group = c.benchmark_group("record_insertion_fjall");
 
     for size in [100, 1000].iter() {
@@ -187,32 +165,23 @@ fn bench_record_insertion(c: &mut Criterion) {
                     let start_time = Instant::now();
 
                     // Use the appropriate database implementation
-                    #[cfg(feature = "use-sled")]
-                    {
-                        let records_tree = fugu_db.db().open_tree(TREE_RECORDS).unwrap();
-                        let archivable = ArchivableObjectRecord::from(&record);
-                        let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-                        let _ = records_tree.insert(record.id.as_bytes(), serialized.to_vec());
-                    }
-
-                    #[cfg(feature = "use-fjall")]
-                    {
-                        let records_partition = fugu_db.keyspace().open_partition(TREE_RECORDS, fjall::PartitionCreateOptions::default()).unwrap();
-                        let archivable = ArchivableObjectRecord::from(&record);
-                        let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-                        let _ = records_partition.insert(&record.id, serialized.to_vec());
-                    }
+                    let records_partition = fugu_db
+                        .keyspace()
+                        .open_partition(
+                            TREE_RECORDS,
+                            fjall::PartitionCreateOptions::default()
+                                .with_kv_separation(KvSeparationOptions::default()),
+                        )
+                        .unwrap();
+                    let archivable = ArchivableObjectRecord::from(&record);
+                    let serialized = rkyv_adapter::serialize(&archivable).unwrap();
+                    let _ = records_partition.insert(&record.id, serialized.to_vec());
 
                     // Record timing metrics
                     let elapsed = start_time.elapsed();
                     metrics.insert("duration_ns".to_string(), json!(elapsed.as_nanos()));
                     metrics.insert("duration_ms".to_string(), json!(elapsed.as_millis()));
 
-                    // Add the database backend type to metrics
-                    #[cfg(feature = "use-sled")]
-                    metrics.insert("db_backend".to_string(), json!("sled"));
-
-                    #[cfg(feature = "use-fjall")]
                     metrics.insert("db_backend".to_string(), json!("fjall"));
 
                     // Save metrics for this iteration
@@ -223,7 +192,10 @@ fn bench_record_insertion(c: &mut Criterion) {
             // Calculate percentile statistics from the collected metrics
             let mut durations_ns: Vec<u128> = all_metrics
                 .iter()
-                .filter_map(|m| m.get("duration_ns").and_then(|d| d.as_u64().map(|d| d as u128)))
+                .filter_map(|m| {
+                    m.get("duration_ns")
+                        .and_then(|d| d.as_u64().map(|d| d as u128))
+                })
                 .collect();
 
             // Sort durations for percentile calculations
@@ -234,7 +206,7 @@ fn bench_record_insertion(c: &mut Criterion) {
                 (
                     percentile(&durations_ns, 0.90),
                     percentile(&durations_ns, 0.95),
-                    percentile(&durations_ns, 0.99)
+                    percentile(&durations_ns, 0.99),
                 )
             } else {
                 (0, 0, 0)
@@ -266,10 +238,6 @@ fn bench_record_insertion(c: &mut Criterion) {
 
 // Benchmark record retrieval
 fn bench_record_retrieval(c: &mut Criterion) {
-    #[cfg(feature = "use-sled")]
-    let mut group = c.benchmark_group("record_retrieval_sled");
-
-    #[cfg(feature = "use-fjall")]
     let mut group = c.benchmark_group("record_retrieval_fjall");
 
     for size in [100, 1000].iter() {
@@ -279,26 +247,19 @@ fn bench_record_retrieval(c: &mut Criterion) {
             let id = format!("bench_retrieve_{}", size);
             let record = create_test_record(&id, size);
 
-            // Insert the record using the appropriate database implementation
-            #[cfg(feature = "use-sled")]
-            {
-                let records_tree = fugu_db.db().open_tree(TREE_RECORDS).unwrap();
-                let archivable = ArchivableObjectRecord::from(&record);
-                let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-                records_tree
-                    .insert(record.id.as_bytes(), serialized.to_vec())
-                    .unwrap();
-            }
-
-            #[cfg(feature = "use-fjall")]
-            {
-                let records_partition = fugu_db.keyspace().open_partition(TREE_RECORDS, fjall::PartitionCreateOptions::default()).unwrap();
-                let archivable = ArchivableObjectRecord::from(&record);
-                let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-                records_partition
-                    .insert(&record.id, serialized.to_vec())
-                    .unwrap();
-            }
+            let records_partition = fugu_db
+                .keyspace()
+                .open_partition(
+                    TREE_RECORDS,
+                    fjall::PartitionCreateOptions::default()
+                        .with_kv_separation(KvSeparationOptions::default()),
+                )
+                .unwrap();
+            let archivable = ArchivableObjectRecord::from(&record);
+            let serialized = rkyv_adapter::serialize(&archivable).unwrap();
+            records_partition
+                .insert(&record.id, serialized.to_vec())
+                .unwrap();
 
             // Create metrics container for this benchmark
             let mut all_metrics = Vec::new();
@@ -330,7 +291,10 @@ fn bench_record_retrieval(c: &mut Criterion) {
             // Calculate percentile statistics
             let mut durations_ns: Vec<u128> = all_metrics
                 .iter()
-                .filter_map(|m| m.get("duration_ns").and_then(|d| d.as_u64().map(|d| d as u128)))
+                .filter_map(|m| {
+                    m.get("duration_ns")
+                        .and_then(|d| d.as_u64().map(|d| d as u128))
+                })
                 .collect();
 
             // Sort durations for percentile calculations
@@ -341,7 +305,7 @@ fn bench_record_retrieval(c: &mut Criterion) {
                 (
                     percentile(&durations_ns, 0.90),
                     percentile(&durations_ns, 0.95),
-                    percentile(&durations_ns, 0.99)
+                    percentile(&durations_ns, 0.99),
                 )
             } else {
                 (0, 0, 0)
@@ -373,10 +337,6 @@ fn bench_record_retrieval(c: &mut Criterion) {
 
 // Benchmark indexing operation
 fn bench_indexing(c: &mut Criterion) {
-    #[cfg(feature = "use-sled")]
-    let mut group = c.benchmark_group("indexing_sled");
-
-    #[cfg(feature = "use-fjall")]
     let mut group = c.benchmark_group("indexing_fjall");
 
     for size in [100, 1000].iter() {
@@ -426,7 +386,10 @@ fn bench_indexing(c: &mut Criterion) {
             // Calculate percentile statistics
             let mut durations_ns: Vec<u128> = all_metrics
                 .iter()
-                .filter_map(|m| m.get("duration_ns").and_then(|d| d.as_u64().map(|d| d as u128)))
+                .filter_map(|m| {
+                    m.get("duration_ns")
+                        .and_then(|d| d.as_u64().map(|d| d as u128))
+                })
                 .collect();
 
             // Sort durations for percentile calculations
@@ -437,7 +400,7 @@ fn bench_indexing(c: &mut Criterion) {
                 (
                     percentile(&durations_ns, 0.90),
                     percentile(&durations_ns, 0.95),
-                    percentile(&durations_ns, 0.99)
+                    percentile(&durations_ns, 0.99),
                 )
             } else {
                 (0, 0, 0)
@@ -473,10 +436,6 @@ fn bench_indexing(c: &mut Criterion) {
 
 // Benchmark parallel indexing operation
 fn bench_parallel_indexing(c: &mut Criterion) {
-    #[cfg(feature = "use-sled")]
-    let mut group = c.benchmark_group("parallel_indexing_sled");
-
-    #[cfg(feature = "use-fjall")]
     let mut group = c.benchmark_group("parallel_indexing_fjall");
 
     for size in [100, 1000].iter() {
@@ -526,7 +485,10 @@ fn bench_parallel_indexing(c: &mut Criterion) {
             // Calculate percentile statistics
             let mut durations_ns: Vec<u128> = all_metrics
                 .iter()
-                .filter_map(|m| m.get("duration_ns").and_then(|d| d.as_u64().map(|d| d as u128)))
+                .filter_map(|m| {
+                    m.get("duration_ns")
+                        .and_then(|d| d.as_u64().map(|d| d as u128))
+                })
                 .collect();
 
             // Sort durations for percentile calculations
@@ -537,7 +499,7 @@ fn bench_parallel_indexing(c: &mut Criterion) {
                 (
                     percentile(&durations_ns, 0.90),
                     percentile(&durations_ns, 0.95),
-                    percentile(&durations_ns, 0.99)
+                    percentile(&durations_ns, 0.99),
                 )
             } else {
                 (0, 0, 0)
@@ -574,10 +536,6 @@ fn bench_parallel_indexing(c: &mut Criterion) {
 
 // Benchmark batch indexing
 fn bench_batch_indexing(c: &mut Criterion) {
-    #[cfg(feature = "use-sled")]
-    let mut group = c.benchmark_group("batch_indexing_sled");
-
-    #[cfg(feature = "use-fjall")]
     let mut group = c.benchmark_group("batch_indexing_fjall");
 
     for batch_size in [10, 50, 100].iter() {
@@ -651,7 +609,10 @@ fn bench_batch_indexing(c: &mut Criterion) {
                 // Calculate percentile statistics
                 let mut durations_ns: Vec<u128> = all_metrics
                     .iter()
-                    .filter_map(|m| m.get("duration_ns").and_then(|d| d.as_u64().map(|d| d as u128)))
+                    .filter_map(|m| {
+                        m.get("duration_ns")
+                            .and_then(|d| d.as_u64().map(|d| d as u128))
+                    })
                     .collect();
 
                 // Sort durations for percentile calculations
@@ -662,7 +623,7 @@ fn bench_batch_indexing(c: &mut Criterion) {
                     (
                         percentile(&durations_ns, 0.90),
                         percentile(&durations_ns, 0.95),
-                        percentile(&durations_ns, 0.99)
+                        percentile(&durations_ns, 0.99),
                     )
                 } else {
                     (0, 0, 0)
@@ -696,10 +657,6 @@ fn bench_batch_indexing(c: &mut Criterion) {
 
 // Benchmark parallel batch indexing
 fn bench_parallel_batch_indexing(c: &mut Criterion) {
-    #[cfg(feature = "use-sled")]
-    let mut group = c.benchmark_group("parallel_batch_indexing_sled");
-
-    #[cfg(feature = "use-fjall")]
     let mut group = c.benchmark_group("parallel_batch_indexing_fjall");
 
     for batch_size in [10, 50, 100].iter() {
@@ -773,7 +730,10 @@ fn bench_parallel_batch_indexing(c: &mut Criterion) {
                 // Calculate percentile statistics
                 let mut durations_ns: Vec<u128> = all_metrics
                     .iter()
-                    .filter_map(|m| m.get("duration_ns").and_then(|d| d.as_u64().map(|d| d as u128)))
+                    .filter_map(|m| {
+                        m.get("duration_ns")
+                            .and_then(|d| d.as_u64().map(|d| d as u128))
+                    })
                     .collect();
 
                 // Sort durations for percentile calculations
@@ -784,7 +744,7 @@ fn bench_parallel_batch_indexing(c: &mut Criterion) {
                     (
                         percentile(&durations_ns, 0.90),
                         percentile(&durations_ns, 0.95),
-                        percentile(&durations_ns, 0.99)
+                        percentile(&durations_ns, 0.99),
                     )
                 } else {
                     (0, 0, 0)
@@ -819,10 +779,6 @@ fn bench_parallel_batch_indexing(c: &mut Criterion) {
 
 // Benchmark compaction process
 fn bench_compaction(c: &mut Criterion) {
-    #[cfg(feature = "use-sled")]
-    let mut group = c.benchmark_group("compaction_sled");
-
-    #[cfg(feature = "use-fjall")]
     let mut group = c.benchmark_group("compaction_fjall");
 
     for doc_count in [10, 50, 100].iter() {
@@ -847,25 +803,19 @@ fn bench_compaction(c: &mut Criterion) {
                             let object_index = create_object_index(&record);
 
                             // Add to DB and index using the appropriate implementation
-                            #[cfg(feature = "use-sled")]
-                            {
-                                let records_tree = fugu_db.db().open_tree(TREE_RECORDS).unwrap();
-                                let archivable = ArchivableObjectRecord::from(&record);
-                                let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-                                records_tree
-                                    .insert(record.id.as_bytes(), serialized.to_vec())
-                                    .unwrap();
-                            }
-
-                            #[cfg(feature = "use-fjall")]
-                            {
-                                let records_partition = fugu_db.keyspace().open_partition(TREE_RECORDS, fjall::PartitionCreateOptions::default()).unwrap();
-                                let archivable = ArchivableObjectRecord::from(&record);
-                                let serialized = rkyv_adapter::serialize(&archivable).unwrap();
-                                records_partition
-                                    .insert(&record.id, serialized.to_vec())
-                                    .unwrap();
-                            }
+                            let records_partition = fugu_db
+                                .keyspace()
+                                .open_partition(
+                                    TREE_RECORDS,
+                                    fjall::PartitionCreateOptions::default()
+                                        .with_kv_separation(KvSeparationOptions::default()),
+                                )
+                                .unwrap();
+                            let archivable = ArchivableObjectRecord::from(&record);
+                            let serialized = rkyv_adapter::serialize(&archivable).unwrap();
+                            records_partition
+                                .insert(&record.id, serialized.to_vec())
+                                .unwrap();
 
                             // Track object details
                             doc_details.push(HashMap::from([
@@ -922,7 +872,10 @@ fn bench_compaction(c: &mut Criterion) {
                 // Calculate percentile statistics
                 let mut durations_ns: Vec<u128> = all_metrics
                     .iter()
-                    .filter_map(|m| m.get("duration_ns").and_then(|d| d.as_u64().map(|d| d as u128)))
+                    .filter_map(|m| {
+                        m.get("duration_ns")
+                            .and_then(|d| d.as_u64().map(|d| d as u128))
+                    })
                     .collect();
 
                 // Sort durations for percentile calculations
@@ -933,7 +886,7 @@ fn bench_compaction(c: &mut Criterion) {
                     (
                         percentile(&durations_ns, 0.90),
                         percentile(&durations_ns, 0.95),
-                        percentile(&durations_ns, 0.99)
+                        percentile(&durations_ns, 0.99),
                     )
                 } else {
                     (0, 0, 0)

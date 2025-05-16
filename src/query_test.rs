@@ -15,16 +15,9 @@ mod query_tests {
         let db_path = temp_dir.path().to_str().unwrap();
 
         // Open database based on the enabled feature
-        #[cfg(feature = "use-sled")]
-        let fugudb = {
-            let db = sled::open(db_path).expect("Failed to open test sled database");
-            FuguDB::new(db)
-        };
-
-        #[cfg(feature = "use-fjall")]
         let fugudb = {
             let keyspace = fjall::Config::new(db_path)
-                .cache_size(64 * 1024 * 1024)  // 64MB cache for test
+                .cache_size(64 * 1024 * 1024) // 64MB cache for test
                 .open()
                 .expect("Failed to open test fjall keyspace");
             FuguDB::new(keyspace)
@@ -111,11 +104,7 @@ mod query_tests {
         assert_eq!(results.hits.len(), 2);
 
         // Check document IDs
-        let doc_ids: Vec<String> = results
-            .hits
-            .iter()
-            .map(|hit| hit.id.clone())
-            .collect();
+        let doc_ids: Vec<String> = results.hits.iter().map(|hit| hit.id.clone()).collect();
 
         assert!(doc_ids.contains(&"doc1".to_string()));
         assert!(doc_ids.contains(&"doc3".to_string()));

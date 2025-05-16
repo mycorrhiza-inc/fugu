@@ -1,3 +1,4 @@
+use crate::tracing_utils;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -7,8 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tracing::{debug, error, info, Instrument};
-use crate::tracing_utils;
+use tracing::{Instrument, debug, error, info};
 use urlencoding::decode;
 
 use crate::query::{QueryConfig, QueryEngine, QueryResults};
@@ -164,7 +164,10 @@ pub async fn query_json_post(
         });
 
         // Get top_k value before moving json_query
-        let top_k = json_query.get("top_k").and_then(|k| k.as_u64()).map(|v| v as usize);
+        let top_k = json_query
+            .get("top_k")
+            .and_then(|k| k.as_u64())
+            .map(|v| v as usize);
 
         // Execute the query
         match engine.search_json(json_query, top_k) {

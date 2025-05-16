@@ -1,10 +1,10 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use fugu::db::FuguDB;
 use fugu::object::{ObjectIndex, ObjectRecord};
-use rand::Rng;
 use pprof::criterion::{Output, PProfProfiler};
-use serde_json::json;
+use rand::Rng;
 use serde_json::Value;
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
@@ -41,18 +41,10 @@ fn setup_temp_db() -> (FuguDB, tempfile::TempDir) {
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let db_path = temp_dir.path().to_str().unwrap();
 
-    // Create FuguDB instance based on enabled feature
-    #[cfg(feature = "use-sled")]
-    let fugu_db = {
-        let db = sled::open(db_path).expect("Failed to open test sled database");
-        FuguDB::new(db)
-    };
-
-    #[cfg(feature = "use-fjall")]
     let fugu_db = {
         let keyspace = fjall::Config::new(db_path)
-            .cache_size(64 * 1024 * 1024)  // 64MB cache for test
-            .fsync_ms(Some(100))  // Fsync every 100ms
+            .cache_size(64 * 1024 * 1024) // 64MB cache for test
+            .fsync_ms(Some(100)) // Fsync every 100ms
             .open()
             .expect("Failed to open test fjall keyspace");
         FuguDB::new(keyspace)
@@ -102,16 +94,12 @@ fn load_document(doc_id: &str) -> Option<ObjectRecord> {
     let file_path = format!("{}/{}.json", BENCHMARK_DATA_DIR, doc_id);
     let file = File::open(file_path).ok()?;
     let json: Value = serde_json::from_reader(file).ok()?;
-    
+
     let id = json["id"].as_str().unwrap_or(doc_id).to_string();
     let text = json["text"].as_str().unwrap_or("").to_string();
     let metadata = json["metadata"].clone();
-    
-    Some(ObjectRecord {
-        id,
-        text,
-        metadata,
-    })
+
+    Some(ObjectRecord { id, text, metadata })
 }
 
 // Benchmark indexing large documents
@@ -120,17 +108,23 @@ fn bench_large_document_indexing(c: &mut Criterion) {
 
     // Check if benchmark data exists
     if !Path::new(BENCHMARK_DATA_DIR).exists() {
-        println!("Benchmark data directory not found. Please run the data generation script first.");
+        println!(
+            "Benchmark data directory not found. Please run the data generation script first."
+        );
         return;
     }
 
     // Get all document files
-    let entries = fs::read_dir(BENCHMARK_DATA_DIR).unwrap_or_else(|_| panic!("Failed to read benchmark data directory"));
+    let entries = fs::read_dir(BENCHMARK_DATA_DIR)
+        .unwrap_or_else(|_| panic!("Failed to read benchmark data directory"));
     let doc_files: Vec<_> = entries
         .filter_map(Result::ok)
         .filter(|entry| {
-            entry.path().extension().map_or(false, |ext| ext == "json") &&
-            entry.file_name().to_string_lossy().starts_with("large_doc_")
+            entry.path().extension().map_or(false, |ext| ext == "json")
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("large_doc_")
         })
         .collect();
 
@@ -139,73 +133,81 @@ fn bench_large_document_indexing(c: &mut Criterion) {
         return;
     }
 
-    println!("Found {} large document files for benchmarking", doc_files.len());
+    println!(
+        "Found {} large document files for benchmarking",
+        doc_files.len()
+    );
 
     // Test sequential indexing of large documents
     group.bench_function("sequential_indexing", |b| {
         let (fugu_db, _temp_dir) = setup_temp_db();
-        
+
         // Create metrics container
         let mut all_metrics = Vec::new();
-        
+
         b.iter_with_setup(
             || {
                 // Load a random document for each iteration
                 let mut rng = rand::rng();
                 let doc_index = rng.random_range(0..doc_files.len());
-                let doc_id = doc_files[doc_index].file_name().to_string_lossy().replace(".json", "");
+                let doc_id = doc_files[doc_index]
+                    .file_name()
+                    .to_string_lossy()
+                    .replace(".json", "");
                 let record = load_document(&doc_id).expect("Failed to load document");
-                
+
                 // Track metrics for this iteration
                 let metrics = HashMap::from([
                     ("operation".to_string(), json!("sequential_index_large")),
                     ("record_id".to_string(), json!(record.id.clone())),
                     (
-                        "size_kb".to_string(), 
-                        json!(record.metadata["size_kb"].as_u64().unwrap_or(0))
+                        "size_kb".to_string(),
+                        json!(record.metadata["size_kb"].as_u64().unwrap_or(0)),
                     ),
                     (
                         "word_count".to_string(),
-                        json!(record.metadata["word_count"].as_u64().unwrap_or(0))
+                        json!(record.metadata["word_count"].as_u64().unwrap_or(0)),
                     ),
                     (
                         "timestamp".to_string(),
                         json!(chrono::Utc::now().timestamp_millis()),
                     ),
                 ]);
-                
+
                 (record, metrics)
             },
             |(record, mut metrics)| {
                 // Create the index
                 let object_index = create_object_index(&record);
                 let unique_terms = object_index.inverted_index.len();
-                
+
                 // Benchmark: Index the large document
                 let start_time = Instant::now();
-                
+
                 // Using standard indexing
                 fugu_db.index(black_box(object_index));
-                
+
                 // Record metrics
                 let elapsed = start_time.elapsed();
                 metrics.insert("duration_ns".to_string(), json!(elapsed.as_nanos()));
                 metrics.insert("duration_ms".to_string(), json!(elapsed.as_millis()));
                 metrics.insert("unique_terms".to_string(), json!(unique_terms));
-                
+
                 // Save metrics for this iteration
                 all_metrics.push(metrics);
             },
         );
-        
+
         // After all iterations, save aggregated results
         let aggregated = HashMap::from([
             ("test_case".to_string(), json!("sequential_indexing_large")),
             ("iterations".to_string(), json!(all_metrics.len())),
             ("metrics".to_string(), json!(all_metrics)),
         ]);
-        
-        if let Err(e) = save_intermediate_results("large_document_indexing", "sequential", &aggregated) {
+
+        if let Err(e) =
+            save_intermediate_results("large_document_indexing", "sequential", &aggregated)
+        {
             eprintln!("Failed to save benchmark results: {}", e);
         }
     });
@@ -213,68 +215,73 @@ fn bench_large_document_indexing(c: &mut Criterion) {
     // Test parallel indexing of large documents
     group.bench_function("parallel_indexing", |b| {
         let (fugu_db, _temp_dir) = setup_temp_db();
-        
+
         // Create metrics container
         let mut all_metrics = Vec::new();
-        
+
         b.iter_with_setup(
             || {
                 // Load a random document for each iteration
                 let mut rng = rand::rng();
                 let doc_index = rng.random_range(0..doc_files.len());
-                let doc_id = doc_files[doc_index].file_name().to_string_lossy().replace(".json", "");
+                let doc_id = doc_files[doc_index]
+                    .file_name()
+                    .to_string_lossy()
+                    .replace(".json", "");
                 let record = load_document(&doc_id).expect("Failed to load document");
-                
+
                 // Track metrics for this iteration
                 let metrics = HashMap::from([
                     ("operation".to_string(), json!("parallel_index_large")),
                     ("record_id".to_string(), json!(record.id.clone())),
                     (
-                        "size_kb".to_string(), 
-                        json!(record.metadata["size_kb"].as_u64().unwrap_or(0))
+                        "size_kb".to_string(),
+                        json!(record.metadata["size_kb"].as_u64().unwrap_or(0)),
                     ),
                     (
                         "word_count".to_string(),
-                        json!(record.metadata["word_count"].as_u64().unwrap_or(0))
+                        json!(record.metadata["word_count"].as_u64().unwrap_or(0)),
                     ),
                     (
                         "timestamp".to_string(),
                         json!(chrono::Utc::now().timestamp_millis()),
                     ),
                 ]);
-                
+
                 (record, metrics)
             },
             |(record, mut metrics)| {
                 // Create the index
                 let object_index = create_object_index(&record);
                 let unique_terms = object_index.inverted_index.len();
-                
+
                 // Benchmark: Index the large document
                 let start_time = Instant::now();
-                
+
                 // Using regular indexing as parallel_index doesn't exist
                 fugu_db.index(black_box(object_index));
-                
+
                 // Record metrics
                 let elapsed = start_time.elapsed();
                 metrics.insert("duration_ns".to_string(), json!(elapsed.as_nanos()));
                 metrics.insert("duration_ms".to_string(), json!(elapsed.as_millis()));
                 metrics.insert("unique_terms".to_string(), json!(unique_terms));
-                
+
                 // Save metrics for this iteration
                 all_metrics.push(metrics);
             },
         );
-        
+
         // After all iterations, save aggregated results
         let aggregated = HashMap::from([
             ("test_case".to_string(), json!("parallel_indexing_large")),
             ("iterations".to_string(), json!(all_metrics.len())),
             ("metrics".to_string(), json!(all_metrics)),
         ]);
-        
-        if let Err(e) = save_intermediate_results("large_document_indexing", "parallel", &aggregated) {
+
+        if let Err(e) =
+            save_intermediate_results("large_document_indexing", "parallel", &aggregated)
+        {
             eprintln!("Failed to save benchmark results: {}", e);
         }
     });
@@ -299,3 +306,4 @@ criterion_group! {
     targets = bench_large_document_indexing
 }
 criterion_main!(benches);
+
