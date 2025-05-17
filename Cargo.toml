@@ -8,6 +8,7 @@ default = ["json"]
 json = ["tracing-subscriber/json"]
 
 [dependencies]
+fjall = "2.10.0"
 actix-web = "4.10.2"
 axum = "0.8.4"
 chrono = "0.4.31"
@@ -17,7 +18,6 @@ schemars = "0.8.22"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 bincode = { version = "^2", features = ["serde"] }
-sled = { version = "0.34.7" }
 tokio = { version = "1.44.2", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
@@ -30,3 +30,4 @@ tempfile = "3.20.0"
 rand = "0.9.1"
 pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+byteview = { version = "0.7.0", features = ["serde"] }
