@@ -1,8 +1,7 @@
 use crate::db::FuguDB;
 use crate::object::ObjectRecord;
 use crate::tracing_utils;
-use anyhow::{Context, Result, anyhow};
-use futures_util::future::FutureExt; // For now_or_never
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -11,7 +10,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{Instrument, debug, error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Query configuration options
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -536,7 +535,7 @@ impl QueryEngine {
         }
 
         // Collect document statistics for scoring
-        let (doc_count, avg_doc_length, term_freq) = self.collect_document_statistics()?;
+        let (doc_count, avg_doc_length, _term_freq) = self.collect_document_statistics()?;
         info!(
             "Document stats: count={}, avg_length={:.2}",
             doc_count, avg_doc_length

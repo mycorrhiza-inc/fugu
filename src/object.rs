@@ -43,7 +43,7 @@ impl From<ArchivableObjectRecord> for ObjectRecord {
             id: record.id,
             text: record.text,
             metadata: serde_json::from_str(&record.metadata_json)
-                .unwrap_or_else(|_| serde_json::Value::Null),
+                .unwrap_or(serde_json::Value::Null),
         }
     }
 }

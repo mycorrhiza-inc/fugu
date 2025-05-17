@@ -204,7 +204,7 @@ async fn list_namespaces(client: &Client, server: &str) -> Result<(), Box<dyn Er
 
     async {
         debug!("Sending request to list namespaces");
-        let response = match client.get(&format!("{}/namespaces", server)).send().await {
+        let response = match client.get(format!("{}/namespaces", server)).send().await {
             Ok(resp) => resp,
             Err(e) => return Err(Box::new(e) as Box<dyn Error>),
         };
@@ -239,7 +239,7 @@ async fn add_namespace(client: &Client, server: &str, name: &str) -> Result<(), 
         debug!("Sending request to add namespace: {}", name);
         // This is a placeholder implementation that assumes the server will eventually support this
         let response = match client
-            .post(&format!("{}/namespaces", server))
+            .post(format!("{}/namespaces", server))
             .json(&json!({"name": name}))
             .send()
             .await
@@ -278,7 +278,7 @@ async fn delete_namespace(client: &Client, server: &str, name: &str) -> Result<(
         debug!("Sending request to delete namespace: {}", name);
         // This is a placeholder implementation that assumes the server will eventually support this
         let response = match client
-            .delete(&format!("{}/namespaces/{}", server, name))
+            .delete(format!("{}/namespaces/{}", server, name))
             .send()
             .await
         {
@@ -312,7 +312,7 @@ async fn get_namespace_filters(
     async {
         debug!("Sending request to get filters for namespace: {}", name);
         let response = match client
-            .get(&format!("{}/filters/{}", server, name))
+            .get(format!("{}/filters/{}", server, name))
             .send()
             .await
         {
@@ -350,7 +350,7 @@ async fn search_namespace(
             name, query
         );
         let response = match client
-            .post(&format!("{}/search/{}", server, name))
+            .post(format!("{}/search/{}", server, name))
             .json(&json!({"query": query}))
             .send()
             .await
@@ -390,7 +390,7 @@ async fn add_file(
             file_name, namespace
         );
         let response = match client
-            .post(&format!("{}/add/{}", server, namespace))
+            .post(format!("{}/add/{}", server, namespace))
             .json(&json!({
                 "name": file_name,
                 "body": content
@@ -433,7 +433,7 @@ async fn create_dummy_item(
         println!("Checking if server is available at: {}", server);
 
         let health_check = client
-            .get(&format!("{}/health", server))
+            .get(format!("{}/health", server))
             .send()
             .await;
 
@@ -475,7 +475,7 @@ async fn create_dummy_item(
 
         // Send request to the server endpoint
         let response = match client
-            .post(&format!("{}/demo-index", server))
+            .post(format!("{}/demo-index", server))
             .json(&json!({
                 "id": object_id
             }))
@@ -515,7 +515,7 @@ async fn get_object(client: &Client, server: &str, object_id: &str) -> Result<()
         debug!("Checking server availability at {}", server);
 
         let health_check = client
-            .get(&format!("{}/health", server))
+            .get(format!("{}/health", server))
             .send()
             .await;
 
@@ -543,7 +543,7 @@ async fn get_object(client: &Client, server: &str, object_id: &str) -> Result<()
 
         // Send request to the server endpoint
         let response = match client
-            .get(&format!("{}/objects/{}", server, object_id))
+            .get(format!("{}/objects/{}", server, object_id))
             .send()
             .await {
                 Ok(resp) => resp,
