@@ -3,6 +3,7 @@ pub mod db;
 pub mod object;
 pub mod query;
 pub mod query_endpoints;
+pub mod s3;
 pub mod server;
 // pub mod time_index;
 #[cfg(test)]
