@@ -94,33 +94,33 @@ pub struct S3ConfigParams {
 
 impl Default for S3ConfigParams {
     fn default() -> Self {
-        let bucket_env = "S3_FUGU_BUCKET";
-        let endpoint_env = "S3_ENDPOINT";
-        let region_env = "S3_REGION";
-        let default_bucket = "fugudocs";
-        let default_endpoint = "https://sfo3.digitaloceanspaces.com";
-        let default_region = "sfo3";
+        const BUCKET_ENV: &str = "S3_FUGU_BUCKET";
+        const ENDPOINT_ENV: &str = "S3_ENDPOINT";
+        const REGION_ENV: &str = "S3_REGION";
+        const DEFAULT_BUCKET: &str = "fugudocs";
+        const DEFAULT_ENDPOINT: &str = "https://sfo3.digitaloceanspaces.com";
+        const DEFAULT_REGION: &str = "sfo3";
+        const ACCESS_ENV: &str = "S3_ACCESS_KEY";
+        const SECRET_ENV: &str = "S3_SECRET_KEY";
 
-        let access_env = "S3_ACCESS_KEY";
-        let secret_env = "S3_SECRET_KEY";
         S3ConfigParams {
-            endpoint: std::env::var(endpoint_env).unwrap_or_else(|_err| {
-                println!("{endpoint_env} not defined, defaulting to {default_endpoint}");
-                default_endpoint.into()
+            endpoint: std::env::var(ENDPOINT_ENV).unwrap_or_else(|_err| {
+                println!("{ENDPOINT_ENV} not defined, defaulting to {DEFAULT_ENDPOINT}");
+                DEFAULT_ENDPOINT.into()
             }),
-            region: std::env::var(region_env).unwrap_or_else(|_err| {
-                println!("{region_env} not defined, defaulting to {default_region}");
-                default_region.into()
+            region: std::env::var(REGION_ENV).unwrap_or_else(|_err| {
+                println!("{REGION_ENV} not defined, defaulting to {DEFAULT_REGION}");
+                DEFAULT_REGION.into()
             }),
-            default_bucket: std::env::var(bucket_env).unwrap_or_else(|_err| {
-                println!("{endpoint_env} not defined, defaulting to {default_endpoint}");
-                default_bucket.into()
+            default_bucket: std::env::var(BUCKET_ENV).unwrap_or_else(|_err| {
+                println!("{ENDPOINT_ENV} not defined, defaulting to {DEFAULT_ENDPOINT}");
+                DEFAULT_BUCKET.into()
             }),
 
-            access_key: std::env::var(access_env)
-                .unwrap_or_else(|_| panic!("{access_env} Not Set")),
-            secret_key: std::env::var(secret_env)
-                .unwrap_or_else(|_| panic!("{secret_env} Not Set")),
+            access_key: std::env::var(ACCESS_ENV)
+                .unwrap_or_else(|_| panic!("{ACCESS_ENV} Not Set")),
+            secret_key: std::env::var(SECRET_ENV)
+                .unwrap_or_else(|_| panic!("{SECRET_ENV} Not Set")),
         }
     }
 }
