@@ -1,5 +1,13 @@
+use std::error::Error;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
+use std::sync::LazyLock;
+use std::time::SystemTime;
+
+use actix_web::middleware::DefaultHeaders;
 use anyhow::anyhow;
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::{Archive, ArchiveUnsized, Deserialize, Serialize};
+use rkyv::{Portable, rancor};
 
 #[derive(Serialize, Deserialize, Archive, Debug, Clone)]
 pub struct S3Location {
@@ -83,6 +91,7 @@ use aws_config::BehaviorVersion;
 use aws_config::Region;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::config::Credentials;
+use tokio::fs;
 // Build a Region, Credentials and (if provided) custom Endpoint
 pub struct S3ConfigParams {
     pub endpoint: String,
@@ -124,6 +133,10 @@ impl Default for S3ConfigParams {
         }
     }
 }
+
+pub static DEFAULT_S3_CONFIG: LazyLock<S3ConfigParams> =
+    LazyLock::new(|| S3ConfigParams::default());
+
 pub async fn make_s3_client(s3_config: &S3ConfigParams, s3_loc: &S3Location) -> S3Client {
     let region = Region::new(s3_loc.region.clone());
     let creds = Credentials::new(
@@ -189,25 +202,213 @@ pub type LocalPath = String;
 //
 // So idea. Store the s3 cache as a lazy static, along with all the configuration needed for doing
 // uploads. And given the following traits:
+use thiserror::Error;
+#[derive(Debug, Error)]
+enum Void {}
 
-trait RemoteFileLocation {
-    fn fetch(&self) -> LocalPath;
-    fn upload(loc: &LocalPath) -> Self;
+trait RemoteFileLocation: Sized {
+    fn raw_filepath(&self) -> LocalPath;
+    fn mdata_filepath(&self) -> LocalPath;
+    async fn raw_fetch(&self) -> anyhow::Result<Vec<u8>>;
+    async fn raw_upload(&self, bytes: &[u8]) -> anyhow::Result<Self>;
 }
 impl RemoteFileLocation for LocalPath {
-    fn fetch(&self) -> LocalPath {
+    async fn raw_fetch(&self) -> anyhow::Result<Vec<u8>> {
+        Ok(fs::read(self).await?)
+    }
+
+    async fn raw_upload(&self, bytes: &[u8]) -> anyhow::Result<Self> {
+        let path: PathBuf = self.clone().into();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::write(&path, bytes).await?;
+        Ok(self.clone())
+    }
+    fn raw_filepath(&self) -> LocalPath {
         self.clone()
     }
-    fn upload(loc: &LocalPath) -> Self {
-        loc.clone()
+    fn mdata_filepath(&self) -> LocalPath {
+        panic!(
+            "This method shouldnt be used, metadata for these files should always be computed diretly."
+        )
     }
 }
 
 impl RemoteFileLocation for S3Location {
-    fn fetch(&self) -> LocalPath {
-        todo!()
+    async fn raw_fetch(&self) -> anyhow::Result<Vec<u8>> {
+        let bucket = &self.bucket;
+        let key = &self.key;
+        let client = make_s3_client(&DEFAULT_S3_CONFIG, self).await;
+        // Download object
+        let resp = client.get_object().bucket(bucket).key(key).send().await?;
+        // Read body
+        let data = resp
+            .body
+            .collect()
+            .await
+            .map_err(|_| anyhow!("invalid file location"))?;
+        let bytes = data.to_vec();
+        // Determine local path and write file
+        let full_path_str = self.raw_filepath();
+        let full_path: PathBuf = full_path_str.clone().into();
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::write(&full_path, &bytes).await?;
+        Ok(bytes)
     }
-    fn upload(loc: &LocalPath) -> Self {
-        todo!()
+    async fn raw_upload(&self, bytes: &[u8]) -> anyhow::Result<Self> {
+        let client = make_s3_client(&DEFAULT_S3_CONFIG, self).await;
+        client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .body(bytes.to_vec().into())
+            .send()
+            .await?;
+        Ok(self.clone())
     }
+    fn raw_filepath(&self) -> LocalPath {
+        CACHE_DIR.to_string() + "/data/" + &self.bucket + "/" + &self.key
+    }
+    fn mdata_filepath(&self) -> LocalPath {
+        CACHE_DIR.to_string() + "/mdata/" + &self.bucket + "/" + &self.key
+    }
+}
+
+const CACHE_DIR: &str = "./cache";
+
+struct ArchivableSystemTime(SystemTime);
+
+type HashValue = u64;
+
+fn hash_from_bytes(bytes: &[u8]) -> HashValue {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+// Caching Policies:
+#[derive(Clone, Copy, Serialize, Deserialize, Archive)]
+struct CacheMeta {
+    hash: HashValue,
+    last_checked_unixtime_seconds: u64,
+}
+
+#[allow(clippy::all)] // It wants to derive the macro using a derive statement
+impl Default for CacheMeta {
+    fn default() -> Self {
+        CacheMeta {
+            hash: 0,
+            last_checked_unixtime_seconds: 0,
+        }
+    }
+}
+impl CacheMeta {
+    fn calc_from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            hash: hash_from_bytes(bytes),
+            last_checked_unixtime_seconds: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        }
+    }
+}
+
+trait CachePolicyImpl {
+    fn is_fresh_from_mdata(meta: &ArchivedCacheMeta) -> bool;
+    async fn is_fresh(loc: &impl RemoteFileLocation) -> bool {
+        let mdata_path = loc.mdata_filepath();
+
+        // Try to read and parse metadata
+        let bytes = match tokio::fs::read(&mdata_path).await {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+
+        // Zero-copy deserialization using rkyv
+        let archived = match rkyv::access::<ArchivedCacheMeta, rancor::Error>(&bytes) {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+
+        Self::is_fresh_from_mdata(archived)
+    }
+
+    async fn update_cache(loc: &impl RemoteFileLocation, bytes: &[u8]) {
+        let mdata_path = loc.mdata_filepath();
+
+        let meta = CacheMeta::calc_from_bytes(bytes);
+
+        // Serialize and write metadata
+        let bytes = match rkyv::to_bytes::<rancor::Error>(&meta) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let path: PathBuf = mdata_path.into();
+
+        // Create parent directory if needed
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+
+        let _ = tokio::fs::write(path, bytes).await;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NoCache;
+impl CachePolicyImpl for NoCache {
+    fn is_fresh_from_mdata(_: &ArchivedCacheMeta) -> bool {
+        false
+    }
+    async fn is_fresh(_: &impl RemoteFileLocation) -> bool {
+        false
+    }
+    async fn update_cache(_: &impl RemoteFileLocation, _: &[u8]) {}
+}
+
+struct DefaultCacheConfig;
+impl CachePolicyImpl for DefaultCacheConfig {
+    fn is_fresh_from_mdata(meta: &ArchivedCacheMeta) -> bool {
+        const DEFAULT_CACHE_TIME: u64 = 30;
+        let current_unixtime_seconds =
+            match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+                Ok(dur) => dur.as_secs(),
+                Err(_) => {
+                    // If leap seconds happen invalidate cache.
+                    return false;
+                }
+            };
+        meta.last_checked_unixtime_seconds + DEFAULT_CACHE_TIME > current_unixtime_seconds
+    }
+}
+
+trait FileSystemLocation: RemoteFileLocation {
+    type CachePolicy: CachePolicyImpl;
+
+    async fn fetch(&self) -> anyhow::Result<Vec<u8>> {
+        let is_fresh = Self::CachePolicy::is_fresh(self).await;
+        let bytes = match is_fresh {
+            true => self.raw_filepath().raw_fetch().await?,
+            false => self.raw_fetch().await?,
+        };
+        Ok(bytes)
+    }
+
+    async fn upload(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        let _ = Self::CachePolicy::update_cache(self, bytes).await;
+        let _ = self.raw_upload(bytes).await?;
+        Ok(())
+    }
+}
+
+impl FileSystemLocation for S3Location {
+    type CachePolicy = DefaultCacheConfig;
+}
+
+impl FileSystemLocation for LocalPath {
+    type CachePolicy = NoCache;
 }
