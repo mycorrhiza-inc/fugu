@@ -1,13 +1,10 @@
-use std::error::Error;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::SystemTime;
 
-use actix_web::middleware::DefaultHeaders;
 use anyhow::anyhow;
-use rkyv::{Archive, ArchiveUnsized, Deserialize, Serialize};
-use rkyv::{Portable, rancor};
+use rkyv::{Archive, Deserialize, Serialize, rancor};
 
 #[derive(Serialize, Deserialize, Archive, Debug, Clone)]
 pub struct S3Location {
@@ -161,48 +158,6 @@ pub async fn make_s3_client(s3_config: &S3ConfigParams, s3_loc: &S3Location) -> 
 // serialization on path types.
 pub type LocalPath = String;
 
-// // Local file types and caching
-// #[derive(Serialize, Deserialize, Archive, Debug, Clone)]
-// pub enum FileLocation {
-//     S3Location(S3Location),
-//     LocalPath(LocalPath),
-// }
-// What is the best way to do caching of files locally??
-//
-// Requirements.
-// 1. Maybe for dev mode it should be possible to not even use s3, and just do everything on the local
-// file system.
-// 2. When in S3 mode the following mode should occur in terms of caching and stuff.
-// - Every file for s3 should have a matching filepath on the system that can be deterministically
-// generated from the bucket and key.
-// - This should get stored in some kind of way to know when the file was last cached from s3. And
-// then redownload or otherwise validate the file if the file hasnt been updated in a while. It
-// should also have a field it could use to store a u64 that comes from a hashing algorithm. ( for
-// now it should probably just use the default hash algorithm, )
-// - This data is only used when using s3 as a cache, so it might be a good idea to just store it on the drive
-// directly
-// So in addition to using the local file system for caching on an s3 system. The
-// local file system should.
-//
-//
-// So what would a file access system look like for s3 without using any cache?
-//
-// It would Look up file on s3. -> Download to local file. -> Read from that local file to produce
-// the object
-//
-// With a cache module it would look like
-//
-// Look up file from s3 -> Check local cache to see if file exists -> If valid and exists, return local file
-// location, else refetch from s3, and return the file.
-//
-// Although since s3 always needs to download the file locally before using it, you can role the no
-// cache case by just giving it a cache and setting it so that it always returns an expired hash
-// result. (One could call this the null cache or something)
-//
-//
-// So idea. Store the s3 cache as a lazy static, along with all the configuration needed for doing
-// uploads. And given the following traits:
-
 trait RemoteFileLocation: Sized {
     fn raw_filepath(&self) -> LocalPath;
     fn mdata_filepath(&self) -> LocalPath;
@@ -275,8 +230,6 @@ impl RemoteFileLocation for S3Location {
 }
 
 const CACHE_DIR: &str = "./cache";
-
-struct ArchivableSystemTime(SystemTime);
 
 type HashValue = u64;
 
@@ -393,10 +346,12 @@ trait FileSystemLocation: RemoteFileLocation {
     }
 }
 
+// To disable cache just flip this so that the cache policy is NoCache
 impl FileSystemLocation for S3Location {
     type CachePolicy = DefaultCacheConfig;
 }
 
+// No cache is necessary for local files.
 impl FileSystemLocation for LocalPath {
     type CachePolicy = NoCache;
 }
