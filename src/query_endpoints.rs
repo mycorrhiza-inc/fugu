@@ -3,9 +3,8 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{Instrument, debug, error, info};

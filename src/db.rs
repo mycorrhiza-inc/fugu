@@ -1,9 +1,7 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use fjall;
 use fjall::KvSeparationOptions;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
@@ -264,8 +262,7 @@ impl FuguDB {
 
                 // Convert each partition name string to String
                 partitions.into_iter().map(|p| p.to_string()).collect()
-            }
-            _ => panic!("Not using fjall backend"),
+            } // _ => panic!("Not using fjall backend"),
         }
     }
 
@@ -317,7 +314,7 @@ impl FuguDB {
                         })?;
                         Ok(())
                     }
-                    Err(arc_batch) => {
+                    Err(_arc_batch) => {
                         // In the rare case we can't get exclusive ownership, create a new batch
                         warn!("Could not unwrap Arc<Batch> for exclusive use");
 

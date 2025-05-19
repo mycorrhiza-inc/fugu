@@ -8,8 +8,6 @@ use fugu::db::{FuguDB, FuguDBBackend};
 use fugu::server;
 use fugu::tracing_utils;
 
-use fjall;
-
 // Main entry point
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -55,7 +53,7 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
     // Database initialization - properly separated from HTTP server logic
     info!("Initializing database");
 
-    let mut fdb = {
+    let fdb = {
         // Configure fjall with optimized settings
         let config = fjall::Config::new("fugu_db")
             .cache_size(512 * 1024 * 1024) // 512MB cache for better read performance
@@ -78,9 +76,7 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
                 )));
             }
         };
-
-        let fdb = FuguDB::new(keyspace);
-        fdb
+        FuguDB::new(keyspace)
     };
 
     fdb.init_db();
@@ -184,7 +180,7 @@ async fn run_compactor(mut db: FuguDB, mut shutdown_recv: oneshot::Receiver<()>)
             }
 
             // Use &mut to avoid moving the receiver in the loop
-            result = &mut shutdown_recv => {
+            _ = &mut shutdown_recv => {
                 info!("Received shutdown signal, performing final maintenance before stopping");
 
                 // Do a final compaction before shutting down

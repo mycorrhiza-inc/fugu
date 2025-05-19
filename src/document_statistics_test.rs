@@ -4,9 +4,7 @@ mod document_statistics_tests {
     use crate::object::{ArchivableObjectRecord, ObjectRecord};
     use crate::query::{QueryConfig, QueryEngine};
     use crate::rkyv_adapter;
-    use fjall;
     use serde_json::json;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -289,4 +287,3 @@ mod document_statistics_tests {
         println!("Term frequencies: {:?}", term_freqs);
     }
 }
-
