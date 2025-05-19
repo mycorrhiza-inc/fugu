@@ -202,9 +202,6 @@ pub type LocalPath = String;
 //
 // So idea. Store the s3 cache as a lazy static, along with all the configuration needed for doing
 // uploads. And given the following traits:
-use thiserror::Error;
-#[derive(Debug, Error)]
-enum Void {}
 
 trait RemoteFileLocation: Sized {
     fn raw_filepath(&self) -> LocalPath;
@@ -290,21 +287,12 @@ fn hash_from_bytes(bytes: &[u8]) -> HashValue {
 }
 
 // Caching Policies:
-#[derive(Clone, Copy, Serialize, Deserialize, Archive)]
+#[derive(Clone, Copy, Serialize, Deserialize, Archive, Default)]
 struct CacheMeta {
     hash: HashValue,
     last_checked_unixtime_seconds: u64,
 }
 
-#[allow(clippy::all)] // It wants to derive the macro using a derive statement
-impl Default for CacheMeta {
-    fn default() -> Self {
-        CacheMeta {
-            hash: 0,
-            last_checked_unixtime_seconds: 0,
-        }
-    }
-}
 impl CacheMeta {
     fn calc_from_bytes(bytes: &[u8]) -> Self {
         Self {
