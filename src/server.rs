@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::hash_map::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{Instrument, debug, error, info};
@@ -159,17 +160,30 @@ fn word_positions(text: &str) -> impl Iterator<Item = (&str, usize)> {
         })
 }
 
+// Helper function to check if serde_json::Value is effectively empty
+fn is_value_empty(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Bool(false) => false, // false is not empty
+        serde_json::Value::Bool(true) => false,  // false is not empty
+        serde_json::Value::Number(n) => n.as_f64().map(|x| x == 0.0).unwrap_or(false), // 0 is not empty
+        serde_json::Value::String(s) => s.is_empty(),
+        serde_json::Value::Array(arr) => arr.is_empty(),
+        serde_json::Value::Object(obj) => obj.is_empty(),
+    }
+}
 /// Ingest a single object into the database
 async fn ingest_object(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<IndexRequest>,
+    Json(mut payload): Json<IndexRequest>,
 ) -> impl IntoResponse {
     let span = tracing_utils::server_span("/ingest", "POST");
     let _guard = span.enter();
 
     debug!("Ingest endpoint called with ID: {:?}", payload.data.id);
 
-    let object = payload.data;
+    // Extract and normalize fields
+    let mut object = payload.data;
     let object_id = object.id.clone();
 
     // Check if the ID is valid
@@ -217,12 +231,15 @@ async fn ingest_object(
         None
     };
 
-    // Create an ObjectIndex with the object's content
-    let mut inverted_index: HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    // Create the base inverted index for text content
+    let mut inverted_indexes: HashMap<String, HashMap<String, Vec<usize>>> = HashMap::new();
+
+    // Main text index
+    let mut text_index: HashMap<String, Vec<usize>> = HashMap::new();
 
     // Split the content into words and create a simple inverted index
     for (word, pos) in word_positions(&object.text) {
-        match inverted_index.entry(word.to_string()) {
+        match text_index.entry(word.to_string()) {
             Occupied(mut o) => {
                 o.get_mut().push(pos);
             }
@@ -232,11 +249,28 @@ async fn ingest_object(
         };
     }
 
+    // Add the main text index to our collection of indexes
+    inverted_indexes.insert("_text".to_string(), text_index);
+
+    // Process metadata to extract additional fields and create indexes
+    let additional_fields = process_additional_fields(&object);
+
+    // If we have additional fields, merge them into metadata
+    // If we have additional fields, merge them into metadata
+    if !is_value_empty(&additional_fields) {
+        // Create indexes for each additional field using depth-first traversal
+        create_field_indexes(&additional_fields, String::new(), &mut inverted_indexes);
+
+        // Merge additional fields into metadata
+        merge_into_metadata(&mut object.metadata, additional_fields);
+    }
+
     info!(
-        "Created ObjectIndex with ID: {}, containing {} unique terms",
+        "Created ObjectIndex with ID: {}, containing {} field indexes",
         object_id,
-        inverted_index.len()
+        inverted_indexes.len()
     );
+    let indexes_clone = inverted_indexes.clone();
 
     // Keep a copy of the metadata for the response
     let metadata = object.metadata.clone();
@@ -253,11 +287,16 @@ async fn ingest_object(
     // Clone the object for background task
     let object_clone = object.clone();
 
-    // Create an ObjectIndex instance for the database
-    let object_index = ObjectIndex {
-        object_id: object_id.clone(),
-        inverted_index: inverted_index.clone(),
-    };
+    // Create multiple ObjectIndex instances for the database - one for each field
+    let mut object_indexes = Vec::new();
+
+    for (field_name, inverted_index) in inverted_indexes {
+        object_indexes.push(ObjectIndex {
+            object_id: object_id.clone(),
+            field_name,
+            inverted_index,
+        });
+    }
 
     // Get a clone of the shared DB state for the background task
     let db_state = state.db.clone();
@@ -267,8 +306,10 @@ async fn ingest_object(
         // Log that we're starting the database operations
         info!("Adding object to database: {}", object_id);
 
-        // Queue the object for indexing - the compactor will handle the actual database writes
-        db_state.index(object_index);
+        // Queue each field index for indexing
+        for object_index in object_indexes {
+            db_state.index(object_index);
+        }
 
         // Add the record to the RECORDS tree
         info!("Adding object to RECORDS tree: {}", object_id);
@@ -311,11 +352,113 @@ async fn ingest_object(
             "message": if existing_object.is_some() { "Object successfully updated and queued for indexing" } else { "Object successfully created and queued for indexing" },
             "object_id": object_id_for_response,
             "operation": operation_type,
-            "unique_terms": inverted_index.len(),
+            "indexed_fields": indexes_clone.keys().collect::<Vec<_>>(),
             "text_length": text_length,
             "metadata": metadata,
         })),
     )
+}
+
+// Extract additional fields from JSON payload that aren't id, text, or metadata
+fn process_additional_fields(object_record: &ObjectRecord) -> serde_json::Value {
+    // Deserialize the entire object to a Value
+    let serialized = serde_json::to_string(object_record).unwrap_or_default();
+    let mut value: serde_json::Value =
+        serde_json::from_str(&serialized).unwrap_or(serde_json::Value::Null);
+
+    if let serde_json::Value::Object(ref mut map) = value {
+        // Remove the standard fields
+        map.remove("id");
+        map.remove("text");
+        map.remove("metadata");
+
+        // Return the remaining fields as a new Value
+        serde_json::Value::Object(map.clone())
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    }
+}
+
+// Merge additional fields into metadata
+fn merge_into_metadata(metadata: &mut serde_json::Value, additional_fields: serde_json::Value) {
+    if let serde_json::Value::Object(meta_map) = metadata {
+        if let serde_json::Value::Object(add_map) = additional_fields {
+            // Transfer all fields from additional fields to metadata
+            for (key, value) in add_map {
+                meta_map.insert(key, value);
+            }
+        }
+    } else {
+        // If metadata wasn't an object, replace it with additional fields
+        *metadata = additional_fields;
+    }
+}
+
+// Recursively create indexes for all fields depth-first
+fn create_field_indexes(
+    value: &serde_json::Value,
+    prefix: String,
+    indexes: &mut HashMap<String, HashMap<String, Vec<usize>>>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            // Process each field in the object
+            for (key, val) in map {
+                let field_path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{}.{}", prefix, key)
+                };
+
+                // Recursively process nested objects
+                create_field_indexes(val, field_path.clone(), indexes);
+
+                // Create index for this field's string representation
+                let field_str = val.to_string();
+                if !field_str.is_empty() {
+                    let mut field_index: HashMap<String, Vec<usize>> = HashMap::new();
+
+                    // For string values, create term-position pairs
+                    if let serde_json::Value::String(s) = val {
+                        for (word, pos) in word_positions(s) {
+                            match field_index.entry(word.to_string()) {
+                                Occupied(mut o) => {
+                                    o.get_mut().push(pos);
+                                }
+                                Vacant(v) => {
+                                    v.insert(vec![pos]);
+                                }
+                            };
+                        }
+                    } else {
+                        // For non-string values, just index the whole value as a term
+                        field_index.insert(field_str, vec![0]);
+                    }
+
+                    // Only add non-empty indexes
+                    if !field_index.is_empty() {
+                        indexes.insert(field_path, field_index);
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            // Process each item in the array
+            for (i, item) in arr.iter().enumerate() {
+                let item_path = format!("{}[{}]", prefix, i);
+                create_field_indexes(item, item_path, indexes);
+            }
+        }
+        _ => {
+            // For primitive values, index the string representation
+            let field_str = value.to_string();
+            if !field_str.is_empty() && !prefix.is_empty() {
+                let mut field_index = HashMap::new();
+                field_index.insert(field_str, vec![0]);
+                indexes.insert(prefix, field_index);
+            }
+        }
+    }
 }
 
 /// Ingest multiple objects in a batch
@@ -407,6 +550,7 @@ async fn batch_ingest(
         // Create ObjectIndex instance
         let object_index = ObjectIndex {
             object_id: object_id.clone(),
+            field_name: "text".to_string(),
             inverted_index: inverted_index.clone(),
         };
 
@@ -626,6 +770,7 @@ async fn ingest_file(
     // Create the ObjectIndex
     let object_index = ObjectIndex {
         object_id: object_id.clone(),
+        field_name: "text".to_string(),
         inverted_index: inverted_index.clone(),
     };
 
@@ -1061,6 +1206,7 @@ pub async fn create_dummy_record(
     // Create an ObjectIndex instance for the database
     let object_index = ObjectIndex {
         object_id: demo_object.id.clone(),
+        field_name: "text".to_string(),
         inverted_index,
     };
 
@@ -1188,7 +1334,7 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
                                 "id": record.id,
                                 "metadata": record.metadata,
                                 "text_preview": if record.text.len() > 100 {
-                                    format!("{}...", &record.text[..100])
+                                    format!("{}...", &record.text[..100].to_string())
                                 } else {
                                     record.text
                                 }

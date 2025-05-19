@@ -14,8 +14,8 @@ use fjall::GarbageCollection;
 pub const TREE_RECORDS: &str = "records";
 pub const TREE_FILTERS: &str = "filters";
 pub const TREE_GLOBAL_INDEX: &str = "global_index";
-pub const PREFIX_FILTER_INDEX: &str = "filter#";
-pub const PREFIX_RECORD_INDEX_TREE: &str = "index#";
+pub const PREFIX_FILTER_INDEX: &str = "filter$";
+pub const PREFIX_RECORD_INDEX_TREE: &str = "index$";
 
 // Database handle abstraction
 #[derive(Clone)]
@@ -440,7 +440,7 @@ impl FuguDB {
         // First, group objects by their index partitions
         for object_index in &object_indices {
             let object_id = &object_index.object_id;
-            let index_tree_name = format!("{}:{}", PREFIX_RECORD_INDEX_TREE, object_id);
+            let index_tree_name = format!("{}{}", PREFIX_RECORD_INDEX_TREE, object_id);
 
             // Create each partition if it doesn't exist
             match self.open_tree(&index_tree_name) {
