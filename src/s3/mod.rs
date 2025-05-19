@@ -162,20 +162,20 @@ trait RemoteFileLocation: Sized {
     fn raw_filepath(&self) -> LocalPath;
     fn mdata_filepath(&self) -> LocalPath;
     async fn raw_fetch(&self) -> anyhow::Result<Vec<u8>>;
-    async fn raw_upload(&self, bytes: &[u8]) -> anyhow::Result<Self>;
+    async fn raw_upload(&self, bytes: &[u8]) -> anyhow::Result<()>;
 }
 impl RemoteFileLocation for LocalPath {
     async fn raw_fetch(&self) -> anyhow::Result<Vec<u8>> {
         Ok(fs::read(self).await?)
     }
 
-    async fn raw_upload(&self, bytes: &[u8]) -> anyhow::Result<Self> {
+    async fn raw_upload(&self, bytes: &[u8]) -> anyhow::Result<()> {
         let path: PathBuf = self.clone().into();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
         fs::write(&path, bytes).await?;
-        Ok(self.clone())
+        Ok(())
     }
     fn raw_filepath(&self) -> LocalPath {
         self.clone()
@@ -210,7 +210,7 @@ impl RemoteFileLocation for S3Location {
         fs::write(&full_path, &bytes).await?;
         Ok(bytes)
     }
-    async fn raw_upload(&self, bytes: &[u8]) -> anyhow::Result<Self> {
+    async fn raw_upload(&self, bytes: &[u8]) -> anyhow::Result<()> {
         let client = make_s3_client(&DEFAULT_S3_CONFIG, self).await;
         client
             .put_object()
@@ -219,7 +219,7 @@ impl RemoteFileLocation for S3Location {
             .body(bytes.to_vec().into())
             .send()
             .await?;
-        Ok(self.clone())
+        Ok(())
     }
     fn raw_filepath(&self) -> LocalPath {
         CACHE_DIR.to_string() + "/data/" + &self.bucket + "/" + &self.key
@@ -341,7 +341,7 @@ trait FileSystemLocation: RemoteFileLocation {
 
     async fn upload(&self, bytes: &[u8]) -> anyhow::Result<()> {
         let _ = Self::CachePolicy::update_cache(self, bytes).await;
-        let _ = self.raw_upload(bytes).await?;
+        self.raw_upload(bytes).await?;
         Ok(())
     }
 }
