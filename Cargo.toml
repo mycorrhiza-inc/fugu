@@ -3,9 +3,9 @@ name = "fugu"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-default = ["json"]
-json = ["tracing-subscriber/json"]
+[[bin]]
+name = "fugu"
+path = "src/main.rs"
 
 [dependencies]
 actix-web = "4.10.2"
@@ -31,3 +31,4 @@ rand = "0.9.1"
 pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 fjall = "2.10.0"
+num_cpus = "1.16.0"

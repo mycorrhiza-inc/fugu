@@ -18,7 +18,9 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
   cargo chef cook --release --recipe-path recipe.json
-COPY . .
+COPY src/ .
+COPY Cargo.toml .
+COPY Cargo.lock .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
   cargo build --release
@@ -26,4 +28,4 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/target/release/fugu /usr/local/bin
-ENTRYPOINT ["/usr/local/bin/fugu"]
+# ENTRYPOINT ["/usr/local/bin/fugu"]
