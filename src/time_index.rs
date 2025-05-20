@@ -31,9 +31,9 @@ impl TimeIndex {
                 Some(val) => {
                     let mut ids: Vec<DocId> = rkyv_adapter::deserialize(&val)?;
                     ids.push(doc_id);
-                    rkyv_adapter::serialize(&ids)?.to_vec()
+                    rkyv::to_bytes::<rkyv::rancor::Error>(&ids)?.to_vec()
                 }
-                None => rkyv_adapter::serialize(&vec![doc_id])?.to_vec(),
+                None => rkyv::to_bytes::<rkyv::rancor::Error>(&vec![doc_id])?.to_vec(),
             };
             tree.insert(key, updated)?;
             Ok(())

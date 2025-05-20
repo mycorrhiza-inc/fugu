@@ -4,8 +4,8 @@ use crate::db::{
 };
 use crate::object::ArchivableObjectRecord;
 use crate::query_endpoints;
-use crate::tokeinze::{Token, TokenPosition, TokenType, tokenize};
-use crate::{ObjectIndex, ObjectRecord, rkyv_adapter, tracing_utils};
+use crate::tokeinze::{Token, TokenPosition, TokenType, tokenize, tokenize_into_index};
+use crate::{ObjectIndex, ObjectRecord,  tracing_utils};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -16,7 +16,6 @@ use axum::{
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::hash_map::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -220,7 +219,7 @@ async fn ingest_object(
             "Object with ID '{}' already exists, will be updated",
             object_id
         );
-        match rkyv_adapter::deserialize::<ArchivableObjectRecord>(&data) {
+        match rkyv::from_bytes::<ArchivableObjectRecord, rkyv::rancor::Error>(&data) {
             Ok(archivable) => {
                 debug!("Successfully deserialized existing object");
                 Some(archivable)
@@ -240,7 +239,7 @@ async fn ingest_object(
     // Main text index
     let mut text_index: HashMap<String, Vec<TokenPosition>> = HashMap::new();
 
-    tokenize_string(&object.text, &mut text_index).await;
+    tokenize_into_index(&object.text, &mut text_index).await;
 
     // Add the main text index to our collection of indexes
     inverted_indexes.insert("_text".to_string(), text_index);
@@ -315,7 +314,7 @@ async fn ingest_object(
 
         // Convert to archivable format and serialize
         let archivable = ArchivableObjectRecord::from(&object_clone);
-        match rkyv_adapter::serialize(&archivable) {
+        match rkyv::to_bytes::<rkyv::rancor::Error>(&archivable) {
             Ok(serialized) => {
                 // Insert the record using our abstracted handle
                 let object_id_clone = object_id.clone();
@@ -413,7 +412,7 @@ async fn create_field_indexes(
                     // For string values, use our stream tokenizer
                     if let serde_json::Value::String(s) = val {
                         // Use a specialized tokenizer for strings
-                        tokenize_string(s, &mut field_index).await;
+                        tokenize_into_index(s, &mut field_index).await;
                     } else {
                         // For non-string values, just index the whole value as a term
                         // Create a simple position at the start
@@ -455,66 +454,7 @@ async fn create_field_indexes(
     }
 }
 
-// Special tokenizer for strings that doesn't require thread safety
-async fn tokenize_string(text: &str, field_index: &mut HashMap<String, Vec<TokenPosition>>) {
-    // Simple tokenization by splitting on whitespace and punctuation
-    let mut current_pos = 0;
-    let mut char_indices = text.char_indices().peekable();
 
-    while let Some((i, c)) = char_indices.next() {
-        if c.is_whitespace() {
-            current_pos = i + c.len_utf8();
-            continue;
-        }
-
-        // Start of a token
-        let token_start = current_pos;
-
-        // Determine if this is a word character
-        let is_word_char = c.is_alphanumeric() || c == '_';
-
-        // Consume characters until we hit whitespace or a change in character type
-        let mut token_text = String::new();
-        token_text.push(c);
-
-        while let Some(&(_, next_c)) = char_indices.peek() {
-            let next_is_word_char = next_c.is_alphanumeric() || next_c == '_';
-
-            // Break if character type changes or we hit whitespace
-            if next_c.is_whitespace() || next_is_word_char != is_word_char {
-                break;
-            }
-
-            let (_, consumed_c) = char_indices.next().unwrap();
-            token_text.push(consumed_c);
-        }
-
-        let token_end = token_start + token_text.len();
-        current_pos = token_end;
-
-        // Only index word tokens (skip punctuation)
-        if is_word_char {
-            // Normalize to lowercase
-            let normalized_word = token_text.to_lowercase();
-
-            // Create token position
-            let pos = TokenPosition {
-                start: token_start,
-                end: token_end,
-            };
-
-            // Add to the inverted index
-            match field_index.entry(normalized_word) {
-                Occupied(mut o) => {
-                    o.get_mut().push(pos);
-                }
-                Vacant(v) => {
-                    v.insert(vec![pos]);
-                }
-            };
-        }
-    }
-}
 /// Ingest multiple objects in a batch
 
 async fn batch_ingest(
@@ -588,10 +528,11 @@ async fn batch_ingest(
         };
 
         // Create inverted index for the object
-        let mut inverted_index: HashMap<String, Vec<TokenPosition>> = std::collections::HashMap::new();
+        let mut inverted_index: HashMap<String, Vec<TokenPosition>> =
+            std::collections::HashMap::new();
 
         // Use our specialized tokenizer instead of word_positions
-        tokenize_string(&object.text, &mut inverted_index).await;
+        tokenize_into_index(&object.text, &mut inverted_index).await;
 
         // Create ObjectIndex instance
         let object_index = ObjectIndex {
@@ -639,7 +580,7 @@ async fn batch_ingest(
         for object in objects_for_storage {
             // Convert to archivable format and serialize
             let archivable = ArchivableObjectRecord::from(&object);
-            match rkyv_adapter::serialize(&archivable) {
+            match rkyv::to_bytes::<rkyv::rancor::Error>(&archivable) {
                 Ok(serialized) => {
                     // Insert the record into the tree
                     let id_clone = object.id.clone();
@@ -800,7 +741,7 @@ async fn ingest_file(
     // Create inverted index
     let mut inverted_index: HashMap<String, Vec<TokenPosition>> = std::collections::HashMap::new();
 
-    tokenize_string(&object.text, &mut inverted_index).await;
+    tokenize_into_index(&object.text, &mut inverted_index).await;
 
     // Create the ObjectIndex
     let object_index = ObjectIndex {
@@ -844,7 +785,7 @@ async fn ingest_file(
 
         // Convert to archivable format and serialize
         let archivable = ArchivableObjectRecord::from(&object_clone);
-        match rkyv_adapter::serialize(&archivable) {
+        match rkyv::to_bytes::<rkyv::rancor::Error>(&archivable) {
             Ok(serialized) => {
                 // Insert the record into the tree
                 let obj_id_clone = object_id.clone();
@@ -1018,7 +959,7 @@ async fn list_object_terms(
                 // Try to convert key to string (term)
                 if let Ok(term) = std::str::from_utf8(&key) {
                     // Try to deserialize value to positions
-                    match rkyv_adapter::deserialize::<Vec<usize>>(&value) {
+                    match rkyv::from_bytes::<Vec<TokenPosition>, rkyv::rancor::Error>(&value) {
                         Ok(positions) => {
                             terms.push(json!({
                                 "term": term,
@@ -1109,8 +1050,10 @@ async fn list_global_terms(State(state): State<Arc<AppState>>) -> Json<Value> {
                     match item {
                         Ok((key, value)) => {
                             if let Ok(term) = std::str::from_utf8(&key) {
-                                if let Ok(positions) =
-                                    rkyv_adapter::deserialize::<Vec<usize>>(&value)
+                                if let Ok(positions) = rkyv::from_bytes::<
+                                    Vec<TokenPosition>,
+                                    rkyv::rancor::Error,
+                                >(&value)
                                 {
                                     // Update stats for this term
                                     if let Some(existing) = term_stats.get_mut(term) {
@@ -1228,14 +1171,14 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
                 // Try to convert key to string
                 if let Ok(key_str) = std::str::from_utf8(&key) {
                     // Try to deserialize value to ArchivableObjectRecord and convert to ObjectRecord
-                    match rkyv_adapter::deserialize::<ArchivableObjectRecord>(&value) {
+                    match rkyv::from_bytes::<ArchivableObjectRecord, rkyv::rancor::Error>(&value) {
                         Ok(archivable) => {
                             let record = ObjectRecord::from(archivable);
                             objects.push(json!({
                                 "id": record.id,
                                 "metadata": record.metadata,
                                 "text_preview": if record.text.len() > 100 {
-                                    format!("{}...", &record.text[..100])
+                                    format!("{}...", &record.text)
                                 } else {
                                     record.text
                                 }
@@ -1256,7 +1199,7 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
                                 // Serialize it
                                 // Convert to archivable format for storage
                                 let archivable = ArchivableObjectRecord::from(&replacement);
-                                match rkyv_adapter::serialize(&archivable) {
+                                match rkyv::to_bytes::<rkyv::rancor::Error>(&archivable) {
                                     Ok(serialized) => {
                                         // Try to replace the corrupted record
                                         if let Err(err) =

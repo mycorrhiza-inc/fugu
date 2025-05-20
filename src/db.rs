@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use fjall;
 use fjall::KvSeparationOptions;
+use rkyv::{rancor, util::AlignedVec};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -9,6 +10,8 @@ use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use fjall::GarbageCollection;
+
+use crate::tokeinze::{Token, TokenPosition};
 
 // Constants for tree/partition names
 pub const TREE_RECORDS: &str = "records";
@@ -340,8 +343,10 @@ impl FuguDB {
         if let Ok(tree) = self.open_tree(TREE_RECORDS) {
             if let Ok(Some(data)) = tree.get(key) {
                 // Try to deserialize the record
-                if let Ok(archivable) =
-                    crate::rkyv_adapter::deserialize::<crate::object::ArchivableObjectRecord>(&data)
+                if let Ok(archivable) = rkyv::from_bytes::<
+                    crate::object::ArchivableObjectRecord,
+                    rkyv::rancor::Error,
+                >(&data)
                 {
                     return Some(crate::object::ObjectRecord::from(archivable));
                 }
@@ -404,7 +409,7 @@ impl FuguDB {
                     // Merge existing positions with new positions
                     let mut merged_positions = current_positions;
                     // Convert positions to u64 for merging (matching our serialization format)
-                    let positions_u64: Vec<u64> = positions.iter().map(|&p| p as u64).collect();
+                    let positions_u64: Vec<TokenPosition> = positions.iter().map(|&p| p).collect();
                     merged_positions.extend(positions_u64);
 
                     // Serialize and write back the merged positions
@@ -497,8 +502,9 @@ impl FuguDB {
 
                         // Merge existing positions with new positions
                         let mut merged_positions = current_positions;
-                        // Convert positions to u64 for merging
-                        let positions_u64: Vec<u64> = positions.iter().map(|&p| p as u64).collect();
+                        // Convert positions for merging
+                        let positions_u64: Vec<TokenPosition> =
+                            positions.iter().map(|&p| p).collect();
                         merged_positions.extend(positions_u64);
 
                         // Serialize and write back the merged positions
@@ -683,22 +689,18 @@ impl BatchOperation {
 }
 
 // Helper function to serialize positions to a byte vector
-pub fn serialize_positions(positions: &Vec<u64>) -> Result<Vec<u8>> {
-    crate::rkyv_adapter::serialize(positions)
-        .map_err(|e| anyhow!("Failed to serialize positions: {}", e))
-}
-
-// Helper function for backward compatibility with usize positions
-pub fn serialize_positions_from_usize(positions: &[usize]) -> Result<Vec<u8>> {
-    // Convert to u64 as that's what our serialization format expects
-    let positions_u64: Vec<u64> = positions.iter().map(|&p| p as u64).collect();
-    serialize_positions(&positions_u64)
+pub fn serialize_positions(positions: &Vec<TokenPosition>) -> Result<Vec<u8>> {
+    let k: Result<AlignedVec, rkyv::rancor::Error> = rkyv::to_bytes(positions);
+    match k {
+        Ok(v) => Ok(v.to_vec()),
+        Err(e) => Err(anyhow!("Failed to serialize positions: {}", e)),
+    }
 }
 
 // Helper function to deserialize positions from a byte slice
-pub fn deserialize_positions(bytes: &[u8]) -> Result<Vec<u64>> {
-    crate::rkyv_adapter::deserialize(bytes)
-        .map_err(|e| anyhow!("Failed to deserialize positions: {}", e))
+pub fn deserialize_positions(bytes: &[u8]) -> Result<Vec<TokenPosition>> {
+    rkyv::from_bytes(bytes)
+        .map_err(|e: rkyv::rancor::Error| anyhow!("Failed to deserialize positions: {}", e))
 }
 
 // Tests for the unified database API
