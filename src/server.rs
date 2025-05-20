@@ -1334,7 +1334,7 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
                                 "id": record.id,
                                 "metadata": record.metadata,
                                 "text_preview": if record.text.len() > 100 {
-                                    format!("{}...", &record.text[..100].to_string())
+                                    format!("{}...", &record.text[..100])
                                 } else {
                                     record.text
                                 }

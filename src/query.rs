@@ -12,7 +12,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{Instrument, debug, error, info, warn};
-use num_cpus;
 
 /// Query configuration options
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,7 +26,6 @@ pub struct QueryConfig {
     pub max_results: usize,
     /// Context window size for snippets
     pub snippet_context_size: usize,
-    pub max_total_snippets: u32,
     /// BM25 k1 parameter (kept for compatibility)
     pub bm25_k1: f64,
     /// BM25 b parameter (kept for compatibility)
@@ -41,7 +39,6 @@ impl Default for QueryConfig {
             highlight_snippets: true,
             min_score_threshold: 0.1,
             max_results: 1000,
-            max_total_snippets: 32,
             snippet_context_size: 50,
             bm25_k1: 1.2,
             bm25_b: 0.75,
@@ -519,7 +516,7 @@ impl QueryEngine {
         Self { db, config }
     }
 
-    pub fn _execute(&self, query: Query) -> Result<Vec<ScoredDocument>> {
+    pub fn execute(&self, query: Query) -> Result<Vec<ScoredDocument>> {
         let span = tracing_utils::db_span("query_execute");
         let _enter = span.enter();
 
@@ -703,358 +700,116 @@ impl QueryEngine {
 
         Ok(documents)
     }
-// Updated execute method with parallel document scoring
-pub async fn execute(&self, query: Query) -> Result<Vec<ScoredDocument>> {
-    let span = tracing_utils::db_span("query_execute");
-    let _enter = span.enter();
 
-    let start_time = Instant::now();
-    info!("Executing query: {:?}", query);
+    /// Execute a query and return scored results
+    pub fn __execute(&self, query: Query) -> Result<Vec<ScoredDocument>> {
+        let span = tracing_utils::db_span("query_execute");
+        let _enter = span.enter();
 
-    // Parse the query
-    let parsed_query = self.parse_query(query)?;
+        let start_time = Instant::now();
+        info!("Executing query: {:?}", query);
 
-    // Log the parsed query for debugging
-    info!("Parsed query: {:?}", parsed_query);
+        // Parse the query
+        let parsed_query = self.parse_query(query)?;
 
-    // IMPORTANT: If we have no terms, return early
-    if parsed_query.terms.is_empty() {
-        info!("Query has no terms, returning empty result");
-        return Ok(Vec::new());
-    }
+        // Collect document statistics for scoring
+        let (doc_count, avg_doc_length, term_freq) = self.collect_document_statistics()?;
 
-    // Collect document statistics for scoring
-    let (doc_count, avg_doc_length, term_freq) = self.collect_document_statistics()?;
-    info!(
-        "Document stats: count={}, avg_length={:.2}",
-        doc_count, avg_doc_length
-    );
-
-    // ⚠️ FIX: Consistently use lowercase terms throughout
-    let query_terms: Vec<String> = parsed_query
-        .terms
-        .iter()
-        .map(|t| t.text.to_lowercase()) // Convert to lowercase
-        .collect();
-
-    // Get term positions from the inverted index
-    let mut term_positions = HashMap::new();
-    for term in &query_terms {
-        let positions_result = self.get_term_positions(term);
-
-        match positions_result {
-            Ok(positions_map) => {
-                let positions = TermIndex::from_hashmap(positions_map);
-                info!(
-                    "Term '{}': found in {} documents with {} total positions",
-                    term,
-                    positions.terms.len(),
-                    positions.terms.values().map(|v| v.len()).sum::<usize>()
-                );
-
-                // ⚠️ Use the same lowercase term here
-                term_positions.insert(term.clone(), positions.terms);
-            }
-            Err(e) => {
-                // Log the error but continue with other terms
-                warn!("Error getting positions for term '{}': {:?}", term, e);
-            }
+        // Get term positions from the inverted index
+        let mut term_positions = HashMap::new();
+        for term in &parsed_query.terms {
+            let positions =
+                TermIndex::from_hashmap(self.get_term_positions(&term.text.to_lowercase())?);
+            info!("got {} positions: \n{}", positions.terms.len(), positions);
+            term_positions.insert(term.text.clone(), positions.terms);
         }
-    }
-
-    // Debug: Check if we have any terms with positions
-    if term_positions.is_empty() {
-        info!("No terms found in index, returning empty result");
-        return Ok(Vec::new());
-    }
-
-    // Score documents based on term positions and document statistics
-    // This is where we'll parallelize using Tokio tasks
-    let scored_docs = self.score_documents_parallel(
-        &query_terms,
-        &term_positions,
-        doc_count,
-        avg_doc_length,
-        &parsed_query.logical_operator,
-    ).await;
-
-    // Debug: Check if we have any scored documents
-    info!("Scored {} documents", scored_docs.len());
-
-    // Sort by score descending
-    let mut results: Vec<_> = scored_docs.into_iter().collect();
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-
-    // Debug: Log score distribution
-    if !results.is_empty() {
-        let max_score = results.first().map(|(_, s)| *s).unwrap_or(0.0);
-        let min_score = results.last().map(|(_, s)| *s).unwrap_or(0.0);
-        info!(
-            "Score range: {:.4} to {:.4}, threshold: {:.4}",
-            max_score, min_score, self.config.min_score_threshold
+        let query_terms = QueryTerms(
+            parsed_query
+                .terms
+                .iter()
+                .map(|t| t.text.clone())
+                .collect::<Vec<_>>(),
         );
-    }
+        info!("queyr_terms: {}", query_terms);
 
-    // Apply limit
-    let limit = parsed_query.limit.unwrap_or(self.config.default_limit);
-    let offset = parsed_query.offset.unwrap_or(0);
-
-    // ⚠️ NEW: Collect before filtering to debug threshold issue
-    let results_before_filter = results.iter().skip(offset).take(limit).collect::<Vec<_>>();
-
-    info!(
-        "Before threshold filter: {} results",
-        results_before_filter.len()
-    );
-
-    if !results_before_filter.is_empty() {
-        info!(
-            "Sample scores before filter: {:?}",
-            results_before_filter.iter().take(5).collect::<Vec<_>>()
+        // Score documents based on term positions and document statistics
+        let scored_docs = self.score_documents(
+            &query_terms.0,
+            &term_positions,
+            doc_count,
+            avg_doc_length,
+            &parsed_query.logical_operator,
         );
-    }
 
-    let results = results
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .filter(|(_, score)| {
-            let passes = *score >= self.config.min_score_threshold;
-            if !passes {
-                debug!(
-                    "Filtering out doc with score {:.4} < threshold {:.4}",
-                    *score, self.config.min_score_threshold
-                );
-            }
-            passes
-        })
-        .collect::<Vec<_>>();
+        // Sort by score descending
+        let mut results: Vec<_> = scored_docs.into_iter().collect();
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
-    info!(
-        "Found {} results in {:.2?}",
-        results.len(),
-        start_time.elapsed()
-    );
+        // Apply limit
+        let limit = parsed_query.limit.unwrap_or(self.config.default_limit);
+        let offset = parsed_query.offset.unwrap_or(0);
+        let results = results
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .filter(|(_, score)| *score >= self.config.min_score_threshold)
+            .collect::<Vec<_>>();
 
-    // Build the final result objects
-    let mut documents = Vec::new();
-    for (doc_id, score) in results {
-        let mut highlights = None;
-        let mut metadata = None;
+        info!(
+            "Found {} results in {:.2?}",
+            results.len(),
+            start_time.elapsed()
+        );
 
-        // Fetch full document record
-        if let Some(record) = self.db.get(&doc_id) {
-            metadata = Some(record.metadata.clone());
+        // Build the final result objects
+        let mut documents = Vec::new();
+        for (doc_id, score) in results {
+            let mut highlights = None;
+            let mut metadata = None;
 
-            // Add highlights if enabled and score is above threshold
-            if self.config.highlight_snippets && score >= self.config.min_score_threshold {
-                // Extract positions for this document across all terms
-                let mut doc_term_positions = HashMap::new();
-                for (term, positions_map) in &term_positions {
-                    if let Some(positions) = positions_map.get(&doc_id) {
-                        doc_term_positions.insert(term.clone(), positions.clone());
-                    }
-                }
+            // Fetch full document record
+            if let Some(record) = self.db.get(&doc_id) {
+                metadata = Some(record.metadata.clone());
 
-                let snippets =
-                    self.create_highlights(&record.text, &query_terms, &doc_term_positions);
-
-                if !snippets.is_empty() {
-                    highlights = Some(snippets);
-                }
-            }
-        } else {
-            warn!("Document with ID {} not found in database", doc_id);
-        }
-        let scored_doc = ScoredDocument {
-            id: doc_id.clone(), // Clone since we're creating a single document
-            score,
-            metadata: metadata.clone(), // Clone to avoid ownership issues
-            highlights: highlights.clone(), // Clone to avoid ownership issues
-        };
-
-        // Log the document details for debugging
-        debug!("Document details:\n{}", scored_doc);
-
-        documents.push(ScoredDocument {
-            id: doc_id,
-            score,
-            metadata,
-            highlights,
-        });
-    }
-
-    let search_results = SearchResults(documents.clone());
-    info!("Search results:\n{}", search_results);
-
-    Ok(documents)
-}
-
-// New parallelized scoring method
-async fn score_documents_parallel(
-    &self,
-    terms: &[String],
-    term_positions: &HashMap<String, HashMap<String, Vec<TermPosition>>>,
-    doc_count: usize,
-    avg_doc_length: f64,
-    operator: &LogicalOperator,
-) -> HashMap<String, f64> {
-    info!("Parallel scoring documents");
-    
-    // First, collect all unique document IDs across all terms
-    let mut all_doc_ids = HashSet::new();
-    for term_pos_map in term_positions.values() {
-        for doc_id in term_pos_map.keys() {
-            all_doc_ids.insert(doc_id.clone());
-        }
-    }
-    
-    info!("Found {} unique documents to score", all_doc_ids.len());
-    
-    // For AND operator, we need to pre-filter to only include docs with all terms
-    let docs_to_process = if let LogicalOperator::And = operator {
-        // Start with all doc IDs
-        let mut docs_with_all_terms = all_doc_ids.clone();
-        
-        // For each term, keep only docs that contain that term
-        for term in terms {
-            if let Some(positions) = term_positions.get(term) {
-                let term_docs: HashSet<String> = positions.keys().cloned().collect();
-                docs_with_all_terms = docs_with_all_terms
-                    .intersection(&term_docs)
-                    .cloned()
-                    .collect();
-                
-                // If at any point no docs remain, we can return early
-                if docs_with_all_terms.is_empty() {
-                    info!("No documents contain all terms, returning empty result");
-                    return HashMap::new();
-                }
-            } else {
-                // This term has no matches, so AND logic returns empty
-                info!("Term '{}' not found in index, AND returns empty", term);
-                return HashMap::new();
-            }
-        }
-        
-        info!("After AND filtering: {} documents to score", docs_with_all_terms.len());
-        docs_with_all_terms
-    } else {
-        // For OR, process all docs
-        all_doc_ids
-    };
-
-    // Use Arc for thread-safe sharing of the input data
-    let terms_arc = Arc::new(terms.to_vec());
-    let term_positions_arc = Arc::new(term_positions.clone());
-    let operator_arc = Arc::new(operator.clone());
-    
-    // Chunk size - experiment with this for optimal performance
-    let chunk_size = (docs_to_process.len() / num_cpus::get()).max(1);
-    info!("Processing in chunks of ~{} documents", chunk_size);
-    
-    // Create chunks of doc IDs to process in parallel
-    let chunked_docs: Vec<Vec<String>> = docs_to_process
-        .into_iter()
-        .collect::<Vec<_>>()
-        .chunks(chunk_size)
-        .map(|chunk| chunk.to_vec())
-        .collect();
-    
-    // Create a vector to collect all the task handles
-    let mut tasks = Vec::with_capacity(chunked_docs.len());
-    
-    // Create a task for each chunk
-    for (i, chunk) in chunked_docs.into_iter().enumerate() {
-        let terms = terms_arc.clone();
-        let term_positions = term_positions_arc.clone();
-        let operator = operator_arc.clone();
-        let chunk_len = chunk.len();
-        
-        // Spawn a Tokio task for this chunk
-        let task = tokio::spawn(async move {
-            let mut chunk_scores = HashMap::new();
-            info!("Task {} processing {} documents", i, chunk_len);
-            
-            // Process each document in this chunk
-            for doc_id in chunk {
-                let mut doc_score = match *operator {
-                    LogicalOperator::And => 1.0, // For AND, start with 1.0 (multiplicative identity)
-                    LogicalOperator::Or => 0.0,  // For OR, start with 0.0 (additive identity)
-                };
-                
-                // Process each term for this document
-                for term in terms.iter() {
-                    if let Some(positions) = term_positions.get(term) {
-                        if let Some(term_positions_in_doc) = positions.get(&doc_id) {
-                            // TF calculation
-                            let tf = term_positions_in_doc.len() as f64;
-                            
-                            // Position bias
-                            let position_sum: f64 = term_positions_in_doc
-                                .iter()
-                                .map(|pos| 1.0 / (1.0 + pos.position as f64 * 0.01))
-                                .sum();
-                            
-                            // Avoid division by zero
-                            let position_score = if term_positions_in_doc.is_empty() {
-                                0.0
-                            } else {
-                                position_sum / term_positions_in_doc.len() as f64
-                            };
-                            
-                            // Safe IDF calculation
-                            let idf = (1.0
-                                + (doc_count as f64 - positions.len() as f64 + 0.5)
-                                    / (positions.len() as f64 + 0.5))
-                                .ln();
-                            
-                            // Combined score - ensure it's positive
-                            let score = tf * idf * position_score;
-                            
-                            // Apply score based on logical operator
-                            match *operator {
-                                LogicalOperator::And => doc_score *= score,
-                                LogicalOperator::Or => doc_score += score,
-                            }
+                // Add highlights if enabled and score is above threshold
+                if self.config.highlight_snippets && score >= self.config.min_score_threshold {
+                    // Extract positions for this document across all terms
+                    let mut doc_term_positions = HashMap::new();
+                    for (term, positions_map) in &term_positions {
+                        if let Some(positions) = positions_map.get(&doc_id) {
+                            doc_term_positions.insert(term.clone(), positions.clone());
                         }
                     }
-                }
-                
-                // Add the final score for this document
-                chunk_scores.insert(doc_id, doc_score);
-            }
-            
-            chunk_scores
-        });
-        
-        tasks.push(task);
-    }
-    
-    // Wait for all tasks to complete and combine results
-    let mut final_scores = HashMap::new();
-    
-    for task in tasks {
-        match task.await {
-            Ok(chunk_scores) => {
-                // Merge this chunk's scores into the final result
-                for (doc_id, score) in chunk_scores {
-                    final_scores.insert(doc_id, score);
-                }
-            }
-            Err(e) => {
-                error!("Task failed: {:?}", e);
-            }
-        }
-    }
-    
-    info!("Parallel scoring complete: {} documents scored", final_scores.len());
-    final_scores
-}
 
-    
+                    let snippets = self.create_highlights(
+                        &record.text,
+                        &parsed_query
+                            .terms
+                            .iter()
+                            .map(|t| t.text.clone())
+                            .collect::<Vec<_>>(),
+                        &doc_term_positions,
+                    );
+
+                    if !snippets.is_empty() {
+                        highlights = Some(snippets);
+                    }
+                }
+            }
+
+            documents.push(ScoredDocument {
+                id: doc_id,
+                score,
+                metadata,
+                highlights,
+            });
+        }
+
+        Ok(documents)
+    }
+
     /// Compatibility method for the old API - search using text query
-    pub async fn search_text(&self, query_text: &str, limit: Option<usize>) -> Result<QueryResults> {
+    pub fn search_text(&self, query_text: &str, limit: Option<usize>) -> Result<QueryResults> {
         let start_time = Instant::now();
         info!("Executing text search: {}", query_text);
 
@@ -1076,7 +831,7 @@ async fn score_documents_parallel(
         );
 
         // Execute the query
-        let scored_docs = self.execute(query).await.unwrap();
+        let scored_docs = self.execute(query)?;
 
         info!("Found {} documents matching query", scored_docs.len());
 
@@ -1089,7 +844,7 @@ async fn score_documents_parallel(
     }
 
     /// Compatibility method for the old API - search using JSON
-    pub async fn search_json(&self, query_json: Value, limit: Option<usize>) -> Result<QueryResults> {
+    pub fn search_json(&self, query_json: Value, limit: Option<usize>) -> Result<QueryResults> {
         let start_time = Instant::now();
 
         // Extract query text from JSON
@@ -1108,7 +863,7 @@ async fn score_documents_parallel(
         let final_limit = limit.or(json_limit);
 
         // Just delegate to search_text for the actual search
-        let mut results = self.search_text(&query_text, final_limit).await.unwrap();
+        let mut results = self.search_text(&query_text, final_limit)?;
 
         // Apply any filters from the JSON
         if let Some(Value::Array(filters)) = query_json.get("filters") {
@@ -1480,81 +1235,62 @@ async fn score_documents_parallel(
     ) -> Vec<String> {
         let mut snippets = Vec::new();
         let context_size = self.config.snippet_context_size;
+
         let words: Vec<&str> = text.split_whitespace().collect();
-        
+
         // For each matched term, create snippets
         for term in terms {
             if let Some(positions) = term_positions.get(term) {
                 for position in positions {
                     let pos = position.position;
-                    
-                    // Ensure pos is within bounds of the words array
-                    if pos >= words.len() {
-                        warn!("Position {} out of bounds for document with {} words", pos, words.len());
-                        continue;
-                    }
-                    
+
                     // Calculate snippet boundaries
                     let start = if pos > context_size {
                         pos - context_size
                     } else {
                         0
                     };
-                    
                     let end = std::cmp::min(pos + context_size + 1, words.len());
-                    
+
                     if end > start {
                         // Create the snippet with highlighting
-                        let prefix = if start < pos {
-                            words[start..pos].join(" ")
-                        } else {
-                            String::new()
-                        };
-                        
+                        let prefix = words[start..pos].join(" ");
                         let matched_term = words[pos];
-                        
-                        // Fix: Only try to access words[pos+1..end] if pos+1 < end
                         let suffix = if pos + 1 < end {
                             words[pos + 1..end].join(" ")
                         } else {
                             String::new()
                         };
-                        
+
                         // Create prefixed and suffixed strings once to avoid temporary value issues
                         let formatted_prefix = if prefix.is_empty() {
                             String::new()
                         } else {
                             format!("{} ", prefix)
                         };
-                        
                         let formatted_suffix = if suffix.is_empty() {
                             String::new()
                         } else {
                             format!(" {}", suffix)
                         };
-                        
+
                         // Now use the stored strings
                         let snippet = format!(
-                            "{}<b>{}</b>{}",
+                            "{}**{}**{}",
                             formatted_prefix, matched_term, formatted_suffix
                         );
-                        
+
                         snippets.push(snippet);
                     }
-                    
+
                     // Limit the number of snippets
-                    // if snippets.len() >= self.config.max_snippets_per_term {
-                    //     break;
-                    // }
+                    if snippets.len() >= 3 {
+                        break;
+                    }
                 }
             }
         }
-        
-        // Limit total number of snippets across all terms
-        // if snippets.len() > self.config.max_total_snippets {
-        //     snippets.truncate(self.config.max_total_snippets);
-        // }
-        
+
         snippets
     }
 }
