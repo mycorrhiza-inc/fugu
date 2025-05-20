@@ -2,6 +2,9 @@ use futures::{future::poll_fn, pin_mut, stream::BoxStream};
 use lazy_static::lazy_static;
 use regex::Regex;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
+use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::collections::hash_map::HashMap;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -9,7 +12,16 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio_stream::{Stream, StreamExt};
 
-#[derive(Debug, Clone, PartialEq, Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+    SerdeSerialize,
+    SerdeDeserialize,
+)]
 pub enum TokenType {
     Word,
     Number,
@@ -22,13 +34,15 @@ pub enum TokenType {
     PageHeader,
 }
 
-#[derive(Clone, Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(
+    Clone, Copy, Debug, Archive, RkyvDeserialize, RkyvSerialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub struct TokenPosition {
     pub start: usize,
     pub end: usize,
 }
 
-#[derive(Clone, Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Clone, Archive, RkyvDeserialize, RkyvSerialize, SerdeSerialize, SerdeDeserialize)]
 pub struct Token {
     pub text: String,
     pub pos: TokenPosition, // Start position in the original text
@@ -67,31 +81,39 @@ struct TokenPatterns {
     pagehead_re: Regex,
 }
 
-lazy_static! {
-    static ref TOKEN_PATTERNS: Arc<TokenPatterns> = Arc::new(TokenPatterns {
-        email_re: Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap(),
-        url_re: Regex::new(r"^https?://[^\s/$.?#].[^\s]*$").unwrap(),
-        host_re: Regex::new(r"^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$").unwrap(),
-        acronym_re: Regex::new(r"^[A-Z](\.[A-Z])+$").unwrap(),
-        alphanum_re: Regex::new(r"^[a-zA-Z0-9]+$").unwrap(),
-        number_re: Regex::new(r"^[0-9]+(\.[0-9]+)?$").unwrap(),
-        word_re: Regex::new(r"^[a-zA-Z]+$").unwrap(),
-        punct_re: Regex::new(r"^[^\w\s]$").unwrap(),
-        pagehead_re: Regex::new(r"[<!--\s*Page number:\s*\d+\s*-->$").unwrap(),
-    });
-}
+// lazy_static! {
+//     static ref TOKEN_PATTERNS: Arc<TokenPatterns> = Arc::new(TokenPatterns {
+//         email_re: Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap(),
+//         url_re: Regex::new(r"^https?://[^\s/$.?#].[^\s]*$").unwrap(),
+//         host_re: Regex::new(r"^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$").unwrap(),
+//         acronym_re: Regex::new(r"^[A-Z](\.[A-Z])+$").unwrap(),
+//         alphanum_re: Regex::new(r"^[a-zA-Z0-9]+$").unwrap(),
+//         number_re: Regex::new(r"^[0-9]+(\.[0-9]+)?$").unwrap(),
+//         word_re: Regex::new(r"^[a-zA-Z]+$").unwrap(),
+//         punct_re: Regex::new(r"^[^\w\s]$").unwrap(),
+//         pagehead_re: Regex::new(r"[<!--\s*Page number:\s*\d+\s*-->$").unwrap(),
+//     });
+// }
 
 impl<R: AsyncRead + Unpin> StandardTokenizer<R> {
     pub fn new(reader: R) -> Self {
-        let patterns = TOKEN_PATTERNS.clone();
-
         Self {
             reader: BufReader::new(reader),
             position: 0,
             current_line: String::new(),
             current_line_position: 0,
             next_tokens: Vec::new(),
-            token_patterns: Arc::clone(&patterns), // Properly clone the Arc reference
+            token_patterns: Arc::new(TokenPatterns {
+                email_re: Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap(),
+                url_re: Regex::new(r"^https?://[^\s/$.?#].[^\s]*$").unwrap(),
+                host_re: Regex::new(r"^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$").unwrap(),
+                acronym_re: Regex::new(r"^[A-Z](\.[A-Z])+$").unwrap(),
+                alphanum_re: Regex::new(r"^[a-zA-Z0-9]+$").unwrap(),
+                number_re: Regex::new(r"^[0-9]+(\.[0-9]+)?$").unwrap(),
+                word_re: Regex::new(r"^[a-zA-Z]+$").unwrap(),
+                punct_re: Regex::new(r"^[^\w\s]$").unwrap(),
+                pagehead_re: Regex::new(r"<!--\s*Page number:\s*\d+\s*-->$").unwrap(),
+            }), // Properly clone the Arc reference
         }
     }
 
@@ -202,6 +224,11 @@ impl<R: AsyncRead + Unpin> StandardTokenizer<R> {
         if self.token_patterns.alphanum_re.is_match(text) {
             return TokenType::AlphaNum;
         }
+        
+        // Pages
+        if self.token_patterns.pagehead_re.is_match(text) {
+            return TokenType::PageHeader;
+        }
 
         // Default
         TokenType::Punctuation
@@ -217,16 +244,19 @@ impl<R: AsyncRead + Unpin> Stream for StandardTokenizer<R> {
             return Poll::Ready(Some(Ok(self.next_tokens.remove(0))));
         }
 
-        // Otherwise, we need to fill our token buffer
+        // We need to fill our token buffer
         let this = &mut *self;
 
-        match poll_fn(|cx| {
+        // Create a future using poll_fn and pin it
+        let future = poll_fn(|cx| {
             let future = this.fill_token_buffer();
             pin_mut!(future);
             future.poll(cx)
-        })
-        .poll(cx)
-        {
+        });
+
+        // Pin the future and poll it
+        let mut pinned_future = Box::pin(future);
+        match pinned_future.as_mut().poll(cx) {
             Poll::Ready(Ok(())) => {
                 if this.next_tokens.is_empty() {
                     // No more tokens, we're done
@@ -279,5 +309,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => eprintln!("Error: {}", e),
         }
     }
+    Ok(())
+}
+
+// Special tokenizer for strings that doesn't require thread safety
+
+pub async fn tokenize_into_index(
+    text: &str,
+    field_index: &mut HashMap<String, Vec<TokenPosition>>,
+) -> Result<(), std::io::Error> {
+    // Create owned copy of the text to avoid lifetime issues
+    let text_owned = text.to_string();
+    let cursor = std::io::Cursor::new(text_owned);
+
+    // Create a tokenizer directly instead of using the tokenize function
+    // which returns a 'static stream
+    let mut tokenizer = StandardTokenizer::new(cursor);
+
+    while let Some(token_result) = StreamExt::next(&mut tokenizer).await {
+        match token_result {
+            Ok(token) => {
+                // Skip punctuation tokens for indexing
+                if matches!(
+                    token.token_type,
+                    TokenType::Punctuation | TokenType::PageHeader
+                ) {
+                    continue;
+                }
+
+                // Normalize to lowercase for indexing
+                let normalized_word = token.text.to_lowercase();
+
+                match field_index.entry(normalized_word) {
+                    Occupied(mut o) => {
+                        o.get_mut().push(token.pos);
+                    }
+                    Vacant(v) => {
+                        v.insert(vec![token.pos]);
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(())
+}
+
+// Update tokenize_query to use the StandardTokenizer
+pub async fn tokenize_query(text: &str, tokens: &mut Vec<Token>) -> Result<(), std::io::Error> {
+    // Create owned copy of the text to avoid lifetime issues
+    let text_owned = text.to_string();
+    let cursor = std::io::Cursor::new(text_owned);
+
+    // Create a tokenizer directly instead of using the tokenize function
+    let mut tokenizer = StandardTokenizer::new(cursor);
+
+    while let Some(token_result) = StreamExt::next(&mut tokenizer).await {
+        match token_result {
+            Ok(token) => {
+                tokens.push(token);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
     Ok(())
 }

@@ -1,5 +1,6 @@
 use crate::db::FuguDB;
 use crate::object::ObjectRecord;
+use crate::tokeinze::{Token, TokenPosition, TokenType, tokenize_query};
 use crate::tracing_utils;
 use anyhow::{Context, Result, anyhow};
 use futures_util::future::FutureExt; // For now_or_never
@@ -13,6 +14,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{Instrument, debug, error, info, warn};
 
+// Struct definition for completeness
+#[derive(Debug, Clone)]
+pub struct ParsedQuery {
+    pub terms: Vec<Token>,
+    pub logical_operator: LogicalOperator,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
 /// Query configuration options
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueryConfig {
@@ -35,7 +44,7 @@ pub struct QueryConfig {
 impl Default for QueryConfig {
     fn default() -> Self {
         Self {
-            default_limit: 10,
+            default_limit: 1000,
             highlight_snippets: true,
             min_score_threshold: 0.1,
             max_results: 1000,
@@ -108,13 +117,13 @@ impl FromStr for LogicalOperator {
 /// A position of a term in a document
 #[derive(Clone, Debug)]
 pub struct TermPosition {
-    pub position: usize,
+    pub position: TokenPosition,
     pub document_id: String,
 }
 
 impl fmt::Display for TermPosition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.document_id, self.position)
+        write!(f, "{}:{}", self.document_id, self.position.start)
     }
 }
 
@@ -516,15 +525,18 @@ impl QueryEngine {
         Self { db, config }
     }
 
-    pub fn execute(&self, query: Query) -> Result<Vec<ScoredDocument>> {
+    pub async fn execute(&self, query: Query) -> anyhow::Result<Vec<ScoredDocument>> {
         let span = tracing_utils::db_span("query_execute");
         let _enter = span.enter();
 
         let start_time = Instant::now();
         info!("Executing query: {:?}", query);
 
-        // Parse the query
-        let parsed_query = self.parse_query(query)?;
+        // Parse the query using StandardTokenizer
+        let parsed_query = self
+            .parse_query(query)
+            .await
+            .context("Failed to parse query")?;
 
         // Log the parsed query for debugging
         info!("Parsed query: {:?}", parsed_query);
@@ -536,23 +548,27 @@ impl QueryEngine {
         }
 
         // Collect document statistics for scoring
-        let (doc_count, avg_doc_length, term_freq) = self.collect_document_statistics()?;
+        let (doc_count, avg_doc_length, term_freq) = self
+            .collect_document_statistics()
+            .context("Failed to collect document statistics")?;
         info!(
             "Document stats: count={}, avg_length={:.2}",
             doc_count, avg_doc_length
         );
 
-        // ⚠️ FIX: Consistently use lowercase terms throughout
+        // Get query terms from the parsed tokens with proper normalization
         let query_terms: Vec<String> = parsed_query
             .terms
             .iter()
-            .map(|t| t.text.to_lowercase()) // Convert to lowercase
+            .map(|t| t.text.to_lowercase()) // Ensure consistent lowercase for searching
             .collect();
 
         // Get term positions from the inverted index
         let mut term_positions = HashMap::new();
         for term in &query_terms {
-            let positions_result = self.get_term_positions(term);
+            let positions_result = self
+                .get_term_positions(term)
+                .with_context(|| format!("Failed to get positions for term '{}'", term));
 
             match positions_result {
                 Ok(positions_map) => {
@@ -564,7 +580,6 @@ impl QueryEngine {
                         positions.terms.values().map(|v| v.len()).sum::<usize>()
                     );
 
-                    // ⚠️ Use the same lowercase term here
                     term_positions.insert(term.clone(), positions.terms);
                 }
                 Err(e) => {
@@ -610,7 +625,7 @@ impl QueryEngine {
         let limit = parsed_query.limit.unwrap_or(self.config.default_limit);
         let offset = parsed_query.offset.unwrap_or(0);
 
-        // ⚠️ NEW: Collect before filtering to debug threshold issue
+        // Debug collection before filtering
         let results_before_filter = results.iter().skip(offset).take(limit).collect::<Vec<_>>();
 
         info!(
@@ -677,15 +692,6 @@ impl QueryEngine {
             } else {
                 warn!("Document with ID {} not found in database", doc_id);
             }
-            let scored_doc = ScoredDocument {
-                id: doc_id.clone(), // Clone since we're creating a single document
-                score,
-                metadata: metadata.clone(), // Clone to avoid ownership issues
-                highlights: highlights.clone(), // Clone to avoid ownership issues
-            };
-
-            // Log the document details for debugging
-            debug!("Document details:\n{}", scored_doc);
 
             documents.push(ScoredDocument {
                 id: doc_id,
@@ -701,128 +707,41 @@ impl QueryEngine {
         Ok(documents)
     }
 
-    /// Execute a query and return scored results
-    pub fn __execute(&self, query: Query) -> Result<Vec<ScoredDocument>> {
-        let span = tracing_utils::db_span("query_execute");
-        let _enter = span.enter();
-
-        let start_time = Instant::now();
-        info!("Executing query: {:?}", query);
-
-        // Parse the query
-        let parsed_query = self.parse_query(query)?;
-
-        // Collect document statistics for scoring
-        let (doc_count, avg_doc_length, term_freq) = self.collect_document_statistics()?;
-
-        // Get term positions from the inverted index
-        let mut term_positions = HashMap::new();
-        for term in &parsed_query.terms {
-            let positions =
-                TermIndex::from_hashmap(self.get_term_positions(&term.text.to_lowercase())?);
-            info!("got {} positions: \n{}", positions.terms.len(), positions);
-            term_positions.insert(term.text.clone(), positions.terms);
-        }
-        let query_terms = QueryTerms(
-            parsed_query
-                .terms
-                .iter()
-                .map(|t| t.text.clone())
-                .collect::<Vec<_>>(),
-        );
-        info!("queyr_terms: {}", query_terms);
-
-        // Score documents based on term positions and document statistics
-        let scored_docs = self.score_documents(
-            &query_terms.0,
-            &term_positions,
-            doc_count,
-            avg_doc_length,
-            &parsed_query.logical_operator,
-        );
-
-        // Sort by score descending
-        let mut results: Vec<_> = scored_docs.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-
-        // Apply limit
-        let limit = parsed_query.limit.unwrap_or(self.config.default_limit);
-        let offset = parsed_query.offset.unwrap_or(0);
-        let results = results
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .filter(|(_, score)| *score >= self.config.min_score_threshold)
-            .collect::<Vec<_>>();
-
-        info!(
-            "Found {} results in {:.2?}",
-            results.len(),
-            start_time.elapsed()
-        );
-
-        // Build the final result objects
-        let mut documents = Vec::new();
-        for (doc_id, score) in results {
-            let mut highlights = None;
-            let mut metadata = None;
-
-            // Fetch full document record
-            if let Some(record) = self.db.get(&doc_id) {
-                metadata = Some(record.metadata.clone());
-
-                // Add highlights if enabled and score is above threshold
-                if self.config.highlight_snippets && score >= self.config.min_score_threshold {
-                    // Extract positions for this document across all terms
-                    let mut doc_term_positions = HashMap::new();
-                    for (term, positions_map) in &term_positions {
-                        if let Some(positions) = positions_map.get(&doc_id) {
-                            doc_term_positions.insert(term.clone(), positions.clone());
-                        }
-                    }
-
-                    let snippets = self.create_highlights(
-                        &record.text,
-                        &parsed_query
-                            .terms
-                            .iter()
-                            .map(|t| t.text.clone())
-                            .collect::<Vec<_>>(),
-                        &doc_term_positions,
-                    );
-
-                    if !snippets.is_empty() {
-                        highlights = Some(snippets);
-                    }
-                }
-            }
-
-            documents.push(ScoredDocument {
-                id: doc_id,
-                score,
-                metadata,
-                highlights,
-            });
-        }
-
-        Ok(documents)
-    }
-
-    /// Compatibility method for the old API - search using text query
-    pub fn search_text(&self, query_text: &str, limit: Option<usize>) -> Result<QueryResults> {
+    pub async fn search_text(
+        &self,
+        query_text: &str,
+        limit: Option<usize>,
+    ) -> anyhow::Result<QueryResults> {
         let start_time = Instant::now();
         info!("Executing text search: {}", query_text);
 
-        // Create a query from the text, splitting it into separate terms
-        let mut query = Query::default();
+        // Create a query from the text using our StandardTokenizer
+        let mut tokens = Vec::new();
 
-        // Split the query text into individual words for better search
-        for term in query_text.split_whitespace() {
-            query.terms.push(QueryTerm::new(term));
-        }
+        // Use the tokenizer to properly tokenize the input
+        tokenize_query(query_text, &mut tokens)
+            .await
+            .context("Failed to tokenize query text")?;
 
-        query.logical_operator = LogicalOperator::Or;
-        query.limit = limit;
+        // Convert tokens to QueryTerms, filtering out non-searchable tokens
+        let query_terms: Vec<QueryTerm> = tokens
+            .into_iter()
+            .filter(|token| {
+                !matches!(
+                    token.token_type,
+                    TokenType::Punctuation | TokenType::PageHeader
+                )
+            })
+            .map(|token| QueryTerm::new(&token.text))
+            .collect();
+
+        // Create the query
+        let query = Query {
+            terms: query_terms,
+            logical_operator: LogicalOperator::And,
+            limit,
+            offset: None,
+        };
 
         info!(
             "Search terms: {:?}, operator: {:?}",
@@ -831,7 +750,10 @@ impl QueryEngine {
         );
 
         // Execute the query
-        let scored_docs = self.execute(query)?;
+        let scored_docs = self
+            .execute(query)
+            .await
+            .context("Failed to execute query")?;
 
         info!("Found {} documents matching query", scored_docs.len());
 
@@ -843,8 +765,12 @@ impl QueryEngine {
         })
     }
 
-    /// Compatibility method for the old API - search using JSON
-    pub fn search_json(&self, query_json: Value, limit: Option<usize>) -> Result<QueryResults> {
+    // Update search_json to be async
+    pub async fn search_json(
+        &self,
+        query_json: Value,
+        limit: Option<usize>,
+    ) -> Result<QueryResults> {
         let start_time = Instant::now();
 
         // Extract query text from JSON
@@ -863,7 +789,7 @@ impl QueryEngine {
         let final_limit = limit.or(json_limit);
 
         // Just delegate to search_text for the actual search
-        let mut results = self.search_text(&query_text, final_limit)?;
+        let mut results = self.search_text(&query_text, final_limit).await?;
 
         // Apply any filters from the JSON
         if let Some(Value::Array(filters)) = query_json.get("filters") {
@@ -876,15 +802,81 @@ impl QueryEngine {
 
         Ok(results)
     }
+    pub async fn parse_query(&self, query: Query) -> anyhow::Result<ParsedQuery> {
+        let span = tracing_utils::db_span("parse_query");
+        let _enter = span.enter();
 
-    /// Parse a query into terms
-    fn parse_query(&self, query: Query) -> Result<Query> {
-        // For now we just do minimal validation
+        info!("Parsing query with {} terms", query.terms.len());
+
+        // If there are no terms, return an empty parsed query
         if query.terms.is_empty() {
-            return Err(anyhow!("Query must have at least one term"));
+            info!("Query has no terms, returning empty parsed query");
+            return Ok(ParsedQuery {
+                terms: Vec::new(),
+                logical_operator: query.logical_operator,
+                limit: query.limit,
+                offset: query.offset,
+            });
         }
 
-        Ok(query)
+        // Convert each QueryTerm to a full Token
+        let mut all_tokens = Vec::new();
+
+        let mut token_tasks = Vec::new();
+
+        for query_term in &query.terms {
+            let term_text = query_term.text.clone();
+
+            // Spawn a task for each term tokenization
+            let task = tokio::spawn(async move {
+                let mut tokens = Vec::new();
+                match tokenize_query(&term_text, &mut tokens).await {
+                    Ok(_) => Ok(tokens),
+                    Err(e) => Err(anyhow!("Failed to tokenize term '{}': {}", term_text, e)),
+                }
+            });
+
+            token_tasks.push(task);
+        }
+
+        // Await all tokenization tasks
+        for task in token_tasks {
+            match task.await {
+                Ok(Ok(tokens)) => all_tokens.extend(tokens),
+                Ok(Err(e)) => return Err(e),
+                Err(e) => return Err(anyhow!("Task join error: {}", e)),
+            }
+        }
+
+        // Filter out any tokens that shouldn't be used for search
+        let terms: Vec<Token> = all_tokens
+            .into_iter()
+            .filter(|token| {
+                !matches!(
+                    token.token_type,
+                    TokenType::Punctuation | TokenType::PageHeader
+                )
+            })
+            .collect();
+
+        info!("Parsed {} tokens from query terms", terms.len());
+
+        if !terms.is_empty() {
+            let term_debug = terms
+                .iter()
+                .map(|t| format!("'{}' ({:?})", t.text, t.token_type))
+                .collect::<Vec<_>>()
+                .join(", ");
+            debug!("Query tokens: {}", term_debug);
+        }
+
+        // Construct the parsed query
+        Ok(ParsedQuery {
+            terms,
+            logical_operator: query.logical_operator,
+            limit: query.limit,
+            offset: query.offset,
+        })
     }
 
     /// Collect document statistics for scoring
@@ -929,8 +921,9 @@ impl QueryEngine {
                     doc_count += 1;
 
                     // Try to deserialize the record
-                    if let Ok(archivable) = crate::rkyv_adapter::deserialize::<
+                    if let Ok(archivable) = rkyv::from_bytes::<
                         crate::object::ArchivableObjectRecord,
+                        rkyv::rancor::Error,
                     >(&value_vec)
                     {
                         let record = ObjectRecord::from(archivable);
@@ -996,7 +989,7 @@ impl QueryEngine {
                         let term_positions: Vec<TermPosition> = positions
                             .iter()
                             .map(|&pos| TermPosition {
-                                position: pos as usize, // Convert u64 to usize
+                                position: pos, // Convert u64 to usize
                                 document_id: object_id.clone(),
                             })
                             .collect();
@@ -1040,192 +1033,99 @@ impl QueryEngine {
         operator: &LogicalOperator,
     ) -> HashMap<String, f64> {
         let mut document_scores = HashMap::new();
-        info!("scoring docs");
-        // Debug info
-        info!(
-            "Scoring docs with {} terms using {:?} operator",
-            terms.len(),
-            operator
-        );
-        info!("Terms: {:?}", terms);
-        info!(
-            "Available terms in index: {:?}",
-            term_positions.keys().collect::<Vec<_>>()
-        );
 
-        // Simple BM25 scoring with position bias
-        // For each term, score documents containing it
+        // For AND logic, pre-filter documents to those containing all terms
+        let docs_to_process = if let LogicalOperator::And = operator {
+            // Find documents containing all terms
+            let mut docs_with_all_terms: Option<HashSet<String>> = None;
+
+            for term in terms {
+                if let Some(positions) = term_positions.get(term) {
+                    let term_docs: HashSet<String> = positions.keys().cloned().collect();
+
+                    match &docs_with_all_terms {
+                        None => docs_with_all_terms = Some(term_docs),
+                        Some(current_docs) => {
+                            // Intersection with previous terms
+                            let intersection: HashSet<String> =
+                                current_docs.intersection(&term_docs).cloned().collect();
+
+                            docs_with_all_terms = Some(intersection);
+
+                            // Early exit if intersection is empty
+                            if docs_with_all_terms.as_ref().unwrap().is_empty() {
+                                return HashMap::new();
+                            }
+                        }
+                    }
+                } else {
+                    // Term not found, no documents match all terms
+                    return HashMap::new();
+                }
+            }
+
+            docs_with_all_terms
+        } else {
+            // For OR, include all documents with any term
+            None
+        };
+
+        // Calculate document lengths once
+
+        // Cache IDF values for each term
+        let mut idf_cache = HashMap::new();
+
+        // Score only relevant documents (all for OR, intersection for AND)
         for term in terms {
-            info!("Processing term: {}", term);
-
             if let Some(positions) = term_positions.get(term) {
-                info!("Found term '{}' in {} documents", term, positions.len());
+                // Calculate IDF once per term
+                let idf = {
+                    let doc_freq = positions.len();
+                    (1.0 + (doc_count as f64 - doc_freq as f64 + 0.5) / (doc_freq as f64 + 0.5))
+                        .ln()
+                };
+                idf_cache.insert(term, idf);
 
                 for (doc_id, term_positions_in_doc) in positions {
-                    // TF calculation
+                    // Skip if we're doing AND and this doc isn't in all terms
+                    if let Some(ref docs_with_all_terms) = docs_to_process {
+                        if !docs_with_all_terms.contains(doc_id) {
+                            continue;
+                        }
+                    }
+
+                    // Calculate position score once
                     let tf = term_positions_in_doc.len() as f64;
 
-                    // Position bias
+                    // Position bias calculation
                     let position_sum: f64 = term_positions_in_doc
                         .iter()
-                        .map(|pos| 1.0 / (1.0 + pos.position as f64 * 0.01))
+                        .map(|pos| 1.0 / (1.0 + pos.position.start as f64 * 0.01))
                         .sum();
 
-                    // Avoid division by zero
                     let position_score = if term_positions_in_doc.is_empty() {
                         0.0
                     } else {
                         position_sum / term_positions_in_doc.len() as f64
                     };
 
-                    // Use safe IDF calculation
-                    let idf = (1.0
-                        + (doc_count as f64 - positions.len() as f64 + 0.5)
-                            / (positions.len() as f64 + 0.5))
-                        .ln();
-
-                    // Combined score - ensure it's positive
+                    // Combine scores more efficiently
                     let score = tf * idf * position_score;
-                    info!(
-                        "  Doc {}: tf={:.2}, idf={:.2}, pos_score={:.2}, total_score={:.4}",
-                        doc_id, tf, idf, position_score, score
-                    );
 
                     match operator {
                         LogicalOperator::Or => {
-                            // For OR, we sum scores
-                            let entry = document_scores.entry(doc_id.clone()).or_insert(0.0);
-                            *entry += score;
+                            *document_scores.entry(doc_id.clone()).or_insert(0.0) += score;
                         }
                         LogicalOperator::And => {
-                            // For AND, we multiply scores
-                            let entry = document_scores.entry(doc_id.clone()).or_insert(1.0);
-                            *entry *= score;
+                            *document_scores.entry(doc_id.clone()).or_insert(1.0) *= score;
                         }
                     }
                 }
-            } else {
-                info!("Term '{}' not found in index", term);
             }
         }
-        // for term in terms {
-        //     if let Some(positions) = term_positions.get(term) {
-        //         for (doc_id, term_positions) in positions {
-        //             // For simplicity, calculate score as term frequency with position bias
-        //             // (positions closer to the start of the document get higher weight)
-        //             let tf = term_positions.len() as f64;
-        //
-        //             // Position bias - positions closer to the start get higher weight
-        //             let position_sum: f64 = term_positions
-        //                 .iter()
-        //                 .map(|pos| 1.0 / (1.0 + pos.position as f64 * 0.01))
-        //                 .sum();
-        //
-        //             let position_score = position_sum / term_positions.len() as f64;
-        //
-        //             // TF-IDF component
-        //             let idf = (doc_count as f64 / positions.len() as f64).ln();
-        //
-        //             // Combined score
-        //             let score = tf * idf * position_score;
-        //
-        //             // Accumulate scores based on the logical operator
-        //             match operator {
-        //                 LogicalOperator::And => {
-        //                     // For AND, we multiply scores
-        //                     let entry = document_scores.entry(doc_id.clone()).or_insert(1.0);
-        //                     *entry *= score;
-        //                 }
-        //                 LogicalOperator::Or => {
-        //                     // For OR, we sum scores
-        //                     let entry = document_scores.entry(doc_id.clone()).or_insert(0.0);
-        //                     *entry += score;
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
-        // Log the result
-        info!(
-            "Final document scores: {} documents with scores",
-            document_scores.len()
-        );
-        if document_scores.len() < 10 {
-            info!("Scores: {:?}", document_scores);
-        }
-
-        return document_scores;
-
-        // For AND logic, keep only documents that contain all terms
-        if let LogicalOperator::And = operator {
-            // Start with an empty result if any term has no matches
-            for term in terms {
-                if term_positions.get(term).is_none()
-                    || term_positions.get(term).unwrap().is_empty()
-                {
-                    document_scores.clear();
-                    return document_scores;
-                }
-            }
-
-            // Get documents that contain all terms
-            let mut docs_to_keep = HashSet::new();
-            let mut is_first_term = true;
-
-            for term in terms {
-                if let Some(positions) = term_positions.get(term) {
-                    let term_docs: HashSet<&String> = positions.keys().collect();
-
-                    if is_first_term {
-                        // Initialize with docs from first term
-                        docs_to_keep = term_docs.iter().cloned().collect();
-                        is_first_term = false;
-                    } else {
-                        // Keep only docs that also contain this term (intersection)
-                        docs_to_keep = docs_to_keep.intersection(&term_docs).cloned().collect();
-                    }
-
-                    // If intersection is empty, no documents match all terms
-                    if docs_to_keep.is_empty() {
-                        document_scores.clear();
-                        break;
-                    }
-                }
-            }
-
-            // Keep only documents that contain all terms
-            document_scores.retain(|doc_id, _| docs_to_keep.contains(doc_id));
-        }
-        // // For AND logic, filter out documents that don't contain all terms
-        // if let LogicalOperator::And = operator {
-        //     let all_docs: std::collections::HashSet<&String> = term_positions
-        //         .values()
-        //         .flat_map(|positions| positions.keys())
-        //         .collect();
-        //
-        //     for term in terms {
-        //         if let Some(positions) = term_positions.get(term) {
-        //             let term_docs: std::collections::HashSet<&String> = positions.keys().collect();
-        //
-        //             let missing_docs: Vec<String> = all_docs
-        //                 .difference(&term_docs)
-        //                 .map(|s| (*s).clone())
-        //                 .collect();
-        //
-        //             for doc_id in missing_docs {
-        //                 document_scores.remove(&doc_id);
-        //             }
-        //         } else {
-        //             // This term has no matching documents, so AND logic would return empty
-        //             document_scores.clear();
-        //             break;
-        //         }
-        //     }
-        // }
 
         document_scores
     }
-
     /// Create highlighted snippets for a matched document
     fn create_highlights(
         &self,
@@ -1233,61 +1133,103 @@ impl QueryEngine {
         terms: &[String],
         term_positions: &HashMap<String, Vec<TermPosition>>,
     ) -> Vec<String> {
-        let mut snippets = Vec::new();
+        const MAX_SNIPPETS: usize = 3; // Make this configurable if needed
         let context_size = self.config.snippet_context_size;
 
-        let words: Vec<&str> = text.split_whitespace().collect();
+        let mut snippets = Vec::new();
+        let mut used_ranges = HashSet::new(); // To avoid overlapping snippets
 
-        // For each matched term, create snippets
+        // Split text into words for snippets
+        let words: Vec<&str> = text.split_whitespace().collect();
+        if words.is_empty() {
+            return Vec::new(); // Early return for empty text
+        }
+
+        // Get all terms with their positions
+        let mut all_positions: Vec<(&String, &TermPosition)> = Vec::new();
         for term in terms {
             if let Some(positions) = term_positions.get(term) {
                 for position in positions {
-                    let pos = position.position;
-
-                    // Calculate snippet boundaries
-                    let start = if pos > context_size {
-                        pos - context_size
-                    } else {
-                        0
-                    };
-                    let end = std::cmp::min(pos + context_size + 1, words.len());
-
-                    if end > start {
-                        // Create the snippet with highlighting
-                        let prefix = words[start..pos].join(" ");
-                        let matched_term = words[pos];
-                        let suffix = if pos + 1 < end {
-                            words[pos + 1..end].join(" ")
-                        } else {
-                            String::new()
-                        };
-
-                        // Create prefixed and suffixed strings once to avoid temporary value issues
-                        let formatted_prefix = if prefix.is_empty() {
-                            String::new()
-                        } else {
-                            format!("{} ", prefix)
-                        };
-                        let formatted_suffix = if suffix.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" {}", suffix)
-                        };
-
-                        // Now use the stored strings
-                        let snippet = format!(
-                            "{}**{}**{}",
-                            formatted_prefix, matched_term, formatted_suffix
-                        );
-
-                        snippets.push(snippet);
-                    }
-
-                    // Limit the number of snippets
-                    if snippets.len() >= 3 {
-                        break;
-                    }
+                    all_positions.push((term, position));
                 }
+            }
+        }
+
+        // Sort positions by their location in the text (for natural reading order)
+        all_positions.sort_by_key(|(_, pos)| pos.position.start);
+
+        // Process positions to create snippets
+        for (term, position) in all_positions {
+            let pos = position.position;
+
+            // Validate position is in bounds
+            if pos.start >= words.len() || pos.end > words.len() || pos.start == pos.end {
+                continue; // Skip invalid positions
+            }
+
+            // Calculate snippet boundaries with context
+            let start = if pos.start > context_size {
+                pos.start - context_size
+            } else {
+                0
+            };
+
+            let end = std::cmp::min(pos.end + context_size, words.len());
+
+            // Check for overlap with existing snippets
+            let current_range = (start, end);
+            let overlaps = used_ranges.iter().any(|&(s, e)| {
+                (s <= start && start < e) || // Start within existing range
+            (s < end && end <= e) ||     // End within existing range
+            (start <= s && e <= end) // Existing range entirely within current range
+            });
+
+            if overlaps {
+                continue; // Skip overlapping snippets
+            }
+
+            used_ranges.insert(current_range);
+
+            // Create snippet parts
+            let before = if start < pos.start {
+                words[start..pos.start].join(" ")
+            } else {
+                String::new()
+            };
+
+            // Get the actual matched text
+            let matched = words[pos.start..pos.end].join(" ");
+
+            let after = if pos.end < end {
+                words[pos.end..end].join(" ")
+            } else {
+                String::new()
+            };
+
+            // Construct the snippet with highlighting
+            let mut snippet = String::with_capacity(
+                before.len() + matched.len() + after.len() + 10, // Additional space for formatting
+            );
+
+            if !before.is_empty() {
+                snippet.push_str(&before);
+                snippet.push_str(" ");
+            }
+
+            snippet.push_str("<b>");
+            snippet.push_str(&matched);
+            snippet.push_str("</b>");
+
+            if !after.is_empty() {
+                snippet.push_str(" ");
+                snippet.push_str(&after);
+            }
+
+            snippets.push(snippet);
+
+            // Check if we've hit the maximum number of snippets
+            if snippets.len() >= MAX_SNIPPETS {
+                break;
             }
         }
 

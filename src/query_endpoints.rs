@@ -48,7 +48,7 @@ pub async fn query_text_get(
         let engine = QueryEngine::new(state.db.clone(), config);
 
         // Execute the query
-        match engine.search_text(&params.q, params.limit) {
+        match engine.search_text(&params.q, params.limit).await {
             Ok(results) => {
                 info!(
                     total_hits = results.total_hits,
@@ -105,7 +105,7 @@ pub async fn query_text_path(
         let engine = QueryEngine::new(state.db.clone(), config);
 
         // Execute the query
-        match engine.search_text(&decoded_query, params.limit) {
+        match engine.search_text(&decoded_query, params.limit).await {
             Ok(results) => {
                 info!(
                     total_hits = results.total_hits,
@@ -170,7 +170,7 @@ pub async fn query_json_post(
             .map(|v| v as usize);
 
         // Execute the query
-        match engine.search_json(json_query, top_k) {
+        match engine.search_json(json_query, top_k).await {
             Ok(results) => {
                 info!(
                     total_hits = results.total_hits,
@@ -298,7 +298,7 @@ pub async fn query_advanced_post(
         // Execute the query based on type
         if has_filters || has_boost {
             // JSON query with advanced features
-            match engine.search_json(payload.clone(), Some(default_limit)) {
+            match engine.search_json(payload.clone(), Some(default_limit)).await {
                 Ok(results) => {
                     info!(
                         total_hits = results.total_hits,
@@ -321,7 +321,7 @@ pub async fn query_advanced_post(
             }
         } else {
             // Simple text query
-            match engine.search_text(query_text, limit) {
+            match engine.search_text(query_text, limit).await {
                 Ok(results) => {
                     info!(
                         total_hits = results.total_hits,

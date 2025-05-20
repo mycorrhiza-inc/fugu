@@ -3,6 +3,7 @@ mod query_tests {
     use crate::db::FuguDB;
     use crate::object::{ObjectIndex, ObjectRecord};
     use crate::query::*;
+    use crate::tokeinze::TokenPosition;
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -56,14 +57,14 @@ mod query_tests {
             let archivable = crate::object::ArchivableObjectRecord::from(doc);
 
             // Serialize and insert
-            let serialized = crate::rkyv_adapter::serialize(&archivable)
+            let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&archivable)
                 .expect("Failed to serialize test document");
             records_tree
                 .insert(doc.id.as_bytes(), serialized)
                 .expect("Failed to insert test document");
 
             // Create and index document terms
-            let mut inverted_index = HashMap::new();
+            let mut inverted_index : HashMap<String, Vec<TokenPosition>>= HashMap::new();
             let terms: Vec<&str> = doc.text.split_whitespace().collect();
 
             for (pos, term) in terms.iter().enumerate() {

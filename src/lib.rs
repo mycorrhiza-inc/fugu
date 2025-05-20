@@ -9,7 +9,6 @@ pub mod server;
 mod document_statistics_test;
 #[cfg(test)]
 mod query_test;
-pub mod rkyv_adapter;
 #[cfg(test)]
 mod test_inverted_index;
 mod tokeinze;
