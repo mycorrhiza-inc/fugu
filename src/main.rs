@@ -59,7 +59,7 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
         // Configure fjall with optimized settings
         let config = fjall::Config::new("fugu_db")
             .cache_size(512 * 1024 * 1024) // 512MB cache for better read performance
-            .max_write_buffer_size(64 * 1024 * 1024) // 64MB write buffer for better write performance
+            .max_write_buffer_size(256 * 1024 * 1024) // 64MB write buffer for better write performance
             .compaction_workers(4) // Use 4 threads for compaction
             .flush_workers(2) // Use 2 threads for flushing
             .manual_journal_persist(false) // Automatic persistence

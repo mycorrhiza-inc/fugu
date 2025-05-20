@@ -12,6 +12,7 @@ mod query_test;
 pub mod rkyv_adapter;
 #[cfg(test)]
 mod test_inverted_index;
+mod tokeinze;
 pub mod tracing_utils;
 pub use object::{ObjectIndex, ObjectRecord};
 pub use query::{QueryConfig, QueryEngine, QueryHit, QueryResults};

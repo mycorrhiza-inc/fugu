@@ -2,12 +2,13 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap as StandardHashMap;
+use crate::tokeinze::{ TokenPosition};
 
 #[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 pub struct ObjectIndex {
     pub object_id: String,
     pub field_name: String,
-    pub inverted_index: StandardHashMap<String, Vec<usize>>, // term : positions
+    pub inverted_index: StandardHashMap<String, Vec<TokenPosition>>, // term : positions
 }
 // Structure for a object that can be indexed
 // Note: We can't directly derive Archive for a struct containing serde_json::Value

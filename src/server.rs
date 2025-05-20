@@ -4,6 +4,7 @@ use crate::db::{
 };
 use crate::object::ArchivableObjectRecord;
 use crate::query_endpoints;
+use crate::tokeinze::{Token, TokenPosition, TokenType, tokenize};
 use crate::{ObjectIndex, ObjectRecord, rkyv_adapter, tracing_utils};
 use axum::{
     Json, Router,
@@ -177,6 +178,8 @@ async fn ingest_object(
     State(state): State<Arc<AppState>>,
     Json(mut payload): Json<IndexRequest>,
 ) -> impl IntoResponse {
+    use tokio_stream::StreamExt; // Add this import to bring StreamExt trait into scope
+
     let span = tracing_utils::server_span("/ingest", "POST");
     let _guard = span.enter();
 
@@ -232,22 +235,12 @@ async fn ingest_object(
     };
 
     // Create the base inverted index for text content
-    let mut inverted_indexes: HashMap<String, HashMap<String, Vec<usize>>> = HashMap::new();
+    let mut inverted_indexes: HashMap<String, HashMap<String, Vec<TokenPosition>>> = HashMap::new();
 
     // Main text index
-    let mut text_index: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut text_index: HashMap<String, Vec<TokenPosition>> = HashMap::new();
 
-    // Split the content into words and create a simple inverted index
-    for (word, pos) in word_positions(&object.text) {
-        match text_index.entry(word.to_string()) {
-            Occupied(mut o) => {
-                o.get_mut().push(pos);
-            }
-            Vacant(v) => {
-                v.insert(vec![pos]);
-            }
-        };
-    }
+    tokenize_string(&object.text, &mut text_index).await;
 
     // Add the main text index to our collection of indexes
     inverted_indexes.insert("_text".to_string(), text_index);
@@ -255,7 +248,6 @@ async fn ingest_object(
     // Process metadata to extract additional fields and create indexes
     let additional_fields = process_additional_fields(&object);
 
-    // If we have additional fields, merge them into metadata
     // If we have additional fields, merge them into metadata
     if !is_value_empty(&additional_fields) {
         // Create indexes for each additional field using depth-first traversal
@@ -395,10 +387,10 @@ fn merge_into_metadata(metadata: &mut serde_json::Value, additional_fields: serd
 }
 
 // Recursively create indexes for all fields depth-first
-fn create_field_indexes(
+async fn create_field_indexes(
     value: &serde_json::Value,
     prefix: String,
-    indexes: &mut HashMap<String, HashMap<String, Vec<usize>>>,
+    indexes: &mut HashMap<String, HashMap<String, Vec<TokenPosition>>>,
 ) {
     match value {
         serde_json::Value::Object(map) => {
@@ -407,32 +399,29 @@ fn create_field_indexes(
                 let field_path = if prefix.is_empty() {
                     key.clone()
                 } else {
-                    format!("{}.{}", prefix, key)
+                    format!("{}#{}", prefix, key)
                 };
 
                 // Recursively process nested objects
-                create_field_indexes(val, field_path.clone(), indexes);
+                Box::pin(create_field_indexes(val, field_path.clone(), indexes)).await;
 
                 // Create index for this field's string representation
                 let field_str = val.to_string();
                 if !field_str.is_empty() {
-                    let mut field_index: HashMap<String, Vec<usize>> = HashMap::new();
+                    let mut field_index: HashMap<String, Vec<TokenPosition>> = HashMap::new();
 
-                    // For string values, create term-position pairs
+                    // For string values, use our stream tokenizer
                     if let serde_json::Value::String(s) = val {
-                        for (word, pos) in word_positions(s) {
-                            match field_index.entry(word.to_string()) {
-                                Occupied(mut o) => {
-                                    o.get_mut().push(pos);
-                                }
-                                Vacant(v) => {
-                                    v.insert(vec![pos]);
-                                }
-                            };
-                        }
+                        // Use a specialized tokenizer for strings
+                        tokenize_string(s, &mut field_index).await;
                     } else {
                         // For non-string values, just index the whole value as a term
-                        field_index.insert(field_str, vec![0]);
+                        // Create a simple position at the start
+                        let pos = TokenPosition {
+                            start: 0,
+                            end: field_str.len(),
+                        };
+                        field_index.insert(field_str, vec![pos]);
                     }
 
                     // Only add non-empty indexes
@@ -446,7 +435,7 @@ fn create_field_indexes(
             // Process each item in the array
             for (i, item) in arr.iter().enumerate() {
                 let item_path = format!("{}[{}]", prefix, i);
-                create_field_indexes(item, item_path, indexes);
+                Box::pin(create_field_indexes(item, item_path, indexes)).await;
             }
         }
         _ => {
@@ -454,14 +443,80 @@ fn create_field_indexes(
             let field_str = value.to_string();
             if !field_str.is_empty() && !prefix.is_empty() {
                 let mut field_index = HashMap::new();
-                field_index.insert(field_str, vec![0]);
+                // Create a position object for the primitive value
+                let pos = TokenPosition {
+                    start: 0,
+                    end: field_str.len(),
+                };
+                field_index.insert(field_str, vec![pos]);
                 indexes.insert(prefix, field_index);
             }
         }
     }
 }
 
+// Special tokenizer for strings that doesn't require thread safety
+async fn tokenize_string(text: &str, field_index: &mut HashMap<String, Vec<TokenPosition>>) {
+    // Simple tokenization by splitting on whitespace and punctuation
+    let mut current_pos = 0;
+    let mut char_indices = text.char_indices().peekable();
+
+    while let Some((i, c)) = char_indices.next() {
+        if c.is_whitespace() {
+            current_pos = i + c.len_utf8();
+            continue;
+        }
+
+        // Start of a token
+        let token_start = current_pos;
+
+        // Determine if this is a word character
+        let is_word_char = c.is_alphanumeric() || c == '_';
+
+        // Consume characters until we hit whitespace or a change in character type
+        let mut token_text = String::new();
+        token_text.push(c);
+
+        while let Some(&(_, next_c)) = char_indices.peek() {
+            let next_is_word_char = next_c.is_alphanumeric() || next_c == '_';
+
+            // Break if character type changes or we hit whitespace
+            if next_c.is_whitespace() || next_is_word_char != is_word_char {
+                break;
+            }
+
+            let (_, consumed_c) = char_indices.next().unwrap();
+            token_text.push(consumed_c);
+        }
+
+        let token_end = token_start + token_text.len();
+        current_pos = token_end;
+
+        // Only index word tokens (skip punctuation)
+        if is_word_char {
+            // Normalize to lowercase
+            let normalized_word = token_text.to_lowercase();
+
+            // Create token position
+            let pos = TokenPosition {
+                start: token_start,
+                end: token_end,
+            };
+
+            // Add to the inverted index
+            match field_index.entry(normalized_word) {
+                Occupied(mut o) => {
+                    o.get_mut().push(pos);
+                }
+                Vacant(v) => {
+                    v.insert(vec![pos]);
+                }
+            };
+        }
+    }
+}
 /// Ingest multiple objects in a batch
+
 async fn batch_ingest(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<BatchIndexRequest>,
@@ -533,19 +588,10 @@ async fn batch_ingest(
         };
 
         // Create inverted index for the object
-        let mut inverted_index: HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let mut inverted_index: HashMap<String, Vec<TokenPosition>> = std::collections::HashMap::new();
 
-        // Generate position data for each word
-        for (word, pos) in word_positions(&object.text) {
-            match inverted_index.entry(word.to_string()) {
-                Occupied(mut o) => {
-                    o.get_mut().push(pos);
-                }
-                Vacant(v) => {
-                    v.insert(vec![pos]);
-                }
-            };
-        }
+        // Use our specialized tokenizer instead of word_positions
+        tokenize_string(&object.text, &mut inverted_index).await;
 
         // Create ObjectIndex instance
         let object_index = ObjectIndex {
@@ -628,7 +674,6 @@ async fn batch_ingest(
         })),
     )
 }
-
 /// Ingest content from a file into the database
 async fn ingest_file(
     State(state): State<Arc<AppState>>,
@@ -753,19 +798,9 @@ async fn ingest_file(
     let text_length = object.text.len();
 
     // Create inverted index
-    let mut inverted_index: HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    let mut inverted_index: HashMap<String, Vec<TokenPosition>> = std::collections::HashMap::new();
 
-    // Generate position data for each word
-    for (word, pos) in word_positions(&object.text) {
-        match inverted_index.entry(word.to_string()) {
-            Occupied(mut o) => {
-                o.get_mut().push(pos);
-            }
-            Vacant(v) => {
-                v.insert(vec![pos]);
-            }
-        };
-    }
+    tokenize_string(&object.text, &mut inverted_index).await;
 
     // Create the ObjectIndex
     let object_index = ObjectIndex {
@@ -1153,140 +1188,6 @@ async fn list_global_terms(State(state): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
-/// Create a demo ObjectIndex and add it to the database
-pub async fn create_dummy_record(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<DemoIndexRequest>,
-) -> Json<Value> {
-    let span = tracing_utils::server_span("/demo-index", "POST");
-    let _guard = span.enter();
-
-    debug!("Demo index endpoint called with ID: {:?}", payload.id);
-
-    // Generate a timestamp-based ID if none was provided to ensure uniqueness
-    let id = payload.id.unwrap_or_else(|| {
-        let timestamp = chrono::Utc::now().timestamp();
-        format!("dummy_item_{}", timestamp)
-    });
-
-    // Create a demo object with lorem ipsum content
-    let demo_object = crate::create_dummy_object(Some(id));
-
-    // Create a simple ObjectIndex with the demo object's content
-    let mut inverted_index = std::collections::HashMap::new();
-
-    // Split the content into words and create a simple inverted index
-    let words: Vec<&str> = demo_object.text.split_whitespace().collect();
-
-    for (position, word) in words.iter().enumerate() {
-        let normalized_word = word
-            .trim_matches(|c: char| !c.is_alphanumeric())
-            .to_lowercase();
-        if !normalized_word.is_empty() {
-            let positions = inverted_index
-                .entry(normalized_word.to_string())
-                .or_insert_with(Vec::new);
-            positions.push(position);
-        }
-    }
-
-    // Log the creation of the demo index
-    info!(
-        "Index parsed with ID: {}, containing {} unique terms",
-        demo_object.id,
-        inverted_index.len()
-    );
-
-    // Keep a copy of the ID for the response
-    let demo_id = demo_object.id.clone();
-    let word_count = words.len();
-    let unique_terms = inverted_index.len();
-    let metadata = demo_object.metadata.clone();
-
-    // Create an ObjectIndex instance for the database
-    let object_index = ObjectIndex {
-        object_id: demo_object.id.clone(),
-        field_name: "text".to_string(),
-        inverted_index,
-    };
-
-    // Get a clone of the shared DB state for the background task
-    let db_state = state.db.clone();
-
-    // Add the object to the database in a background task
-    tokio::spawn(async move {
-        // Log that we're starting the database operations
-        info!("Adding demo object to database: {}", demo_object.id);
-
-        // No need for a mutex since only the compactor writes
-        // Index the object which will add it to the database
-        info!("Indexing demo object: {}", demo_object.id);
-
-        // Queue the object for indexing - the compactor will handle the actual database writes
-        db_state.index(object_index);
-
-        // Add the record to the RECORDS tree
-        info!("Adding demo object to RECORDS tree: {}", demo_object.id);
-        let records_handle = match db_state.open_tree(crate::db::TREE_RECORDS) {
-            Ok(handle) => handle,
-            Err(e) => {
-                error!("Failed to open RECORDS collection: {}", e);
-                return;
-            }
-        };
-
-        // First, check if this ID already exists and remove it if it does
-        // This helps prevent any serialization issues with existing corrupted records
-        if let Ok(Some(_)) = records_handle.get(&demo_object.id) {
-            info!("Removing existing record with ID: {}", demo_object.id);
-            if let Err(e) = records_handle.remove(&demo_object.id) {
-                error!("Failed to remove existing record: {}", e);
-            }
-        }
-
-        // Convert to archivable format and serialize
-        let archivable = ArchivableObjectRecord::from(&demo_object);
-        match rkyv_adapter::serialize(&archivable) {
-            Ok(serialized) => {
-                // Insert the record into the tree
-                let demo_id_clone = demo_object.id.clone();
-                if let Err(e) = records_handle.insert(demo_id_clone, serialized.to_vec()) {
-                    error!("Failed to insert record into RECORDS collection: {}", e);
-                } else {
-                    info!(
-                        "Successfully added record to RECORDS collection: {}",
-                        demo_object.id
-                    );
-                }
-            }
-            Err(e) => {
-                error!("Failed to serialize record: {}", e);
-            }
-        }
-
-        // Note: The compactor service will automatically handle compaction on its schedule
-        // We don't need to manually trigger it here anymore
-
-        // Log successful completion
-        info!(
-            "Successfully queued demo object for indexing: {}",
-            demo_object.id
-        );
-    });
-
-    // Return information about the created demo index
-    Json(json!({
-        "status": "success",
-        "message": "Demo ObjectIndex created successfully and added to database",
-        "object_id": demo_id,
-        "unique_terms": unique_terms,
-        "word_count": word_count,
-        "metadata": metadata,
-        "indexed": true,
-        "compacted": true
-    }))
-}
-
 /// Get all objects stored in the database
 async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
     let span = tracing_utils::server_span("/objects", "GET");
@@ -1433,7 +1334,6 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
             .route("/filters/{namespace}", get(list_namespace_filters))
             .route("/add/{namespace}", post(add_file))
             // Demo index route
-            .route("/demo-index", post(create_dummy_record))
             // Database exploration endpoints
             .route("/objects", get(list_objects))
             .route("/objects/{object_id}", get(get_object_by_id))

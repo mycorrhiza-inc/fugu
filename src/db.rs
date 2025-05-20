@@ -455,6 +455,8 @@ impl FuguDB {
                 }
             }
         }
+        // instead of creating individual trees, we just create rkyv hash maps, and save them to
+        // disk
 
         // Now process each partition's objects
         for (index_tree_name, objects) in partitions_and_objects {
@@ -596,11 +598,7 @@ impl TreeHandle {
         }
     }
 
-    /// Iterate over all key-value pairs - unified API
-    ///
-    /// For sled, this returns the iterator directly.
-    /// For fjall, this requires creating the iterator first.
-    /// We'll have to handle the result type differently in the calling code.
+    /// Iterate over all key-value pairs
     pub fn iter(&self) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_>> {
         match self {
             TreeHandle::Fjall(partition) => {
