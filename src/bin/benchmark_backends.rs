@@ -135,11 +135,9 @@ fn benchmark_single_operations(fugu_db: &FuguDB, data: &[(String, String)]) -> B
 }
 
 fn main() {
-    println!("Running benchmarks to compare sled and fjall performance");
     println!("Generating random data for {} operations", NUM_OPERATIONS);
     let data = generate_random_data(NUM_OPERATIONS);
 
-    // Run sled benchmark
     println!("\n=== Fjall Benchmark ===");
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let temp_path = temp_dir.path().to_str().unwrap();

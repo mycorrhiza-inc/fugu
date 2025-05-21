@@ -738,7 +738,7 @@ impl QueryEngine {
         // Create the query
         let query = Query {
             terms: query_terms,
-            logical_operator: LogicalOperator::And,
+            logical_operator: LogicalOperator::Or,
             limit,
             offset: None,
         };
@@ -895,7 +895,7 @@ impl QueryEngine {
         let mut term_doc_freqs = HashMap::new();
 
         // Get the RECORDS tree handle
-        let records_handle = match self.db.open_tree(crate::db::TREE_RECORDS) {
+        let records_handle = match self.db.open_tree(self.db.keyspace(),crate::db::TREE_RECORDS) {
             Ok(handle) => handle,
             Err(e) => {
                 error!("Failed to open RECORDS collection: {}", e);
@@ -980,7 +980,7 @@ impl QueryEngine {
             let object_id = name_str[prefix.len()..].to_string();
 
             // Open the object's index tree using our unified API
-            if let Ok(index_handle) = self.db.open_tree(name_str) {
+            if let Ok(index_handle) = self.db.open_tree(self.db.keyspace(),name_str) {
                 // Check if this object contains the term
                 if let Ok(Some(positions_bytes)) = index_handle.get(term) {
                     // Deserialize the positions
@@ -1017,7 +1017,6 @@ impl QueryEngine {
         Ok(result_map)
     }
 
-    /// Get storage names (tree names for sled, partition names for fjall)
     fn get_storage_names(&self) -> Result<Vec<String>> {
         let partitions = self.db.partition_names();
         Ok(partitions)

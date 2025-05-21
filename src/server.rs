@@ -6,6 +6,7 @@ use crate::object::ArchivableObjectRecord;
 use crate::query_endpoints;
 use crate::tokeinze::{Token, TokenPosition, TokenType, tokenize, tokenize_into_index};
 use crate::{ObjectIndex, ObjectRecord, tracing_utils};
+use anyhow::anyhow;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -14,12 +15,14 @@ use axum::{
     routing::{get, post},
 };
 use fjall::PersistMode;
+use futures::future::Join;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::hash_map::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use tokio::signal;
 use tracing::{Instrument, debug, error, info};
 
@@ -201,7 +204,10 @@ async fn ingest_object(
     }
 
     // Check if the object already exists in the database
-    let records_handle = match state.db.open_tree(crate::db::TREE_RECORDS) {
+    let records_handle = match state
+        .db
+        .open_tree(state.db.keyspace(), crate::db::TREE_RECORDS)
+    {
         Ok(handle) => handle,
         Err(e) => {
             error!("Failed to open RECORDS collection: {}", e);
@@ -305,7 +311,8 @@ async fn ingest_object(
 
         // Add the record to the RECORDS tree
         info!("Adding object to RECORDS tree: {}", object_id);
-        let records_handle = match db_state.open_tree(crate::db::TREE_RECORDS) {
+        let records_handle = match db_state.open_tree(db_state.keyspace(), crate::db::TREE_RECORDS)
+        {
             Ok(handle) => handle,
             Err(e) => {
                 error!("Failed to open RECORDS collection: {}", e);
@@ -480,13 +487,15 @@ async fn batch_ingest(
         );
     }
 
+    let payload_len = payload.objects.len();
     // Prepare vectors to track objects and their indices
-    let mut object_indices = Vec::with_capacity(payload.objects.len());
-    let mut summary = Vec::with_capacity(payload.objects.len());
+    let mut object_indices: Vec<ObjectIndex> = Vec::with_capacity(payload.objects.len());
+    let objects_for_storage = payload.objects.clone();
     let mut error_count = 0;
 
     // Open the RECORDS tree once for checking existing objects
-    let records_handle = match state.db.open_tree(crate::db::TREE_RECORDS) {
+    let ks = state.db.keyspace();
+    let records_handle = match state.db.open_tree(ks, crate::db::TREE_RECORDS) {
         Ok(handle) => handle,
         Err(e) => {
             error!("Failed to open RECORDS collection: {}", e);
@@ -501,106 +510,93 @@ async fn batch_ingest(
     };
 
     // Process each object in the batch
-    for object in &payload.objects {
-        let object_id = object.id.clone();
+    let mut index_tasks = Vec::new();
+    for object in payload.objects {
+        let o = object.clone();
+        let rh = records_handle.clone();
+        let task_handle: tokio::task::JoinHandle<Result<ObjectIndex, std::io::Error>> = // Changed the return type
+        tokio::task::spawn(async move {
+            let object_id = o.id.clone();
+            // ... existing code ...
 
-        // Skip objects with empty IDs
-        if object_id.is_empty() {
-            error_count += 1;
-            summary.push(json!({
-                "id": null,
-                "status": "error",
-                "error": "Object ID cannot be empty"
-            }));
-            continue;
-        }
+            // Create inverted index for the object
+            let mut inverted_index: HashMap<String, Vec<TokenPosition>> =
+                std::collections::HashMap::new();
 
-        // Check if the object already exists
-        let operation = if let Ok(Some(_)) = records_handle.get(&object_id) {
-            debug!(
-                "Object with ID '{}' already exists, will be updated",
-                object_id
-            );
-            "update"
-        } else {
-            debug!("Object with ID '{}' is new", object_id);
-            "create"
-        };
+            // Use our specialized tokenizer instead of word_positions
+            match tokenize_into_index(&object.text, &mut inverted_index).await {
+                Ok(_) => {
+                    let object_index = ObjectIndex {
+                        object_id: object_id.clone(),
+                        field_name: "text".to_string(),
+                        inverted_index: inverted_index.clone(),
+                    };
 
-        // Create inverted index for the object
-        let mut inverted_index: HashMap<String, Vec<TokenPosition>> =
-            std::collections::HashMap::new();
-
-        // Use our specialized tokenizer instead of word_positions
-        tokenize_into_index(&object.text, &mut inverted_index).await;
-
-        // Create ObjectIndex instance
-        let object_index = ObjectIndex {
-            object_id: object_id.clone(),
-            field_name: "text".to_string(),
-            inverted_index: inverted_index.clone(),
-        };
-
-        // Add to results vector
-        object_indices.push(object_index);
-
-        // Add to summary
-        summary.push(json!({
-            "id": object_id,
-            "status": "success",
-            "operation": operation,
-            "unique_terms": inverted_index.len(),
-            "text_length": object.text.len()
-        }));
+                    // Instead of pushing to a shared vector, return the ObjectIndex
+                    Ok(object_index)
+                }
+                Err(e) => {
+                    error!("Failed to tokenize object {} to text: {}", o.id, e);
+                    // You'll need to handle this error case appropriately
+                    Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                }
+            }
+        });
+        index_tasks.push(task_handle);
     }
 
+    // Collect all ObjectIndex values from tasks
+    let results = futures::future::join_all(index_tasks).await;
+    let object_indices: Vec<ObjectIndex> = results
+        .into_iter()
+        .filter_map(|result| result.ok().and_then(|inner| inner.ok()))
+        .collect();
+
     // Get a clone of the shared DB state for the background task
-    let db_state = state.db.clone();
+    let db_state_for_index = state.db.clone();
 
     // Clone the objects for storage in the background task
-    let objects_for_storage = payload.objects.clone();
 
     // Process the batch in a background task
     tokio::spawn(async move {
-        // Index all objects
-        info!("Batch indexing {} objects", object_indices.len());
-        db_state.batch_index(object_indices);
+        // Pass ownership of object_indices directly without cloning
+        db_state_for_index.batch_index(object_indices).await;
+    });
+    let db_state = state.db.clone();
 
-        // Store all objects in the RECORDS tree
-        info!("Adding objects to RECORDS tree");
-        let records_handle = match db_state.open_tree(crate::db::TREE_RECORDS) {
-            Ok(handle) => handle,
-            Err(e) => {
-                error!("Failed to open RECORDS collection: {}", e);
-                return;
-            }
-        };
-
-        // Process each object
-        for object in objects_for_storage {
-            // Convert to archivable format and serialize
-            let archivable = ArchivableObjectRecord::from(&object);
-            match rkyv::to_bytes::<rkyv::rancor::Error>(&archivable) {
-                Ok(serialized) => {
-                    // Insert the record into the tree
-                    let id_clone = object.id.clone();
-                    if let Err(e) = records_handle.insert(id_clone, serialized.to_vec()) {
-                        error!("Failed to insert record into RECORDS collection: {}", e);
-                    } else {
-                        debug!(
-                            "Successfully added record to RECORDS collection: {}",
-                            object.id
-                        );
+    // Store all objects in the RECORDS tree
+    info!("Adding objects to RECORDS tree");
+    match db_state.open_tree(db_state.keyspace(), crate::db::TREE_RECORDS) {
+        Ok(handle) => {
+            for object in objects_for_storage {
+                // Convert to archivable format and serialize
+                let archivable = ArchivableObjectRecord::from(&object);
+                match rkyv::to_bytes::<rkyv::rancor::Error>(&archivable) {
+                    Ok(serialized) => {
+                        // Insert the record into the tree
+                        let id_clone = object.id.clone();
+                        if let Err(e) = handle.insert(id_clone, serialized.to_vec()) {
+                            error!("Failed to insert record into RECORDS collection: {}", e);
+                        } else {
+                            debug!(
+                                "Successfully added record to RECORDS collection: {}",
+                                object.id
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to serialize record {}: {}", object.id, e);
                     }
                 }
-                Err(e) => {
-                    error!("Failed to serialize record {}: {}", object.id, e);
-                }
             }
+            info!("Batch processing completed");
         }
+        Err(e) => {
+            error!("Failed to open RECORDS collection: {}", e);
+        }
+    };
 
-        info!("Batch processing completed");
-    });
+    // Process each object
 
     // Return summary response
     (
@@ -608,13 +604,12 @@ async fn batch_ingest(
         Json(json!({
             "status": "success",
             "message": "Batch successfully queued for indexing",
-            "total_objects": payload.objects.len(),
-            "processed": summary.len() - error_count,
+            "total_objects": payload_len,
             "errors": error_count,
-            "objects": summary
         })),
     )
 }
+///
 /// Ingest content from a file into the database
 async fn ingest_file(
     State(state): State<Arc<AppState>>,
@@ -668,7 +663,10 @@ async fn ingest_file(
     };
 
     // Check if the object already exists in the database
-    let records_handle = match state.db.open_tree(crate::db::TREE_RECORDS) {
+    let records_handle = match state
+        .db
+        .open_tree(state.db.keyspace(), crate::db::TREE_RECORDS)
+    {
         Ok(handle) => handle,
         Err(e) => {
             error!("Failed to open RECORDS collection: {}", e);
@@ -775,7 +773,8 @@ async fn ingest_file(
 
         // Add the record to the RECORDS tree
         info!("Adding file object to RECORDS tree: {}", object_id);
-        let records_handle = match db_state.open_tree(crate::db::TREE_RECORDS) {
+        let records_handle = match db_state.open_tree(db_state.keyspace(), crate::db::TREE_RECORDS)
+        {
             Ok(handle) => handle,
             Err(e) => {
                 error!("Failed to open RECORDS collection: {}", e);
@@ -930,7 +929,7 @@ async fn list_object_terms(
     let tree_name = format!("{}:{}", PREFIX_RECORD_INDEX_TREE, object_id);
 
     // Try to open the tree for the object
-    let object_handle = match db_handle.open_tree(&tree_name) {
+    let object_handle = match db_handle.open_tree(db_handle.keyspace(), &tree_name) {
         Ok(handle) => handle,
         Err(e) => {
             error!("Failed to open tree for object {}: {}", object_id, e);
@@ -1036,7 +1035,7 @@ async fn list_global_terms(State(state): State<Arc<AppState>>) -> Json<Value> {
     for object_id in all_object_trees {
         let tree_name = format!("{}:{}", PREFIX_RECORD_INDEX_TREE, object_id);
 
-        match db_handle.open_tree(&tree_name) {
+        match db_handle.open_tree(db_handle.keyspace(), &tree_name) {
             Ok(tree_handle) => {
                 // Process each term in the tree
                 let term_iter = match tree_handle.iter() {
@@ -1142,7 +1141,7 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
     let db_handle = state.db.clone();
 
     // Get the RECORDS tree
-    let records_handle = match db_handle.open_tree(TREE_RECORDS) {
+    let records_handle = match db_handle.open_tree(db_handle.keyspace(), TREE_RECORDS) {
         Ok(handle) => handle,
         Err(e) => {
             error!("Failed to open RECORDS collection: {}", e);

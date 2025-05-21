@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
-use fjall;
 use fjall::KvSeparationOptions;
+use fjall::{self, Keyspace};
 use rkyv::{rancor, util::AlignedVec};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,7 +38,6 @@ pub enum BatchOperation {
     Fjall(Arc<fjall::Batch>), // Use Arc to provide Clone for fjall::Batch
 }
 
-/// Unified database wrapper that works with either sled or fjall
 #[derive(Clone)]
 pub struct FuguDB {
     pub backend: FuguDBBackend,
@@ -58,8 +57,9 @@ impl FuguDB {
     pub fn init_db(&self) {
         // Create standard trees if they don't exist
         let standard_trees = [TREE_RECORDS, TREE_FILTERS, TREE_GLOBAL_INDEX];
+        let ks = self.keyspace();
         for tree_name in standard_trees.iter() {
-            if let Err(e) = self.open_tree(tree_name) {
+            if let Err(e) = self.open_tree(self.keyspace(), tree_name) {
                 error!("Failed to create tree {}: {:?}", tree_name, e);
             }
         }
@@ -253,9 +253,9 @@ impl FuguDB {
     }
 
     /// Access to the raw backend for operations not covered by the unified API
-    pub fn keyspace(&self) -> &fjall::Keyspace {
+    pub fn keyspace(&self) -> fjall::Keyspace {
         match &self.backend {
-            FuguDBBackend::Fjall(keyspace) => keyspace,
+            FuguDBBackend::Fjall(keyspace) => keyspace.clone(),
         }
     }
 
@@ -273,30 +273,26 @@ impl FuguDB {
     }
 
     /// Open (or create if it doesn't exist) a tree/partition
-    pub fn open_tree(&self, name: &str) -> Result<TreeHandle> {
-        match &self.backend {
-            FuguDBBackend::Fjall(keyspace) => {
-                match keyspace.open_partition(
-                    name,
-                    fjall::PartitionCreateOptions::default()
-                        .with_kv_separation(KvSeparationOptions::default()),
-                ) {
-                    Ok(partition_handle) => Ok(TreeHandle::Fjall(partition_handle)),
-                    Err(e) => {
-                        tracing::error!("Failed to open fjall partition: {:?}", e);
-                        Err(anyhow::anyhow!("Failed to open fjall partition: {:?}", e))
-                    }
-                }
+    pub fn open_tree(&self, keyspace: Keyspace, name: &str) -> Result<TreeHandle> {
+        match keyspace.open_partition(
+            name,
+            fjall::PartitionCreateOptions::default()
+                .with_kv_separation(KvSeparationOptions::default()),
+        ) {
+            Ok(partition_handle) => Ok(TreeHandle::Fjall(partition_handle)),
+            Err(e) => {
+                tracing::error!("Failed to open fjall partition: {:?}", e);
+                Err(anyhow::anyhow!("Failed to open fjall partition: {:?}", e))
             }
         }
     }
 
     /// Create a new batch operation
-    pub fn create_batch(&self) -> BatchOperation {
+    pub fn create_batch(&self, max_size: usize) -> BatchOperation {
         match &self.backend {
             FuguDBBackend::Fjall(keyspace) => {
                 // Fjall batches should be created with with_capacity instead of default
-                let batch = fjall::Batch::with_capacity(keyspace.clone(), 32); // reasonable starting capacity
+                let batch = fjall::Batch::with_capacity(keyspace.clone(), max_size); // reasonable starting capacity
                 BatchOperation::Fjall(Arc::new(batch))
             }
         }
@@ -340,7 +336,7 @@ impl FuguDB {
     /// Direct get method for convenience (assumes TREE_RECORDS)
     /// Returns the deserialized ObjectRecord if found and successfully deserialized
     pub fn get(&self, key: &str) -> Option<crate::object::ObjectRecord> {
-        if let Ok(tree) = self.open_tree(TREE_RECORDS) {
+        if let Ok(tree) = self.open_tree(self.keyspace(), TREE_RECORDS) {
             if let Ok(Some(data)) = tree.get(key) {
                 // Try to deserialize the record
                 if let Ok(archivable) = rkyv::from_bytes::<
@@ -364,7 +360,7 @@ impl FuguDB {
         // Create or get the index tree for this object
         let index_tree_name = format!("{}{}", PREFIX_RECORD_INDEX_TREE, object_id);
         tracing::info!("openning partition : {}", index_tree_name);
-        let index_tree = match self.open_tree(&index_tree_name) {
+        let index_tree = match self.open_tree(self.keyspace(), &index_tree_name) {
             Ok(tree) => tree,
             Err(e) => {
                 tracing::error!("Failed to open index tree for {}: {:?}", object_id, e);
@@ -439,42 +435,31 @@ impl FuguDB {
     }
 
     /// Index multiple objects in batch
-    pub fn batch_index(&self, object_indices: Vec<crate::object::ObjectIndex>) {
+    pub async fn batch_index(&self, object_indices: Vec<crate::object::ObjectIndex>) {
         let mut partitions_and_objects = HashMap::new();
 
         // First, group objects by their index partitions
-        for object_index in &object_indices {
-            let object_id = &object_index.object_id;
+        for object_index in object_indices {
+            let object_id = object_index.object_id.clone(); // Clone the ID, not the whole struct
             let index_tree_name = format!("{}{}", PREFIX_RECORD_INDEX_TREE, object_id);
 
-            // Create each partition if it doesn't exist
-            match self.open_tree(&index_tree_name) {
-                Ok(tree) => {
-                    partitions_and_objects
-                        .entry(index_tree_name)
-                        .or_insert_with(Vec::new)
-                        .push(object_index);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to open index tree for {}: {:?}", object_id, e);
-                }
-            }
+            partitions_and_objects
+                .entry(index_tree_name)
+                .or_insert_with(Vec::new)
+                .push(object_index); // Move object_index into the map
         }
-        // instead of creating individual trees, we just create rkyv hash maps, and save them to
-        // disk
 
+        // Rest of the function remains the same
+        let mut compact_tasks = Vec::new();
         // Now process each partition's objects
         for (index_tree_name, objects) in partitions_and_objects {
             // Open the tree for this partition
-            if let Ok(index_tree) = self.open_tree(&index_tree_name) {
+            let index_tree = self.open_tree(self.keyspace(), &index_tree_name).unwrap();
+            let handler = tokio::task::spawn(async move {
                 // Process each object one by one since we need the read-modify-write pattern
-                for object_ref in objects {
-                    // Since we have borrowed the object_indices, we need to work with references
-                    let object_index = object_ref;
-
+                for object_index in objects {
                     // For each term in the inverted index
                     for (term, positions) in &object_index.inverted_index {
-                        // Read current value if it exists
                         let current_positions = match index_tree.get(term) {
                             Ok(Some(bytes)) => {
                                 match deserialize_positions(&bytes) {
@@ -528,18 +513,12 @@ impl FuguDB {
                         }
                     }
                 }
-            }
+            });
+            compact_tasks.push(handler);
         }
+        let _results = futures::future::join_all(compact_tasks).await;
 
         // Final persistence to ensure all changes are saved
-
-        match &self.backend {
-            FuguDBBackend::Fjall(keyspace) => {
-                if let Err(e) = keyspace.persist(fjall::PersistMode::SyncAll) {
-                    tracing::error!("Failed to persist batch indexing changes: {:?}", e);
-                }
-            }
-        }
     }
 }
 
@@ -730,7 +709,7 @@ mod tests {
 
         // Test open_tree method
         let tree_handle = fugu_db
-            .open_tree(TREE_RECORDS)
+            .open_tree(fugu_db.keyspace(), TREE_RECORDS)
             .expect("Failed to open RECORDS tree");
 
         // Test insert operation
@@ -789,11 +768,11 @@ mod tests {
 
         // Test open_tree method
         let tree_handle = fugu_db
-            .open_tree(TREE_RECORDS)
+            .open_tree(fugu_db.keyspace(), TREE_RECORDS)
             .expect("Failed to open RECORDS tree");
 
         // Create a batch
-        let mut batch = fugu_db.create_batch();
+        let mut batch = fugu_db.create_batch(32);
 
         // Add multiple operations to the batch
         let test_keys = ["batch_key1", "batch_key2", "batch_key3"];
@@ -831,7 +810,7 @@ mod tests {
         }
 
         // Create another batch for removal
-        let mut removal_batch = fugu_db.create_batch();
+        let mut removal_batch = fugu_db.create_batch(32);
         for key in test_keys.iter() {
             removal_batch.remove(&tree_handle, *key);
         }
@@ -874,7 +853,7 @@ mod tests {
         fugu_db.init_db();
 
         // Test error handling for non-existent tree/partition
-        let non_existent_tree = fugu_db.open_tree("NON_EXISTENT_TREE_TEST");
+        let non_existent_tree = fugu_db.open_tree(fugu_db.keyspace(), "NON_EXISTENT_TREE_TEST");
 
         // This should succeed since we're opening a non-existent tree (which should be created)
         assert!(
@@ -913,7 +892,7 @@ mod tests {
 
         // Test open_tree method
         let tree_handle = fugu_db
-            .open_tree(TREE_RECORDS)
+            .open_tree(fugu_db.keyspace(), TREE_RECORDS)
             .expect("Failed to open RECORDS tree");
 
         // Insert a large number of values to make compaction meaningful
@@ -1016,7 +995,7 @@ mod tests {
 
         for tree_name in &trees {
             let handle = fugu_db
-                .open_tree(tree_name)
+                .open_tree(fugu_db.keyspace(), tree_name)
                 .expect(&format!("Failed to open tree {}", tree_name));
             handles.push(handle);
         }

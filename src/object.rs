@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap as StandardHashMap;
 use crate::tokeinze::{ TokenPosition};
 
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 pub struct ObjectIndex {
     pub object_id: String,
     pub field_name: String,

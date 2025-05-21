@@ -108,9 +108,9 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
             _ = server::start_http_server(3301, server_db) => {
                 info!("HTTP server has shut down");
             },
-            _ = run_compactor(fdb, compactor_shutdown_rx) => {
-                info!("Compactor has shut down");
-            }
+            // _ = run_compactor(fdb, compactor_shutdown_rx) => {
+            //     info!("Compactor has shut down");
+            // }
         }
         info!("Server shutdown complete");
     }
