@@ -5,7 +5,7 @@ use crate::db::{
 use crate::object::ArchivableObjectRecord;
 use crate::query_endpoints;
 use crate::tokeinze::{Token, TokenPosition, TokenType, tokenize, tokenize_into_index};
-use crate::{ObjectIndex, ObjectRecord,  tracing_utils};
+use crate::{ObjectIndex, ObjectRecord, tracing_utils};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use fjall::PersistMode;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -453,7 +454,6 @@ async fn create_field_indexes(
         }
     }
 }
-
 
 /// Ingest multiple objects in a batch
 
@@ -1295,7 +1295,7 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
                 post(query_endpoints::query_advanced_post),
             )
             // Add the shared state
-            .with_state(app_state);
+            .with_state(app_state.clone());
 
         debug!("API routes configured with shared state");
 
@@ -1320,17 +1320,16 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
 
         // Start the server with graceful shutdown
         axum::serve(http_listener, app)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(shutdown_signal(app_state))
             .await
             .unwrap();
-
         info!("Server shut down gracefully");
     }
     .instrument(server_span)
     .await
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(app_state: Arc<AppState>) {
     // Create a span for the shutdown signal handler
     let shutdown_span = tracing::span!(tracing::Level::INFO, "shutdown_signal");
 
@@ -1360,6 +1359,13 @@ async fn shutdown_signal() {
         }
 
         info!("Shutdown signal received, starting graceful shutdown");
+
+        // Persist database to disk before shutting down
+        info!("Persisting database to disk before shutdown...");
+        match app_state.db.keyspace().persist(PersistMode::SyncAll) {
+            Ok(_) => info!("Database successfully persisted"),
+            Err(e) => error!("Error persisting database: {}", e),
+        }
     }
     .instrument(shutdown_span)
     .await
