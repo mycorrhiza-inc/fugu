@@ -74,7 +74,7 @@ mod document_statistics_tests {
             };
 
             let archivable = ArchivableObjectRecord::from(&record);
-            let serialized = rkyv_adapter::serialize(&archivable).unwrap();
+            let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&archivable).unwrap();
             records_tree
                 .insert(record.id.as_bytes(), serialized)
                 .unwrap();
@@ -242,7 +242,7 @@ mod document_statistics_tests {
 
         for record in &edge_cases {
             let archivable = ArchivableObjectRecord::from(record);
-            let serialized = rkyv_adapter::serialize(&archivable).unwrap();
+            let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&archivable).unwrap();
             records_tree
                 .insert(record.id.as_bytes(), serialized)
                 .unwrap();
