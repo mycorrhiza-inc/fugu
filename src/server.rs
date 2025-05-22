@@ -223,26 +223,28 @@ async fn get_filter(
 ) -> Json<Value> {
     let span = tracing_utils::server_span(&format!("/filters/{}", namespace), "GET");
     let _guard = span.enter();
-    debug!("get filter endpoint called for namespace");
-    let facets = state.db.clone().get_facets().unwrap();
+    debug!("get filter endpoint called for {}", namespace);
+    let facets = state
+        .db
+        .clone()
+        .get_facets(Some(format!("/{}", namespace.to_string())))
+        .unwrap();
 
     Json(json!({"filters": facets }))
 }
 /// List filters for a specific namespace
-async fn list_filters(
-    State(state): State<Arc<AppState>>,
-    Path(namespace): Path<String>,
-) -> Json<Value> {
-    let span = tracing_utils::server_span(&format!("/filters/{}", namespace), "GET");
+async fn list_filters(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let span = tracing_utils::server_span(&format!("/filters/"), "GET");
     let _guard = span.enter();
 
-    let facets = state.db.clone().get_facets();
-    debug!(
-        "List namespace filters endpoint called for namespace: {}",
-        namespace
-    );
+    let facets = state.db.clone().get_facets(None).unwrap();
+    info!("List filters endpoint called");
+    let res: Vec<Value> = facets
+        .iter()
+        .map(|f| json!({"value": f.0.to_string()}))
+        .collect();
 
-    Json(json!({"namespace": namespace }))
+    Json(json!({"filters": res }))
 }
 /// Get all objects stored in the database
 async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -272,8 +274,8 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
         let app = Router::new()
             // API routes
             .route("/health", get(health))
-            .route("/filters/", get(list_filters))
-            .route("/filters/{filter}", get(get_filter))
+            .route("/filters", get(list_filters))
+            .route("/filters/{*filters}", get(get_filter))
             .route("/ingest", post(ingest_objects))
             // Query API endpoints
             .route("/search", get(query_endpoints::query_text_get))

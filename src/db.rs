@@ -162,14 +162,16 @@ impl FuguDB {
     pub fn list_facet(self, from_level: String) -> anyhow::Result<Vec<(Facet, u64)>> {
         let searcher = self.searcher()?;
         let facet = Facet::from(from_level.as_str());
-        let facet_term = Term::from_facet(self.metadata_field(), &facet);
+        let facet_term = Term::from_facet(self.facet_field(), &facet);
         let facet_term_query = TermQuery::new(facet_term, IndexRecordOption::Basic);
         let mut facet_collector = FacetCollector::for_field("facet");
-        facet_collector.add_facet("/");
-        let facet_counts = searcher.search(&facet_term_query, &facet_collector)?;
-        let facets: Vec<(&Facet, u64)> = facet_counts.get(from_level.as_str()).collect();
+        facet_collector.add_facet(from_level.as_str());
+        let facet_counts = searcher.search(&AllQuery, &facet_collector)?;
+        let facets: Vec<(&Facet, u64)> = facet_counts.get("/").collect();
+        info!("found {} facets", facets.len());
         let mut out: Vec<(Facet, u64)> = Vec::new();
         for f in facets {
+            info!("found facet {} with {} sub facets", f.0.clone(), f.1);
             out.push((f.0.clone(), f.1))
         }
         return Ok(out);
@@ -195,20 +197,13 @@ impl FuguDB {
         self.execute(ops);
     }
 
-    pub fn get_facets(self) -> anyhow::Result<Vec<(Facet, u64)>> {
-        let searcher = self.searcher()?;
-        let facet = Facet::from("/");
-        let facet_term = Term::from_facet(self.metadata_field(), &facet);
-        let facet_term_query = TermQuery::new(facet_term, IndexRecordOption::Basic);
-        let mut facet_collector = FacetCollector::for_field("metadata");
-        facet_collector.add_facet("/");
-        let facet_counts = searcher.search(&facet_term_query, &facet_collector)?;
-        let facets: Vec<(&Facet, u64)> = facet_counts.get("/").collect();
-        let mut out: Vec<(Facet, u64)> = Vec::new();
-        for f in facets {
-            out.push((f.0.clone(), f.1))
-        }
-        return Ok(out);
+    pub fn get_facets(self, namespace: Option<String>) -> anyhow::Result<Vec<(Facet, u64)>> {
+        let root = match namespace {
+            Some(n) => n,
+            None => "/".to_string(),
+        };
+        info!("getting facets for: {}", root);
+        self.list_facet(root)
     }
 
     /// Index a vector of objects
@@ -237,9 +232,9 @@ impl FuguDB {
             // If we have additional fields, merge them into metadata
             if !is_value_empty(&fields) {
                 // Create indexes for each additional field using depth-first traversal
-                let facets = create_facet_indexes(&fields, String::new(), &doc);
+                let facets = create_facet_indexes(&fields, Vec::new(), &doc);
                 for f in facets {
-                    doc.add_facet(self.facet_field(), f.as_str());
+                    doc.add_facet(self.facet_field(), Facet::from_path(f));
                 }
                 // Merge additional fields into metadata
             }
@@ -252,26 +247,23 @@ impl FuguDB {
 
 fn create_facet_indexes(
     value: &serde_json::Value,
-    prefix: String,
+    mut prefix: Vec<String>,
     doc: &TantivyDocument,
-) -> Vec<String> {
-    let mut out = Vec::new();
+) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
     match value {
         serde_json::Value::Object(map) => {
             // Process each field in the object
             for (key, val) in map {
-                let field_path = if prefix.is_empty() {
-                    format!("/{}", key.clone())
-                } else {
-                    format!("{}/{}", prefix, key)
-                };
-                let temp = create_facet_indexes(val, field_path, doc);
+                let mut p = prefix.clone();
+                p.push(key.to_string());
+                let temp = create_facet_indexes(val, p.clone(), doc);
                 out.extend(temp);
             }
         }
         serde_json::Value::Array(arr) => {
             // Process each item in the array
-            for (i, item) in arr.iter().enumerate() {
+            for (_i, item) in arr.iter().enumerate() {
                 let temp = create_facet_indexes(item, prefix.clone(), doc);
                 out.extend(temp);
             }
@@ -279,18 +271,9 @@ fn create_facet_indexes(
         _ => {
             // For primitive values, index the string representation
             let field_str = value.as_str().unwrap().to_string();
-            let facet_str = if prefix.is_empty() {
-                field_str
-            } else {
-                format!(
-                    "{}/{}",
-                    prefix,
-                    // urlencoding::Encoded(field_str.clone()).to_string()
-                    field_str.clone()
-                )
-            };
-            info!("new facet: {}", facet_str.clone());
-            out.push(facet_str);
+            prefix.push(field_str);
+            info!("new facet: {}", prefix.join("/"));
+            out.push(prefix);
         }
     }
     return out;

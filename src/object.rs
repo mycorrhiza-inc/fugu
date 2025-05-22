@@ -21,7 +21,7 @@ pub fn build_object_record_schema(mut schema_builder: SchemaBuilder) -> tantivy:
     // schema_builder.add_date_field("date_published", STORED | FAST);
     // schema_builder.add_date_field("date_created", STORED | FAST);
     // schema_builder.add_date_field("date_updated", STORED | FAST);
-    schema_builder.add_facet_field("facet", FacetOptions::default());
+    schema_builder.add_facet_field("facet", FacetOptions::default().set_stored());
     schema_builder.add_json_field("metadata", STORED | FAST);
     let schema = schema_builder.build();
     return schema;
