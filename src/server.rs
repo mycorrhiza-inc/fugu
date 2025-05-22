@@ -1,11 +1,7 @@
-use crate::db::{
-    FuguDB, PREFIX_FILTER_INDEX, PREFIX_RECORD_INDEX_TREE, TREE_FILTERS, TREE_GLOBAL_INDEX,
-    TREE_RECORDS,
-};
-use crate::object::ArchivableObjectRecord;
+use crate::db::FuguDB;
 use crate::query_endpoints;
 use crate::tokeinze::{Token, TokenPosition, TokenType, tokenize, tokenize_into_index};
-use crate::{ObjectIndex, ObjectRecord, tracing_utils};
+use crate::{ObjectRecord, tracing_utils};
 use anyhow::anyhow;
 use axum::{
     Json, Router,
@@ -16,20 +12,24 @@ use axum::{
 };
 use fjall::PersistMode;
 use futures::future::Join;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize, result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::hash_map::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use tantivy::schema::{Facet, Field};
+use tantivy::{Document, IndexWriter, TantivyDocument};
 use tokio::signal;
+use tokio::sync::Mutex;
 use tracing::{Instrument, debug, error, info};
 
 // Define a shared application state for dependency injection
 pub struct AppState {
     // Using Arc for shared ownership across handlers, but no Mutex since only the compactor writes
-    pub db: Arc<FuguDB>,
+    pub db: FuguDB,
+    pub writer: Mutex<IndexWriter>,
 }
 
 /// A default error response for most API errors.
@@ -104,7 +104,7 @@ pub struct DemoIndexRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct IndexRequest {
-    data: ObjectRecord,
+    data: Vec<ObjectRecord>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -177,7 +177,7 @@ fn is_value_empty(value: &serde_json::Value) -> bool {
     }
 }
 /// Ingest a single object into the database
-async fn ingest_object(
+async fn ingest_objects(
     State(state): State<Arc<AppState>>,
     Json(mut payload): Json<IndexRequest>,
 ) -> impl IntoResponse {
@@ -186,174 +186,51 @@ async fn ingest_object(
     let span = tracing_utils::server_span("/ingest", "POST");
     let _guard = span.enter();
 
-    debug!("Ingest endpoint called with ID: {:?}", payload.data.id);
+    debug!(
+        "Ingest endpoint called for {:?} objects",
+        payload.data.len()
+    );
 
     // Extract and normalize fields
-    let mut object = payload.data;
-    let object_id = object.id.clone();
+    let objects = payload.data.clone();
 
-    // Check if the ID is valid
-    if object_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "Object ID cannot be empty",
-                "status": "error"
-            })),
-        );
-    }
-
-    // Check if the object already exists in the database
-    let records_handle = match state
-        .db
-        .open_tree(state.db.keyspace(), crate::db::TREE_RECORDS)
-    {
-        Ok(handle) => handle,
-        Err(e) => {
-            error!("Failed to open RECORDS collection: {}", e);
+    for object in objects {
+        // Check if the IDs are valid
+        if object.id.clone().is_empty() {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "error": format!("Failed to open RECORDS collection: {}", e),
+                    "error": "Object ID cannot be empty",
                     "status": "error"
                 })),
             );
         }
-    };
 
-    let existing_object = if let Ok(Some(data)) = records_handle.get(&object_id) {
-        debug!(
-            "Object with ID '{}' already exists, will be updated",
-            object_id
-        );
-        match rkyv::from_bytes::<ArchivableObjectRecord, rkyv::rancor::Error>(&data) {
-            Ok(archivable) => {
-                debug!("Successfully deserialized existing object");
-                Some(archivable)
+        let mut doc = TantivyDocument::new();
+
+        // Process metadata to extract additional fields and create indexes
+        let fields = process_additional_fields(&object);
+        doc.add_text(state.db.id_field(), object.id);
+        doc.add_text(state.db.text_field(), object.text);
+        // If we have additional fields, merge them into metadata
+        if !is_value_empty(&fields) {
+            // Create indexes for each additional field using depth-first traversal
+            let facets = create_facet_indexes(&fields, String::new(), &doc);
+            for f in facets {
+                doc.add_facet(state.db.metadata_field(), f.as_str());
             }
-            Err(e) => {
-                debug!("Could not deserialize existing object: {}", e);
-                None
-            }
+            // Merge additional fields into metadata
         }
-    } else {
-        None
-    };
-
-    // Create the base inverted index for text content
-    let mut inverted_indexes: HashMap<String, HashMap<String, Vec<TokenPosition>>> = HashMap::new();
-
-    // Main text index
-    let mut text_index: HashMap<String, Vec<TokenPosition>> = HashMap::new();
-
-    tokenize_into_index(&object.text, &mut text_index).await;
-
-    // Add the main text index to our collection of indexes
-    inverted_indexes.insert("_text".to_string(), text_index);
-
-    // Process metadata to extract additional fields and create indexes
-    let additional_fields = process_additional_fields(&object);
-
-    // If we have additional fields, merge them into metadata
-    if !is_value_empty(&additional_fields) {
-        // Create indexes for each additional field using depth-first traversal
-        create_field_indexes(&additional_fields, String::new(), &mut inverted_indexes);
-
-        // Merge additional fields into metadata
-        merge_into_metadata(&mut object.metadata, additional_fields);
+        let w = state.writer.lock().await;
+        w.add_document(doc);
     }
-
-    info!(
-        "Created ObjectIndex with ID: {}, containing {} field indexes",
-        object_id,
-        inverted_indexes.len()
-    );
-    let indexes_clone = inverted_indexes.clone();
-
-    // Keep a copy of the metadata for the response
-    let metadata = object.metadata.clone();
-    let text_length = object.text.len();
-
-    // Create variables for response
-    let object_id_for_response = object_id.clone();
-    let operation_type = if existing_object.is_some() {
-        "update"
-    } else {
-        "create"
-    };
-
-    // Clone the object for background task
-    let object_clone = object.clone();
-
-    // Create multiple ObjectIndex instances for the database - one for each field
-    let mut object_indexes = Vec::new();
-
-    for (field_name, inverted_index) in inverted_indexes {
-        object_indexes.push(ObjectIndex {
-            object_id: object_id.clone(),
-            field_name,
-            inverted_index,
-        });
-    }
-
-    // Get a clone of the shared DB state for the background task
-    let db_state = state.db.clone();
-
-    // Add the object to the database in a background task
-    tokio::spawn(async move {
-        // Log that we're starting the database operations
-        info!("Adding object to database: {}", object_id);
-
-        // Queue each field index for indexing
-        for object_index in object_indexes {
-            db_state.index(object_index);
-        }
-
-        // Add the record to the RECORDS tree
-        info!("Adding object to RECORDS tree: {}", object_id);
-        let records_handle = match db_state.open_tree(db_state.keyspace(), crate::db::TREE_RECORDS)
-        {
-            Ok(handle) => handle,
-            Err(e) => {
-                error!("Failed to open RECORDS collection: {}", e);
-                return;
-            }
-        };
-
-        // Convert to archivable format and serialize
-        let archivable = ArchivableObjectRecord::from(&object_clone);
-        match rkyv::to_bytes::<rkyv::rancor::Error>(&archivable) {
-            Ok(serialized) => {
-                // Insert the record using our abstracted handle
-                let object_id_clone = object_id.clone();
-                if let Err(e) = records_handle.insert(object_id_clone, serialized.to_vec()) {
-                    error!("Failed to insert record into RECORDS collection: {}", e);
-                } else {
-                    info!(
-                        "Successfully added record to RECORDS collection: {}",
-                        object_id
-                    );
-                }
-            }
-            Err(e) => {
-                error!("Failed to serialize record: {}", e);
-            }
-        }
-
-        // Log successful completion
-        info!("Successfully queued object for indexing: {}", object_id);
-    });
+    let mut w = state.writer.lock().await;
+    w.commit().unwrap();
 
     (
         StatusCode::OK,
         Json(json!({
             "status": "success",
-            "message": if existing_object.is_some() { "Object successfully updated and queued for indexing" } else { "Object successfully created and queued for indexing" },
-            "object_id": object_id_for_response,
-            "operation": operation_type,
-            "indexed_fields": indexes_clone.keys().collect::<Vec<_>>(),
-            "text_length": text_length,
-            "metadata": metadata,
         })),
     )
 }
@@ -366,12 +243,9 @@ fn process_additional_fields(object_record: &ObjectRecord) -> serde_json::Value 
         serde_json::from_str(&serialized).unwrap_or(serde_json::Value::Null);
 
     if let serde_json::Value::Object(ref mut map) = value {
-        // Remove the standard fields
+        // Return the remaining fields as a new Value
         map.remove("id");
         map.remove("text");
-        map.remove("metadata");
-
-        // Return the remaining fields as a new Value
         serde_json::Value::Object(map.clone())
     } else {
         serde_json::Value::Object(serde_json::Map::new())
@@ -394,430 +268,50 @@ fn merge_into_metadata(metadata: &mut serde_json::Value, additional_fields: serd
 }
 
 // Recursively create indexes for all fields depth-first
-async fn create_field_indexes(
+fn create_facet_indexes(
     value: &serde_json::Value,
     prefix: String,
-    indexes: &mut HashMap<String, HashMap<String, Vec<TokenPosition>>>,
-) {
+    doc: &TantivyDocument,
+) -> Vec<String> {
+    let mut out = Vec::new();
     match value {
         serde_json::Value::Object(map) => {
             // Process each field in the object
             for (key, val) in map {
                 let field_path = if prefix.is_empty() {
-                    key.clone()
+                    format!("/{}", key.clone())
                 } else {
-                    format!("{}#{}", prefix, key)
+                    format!("{}/{}", prefix, key)
                 };
-
-                // Recursively process nested objects
-                Box::pin(create_field_indexes(val, field_path.clone(), indexes)).await;
-
-                // Create index for this field's string representation
-                let field_str = val.to_string();
-                if !field_str.is_empty() {
-                    let mut field_index: HashMap<String, Vec<TokenPosition>> = HashMap::new();
-
-                    // For string values, use our stream tokenizer
-                    if let serde_json::Value::String(s) = val {
-                        // Use a specialized tokenizer for strings
-                        tokenize_into_index(s, &mut field_index).await;
-                    } else {
-                        // For non-string values, just index the whole value as a term
-                        // Create a simple position at the start
-                        let pos = TokenPosition {
-                            start: 0,
-                            end: field_str.len(),
-                        };
-                        field_index.insert(field_str, vec![pos]);
-                    }
-
-                    // Only add non-empty indexes
-                    if !field_index.is_empty() {
-                        indexes.insert(field_path, field_index);
-                    }
-                }
+                let temp = create_facet_indexes(val, field_path, doc);
+                out.extend(temp);
             }
         }
         serde_json::Value::Array(arr) => {
             // Process each item in the array
             for (i, item) in arr.iter().enumerate() {
-                let item_path = format!("{}[{}]", prefix, i);
-                Box::pin(create_field_indexes(item, item_path, indexes)).await;
+                let temp = create_facet_indexes(item, prefix.clone(), doc);
+                out.extend(temp);
             }
         }
         _ => {
             // For primitive values, index the string representation
-            let field_str = value.to_string();
-            if !field_str.is_empty() && !prefix.is_empty() {
-                let mut field_index = HashMap::new();
-                // Create a position object for the primitive value
-                let pos = TokenPosition {
-                    start: 0,
-                    end: field_str.len(),
-                };
-                field_index.insert(field_str, vec![pos]);
-                indexes.insert(prefix, field_index);
-            }
+            let field_str = value.as_str().unwrap().to_string();
+            let facet_str = if prefix.is_empty() {
+                field_str
+            } else {
+                format!(
+                    "{}/{}",
+                    prefix,
+                    // urlencoding::Encoded(field_str.clone()).to_string()
+                    field_str.clone()
+                )
+            };
+            info!("new facet: {}", facet_str.clone());
+            out.push(facet_str);
         }
     }
-}
-
-/// Ingest multiple objects in a batch
-
-async fn batch_ingest(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<BatchIndexRequest>,
-) -> impl IntoResponse {
-    let span = tracing_utils::server_span("/batch-ingest", "POST");
-    let _guard = span.enter();
-
-    debug!(
-        "Batch ingest endpoint called with {} objects",
-        payload.objects.len()
-    );
-
-    // Validate the batch
-    if payload.objects.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "Batch cannot be empty",
-                "status": "error"
-            })),
-        );
-    }
-
-    let payload_len = payload.objects.len();
-    // Prepare vectors to track objects and their indices
-    let mut object_indices: Vec<ObjectIndex> = Vec::with_capacity(payload.objects.len());
-    let objects_for_storage = payload.objects.clone();
-    let mut error_count = 0;
-
-    // Open the RECORDS tree once for checking existing objects
-    let ks = state.db.keyspace();
-    let records_handle = match state.db.open_tree(ks, crate::db::TREE_RECORDS) {
-        Ok(handle) => handle,
-        Err(e) => {
-            error!("Failed to open RECORDS collection: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": format!("Failed to open RECORDS collection: {}", e),
-                    "status": "error"
-                })),
-            );
-        }
-    };
-
-    // Process each object in the batch
-    let mut index_tasks = Vec::new();
-    for object in payload.objects {
-        let o = object.clone();
-        let rh = records_handle.clone();
-        let task_handle: tokio::task::JoinHandle<Result<ObjectIndex, std::io::Error>> = // Changed the return type
-        tokio::task::spawn(async move {
-            let object_id = o.id.clone();
-            // ... existing code ...
-
-            // Create inverted index for the object
-            let mut inverted_index: HashMap<String, Vec<TokenPosition>> =
-                std::collections::HashMap::new();
-
-            // Use our specialized tokenizer instead of word_positions
-            match tokenize_into_index(&object.text, &mut inverted_index).await {
-                Ok(_) => {
-                    let object_index = ObjectIndex {
-                        object_id: object_id.clone(),
-                        field_name: "text".to_string(),
-                        inverted_index: inverted_index.clone(),
-                    };
-
-                    // Instead of pushing to a shared vector, return the ObjectIndex
-                    Ok(object_index)
-                }
-                Err(e) => {
-                    error!("Failed to tokenize object {} to text: {}", o.id, e);
-                    // You'll need to handle this error case appropriately
-                    Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-                }
-            }
-        });
-        index_tasks.push(task_handle);
-    }
-
-    // Collect all ObjectIndex values from tasks
-    let results = futures::future::join_all(index_tasks).await;
-    let object_indices: Vec<ObjectIndex> = results
-        .into_iter()
-        .filter_map(|result| result.ok().and_then(|inner| inner.ok()))
-        .collect();
-
-    // Get a clone of the shared DB state for the background task
-    let db_state_for_index = state.db.clone();
-
-    // Clone the objects for storage in the background task
-
-    // Process the batch in a background task
-    tokio::spawn(async move {
-        // Pass ownership of object_indices directly without cloning
-        db_state_for_index.batch_index(object_indices).await;
-    });
-    let db_state = state.db.clone();
-
-    // Store all objects in the RECORDS tree
-    info!("Adding objects to RECORDS tree");
-    match db_state.open_tree(db_state.keyspace(), crate::db::TREE_RECORDS) {
-        Ok(handle) => {
-            for object in objects_for_storage {
-                // Convert to archivable format and serialize
-                let archivable = ArchivableObjectRecord::from(&object);
-                match rkyv::to_bytes::<rkyv::rancor::Error>(&archivable) {
-                    Ok(serialized) => {
-                        // Insert the record into the tree
-                        let id_clone = object.id.clone();
-                        if let Err(e) = handle.insert(id_clone, serialized.to_vec()) {
-                            error!("Failed to insert record into RECORDS collection: {}", e);
-                        } else {
-                            debug!(
-                                "Successfully added record to RECORDS collection: {}",
-                                object.id
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to serialize record {}: {}", object.id, e);
-                    }
-                }
-            }
-            info!("Batch processing completed");
-        }
-        Err(e) => {
-            error!("Failed to open RECORDS collection: {}", e);
-        }
-    };
-
-    // Process each object
-
-    // Return summary response
-    (
-        StatusCode::OK,
-        Json(json!({
-            "status": "success",
-            "message": "Batch successfully queued for indexing",
-            "total_objects": payload_len,
-            "errors": error_count,
-        })),
-    )
-}
-///
-/// Ingest content from a file into the database
-async fn ingest_file(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<FileIngestionRequest>,
-) -> impl IntoResponse {
-    let span = tracing_utils::server_span("/ingest-file", "POST");
-    let _guard = span.enter();
-
-    debug!(
-        "File ingest endpoint called for file: {}",
-        payload.file_path
-    );
-
-    // Try to read the file
-    let file_content = match tokio::fs::read_to_string(&payload.file_path).await {
-        Ok(content) => content,
-        Err(e) => {
-            error!("Failed to read file {}: {}", payload.file_path, e);
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!("Failed to read file: {}", e),
-                    "status": "error"
-                })),
-            );
-        }
-    };
-
-    // Generate ID if not provided
-    let object_id = match payload.id {
-        Some(id) if !id.is_empty() => id,
-        _ => {
-            // Use filename as ID if none provided
-            let path = std::path::Path::new(&payload.file_path);
-            match path.file_name() {
-                Some(name) => match name.to_str() {
-                    Some(name_str) => name_str.to_string(),
-                    None => {
-                        // Generate timestamp-based ID if filename has invalid UTF-8
-                        let timestamp = chrono::Utc::now().timestamp();
-                        format!("file_{}", timestamp)
-                    }
-                },
-                None => {
-                    // Generate timestamp-based ID if no filename
-                    let timestamp = chrono::Utc::now().timestamp();
-                    format!("file_{}", timestamp)
-                }
-            }
-        }
-    };
-
-    // Check if the object already exists in the database
-    let records_handle = match state
-        .db
-        .open_tree(state.db.keyspace(), crate::db::TREE_RECORDS)
-    {
-        Ok(handle) => handle,
-        Err(e) => {
-            error!("Failed to open RECORDS collection: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": format!("Failed to open RECORDS collection: {}", e),
-                    "status": "error"
-                })),
-            );
-        }
-    };
-
-    let operation = if let Ok(Some(_)) = records_handle.get(&object_id) {
-        debug!(
-            "File object with ID '{}' already exists, will be updated",
-            object_id
-        );
-        "update"
-    } else {
-        debug!("File object with ID '{}' is new", object_id);
-        "create"
-    };
-
-    // Prepare metadata
-    let mut metadata = match payload.metadata {
-        Some(meta) => meta,
-        None => serde_json::json!({}),
-    };
-
-    // Add file info to metadata
-    if let serde_json::Value::Object(ref mut map) = metadata {
-        map.insert(
-            "file_path".to_string(),
-            serde_json::Value::String(payload.file_path.clone()),
-        );
-
-        map.insert(
-            "ingested_at".to_string(),
-            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
-        );
-
-        // Add namespace if provided
-        if let Some(namespace) = payload.namespace {
-            map.insert(
-                "namespace".to_string(),
-                serde_json::Value::String(namespace),
-            );
-        }
-
-        // Add file size
-        map.insert(
-            "file_size_bytes".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(file_content.len() as u64)),
-        );
-    }
-
-    // Create the ObjectRecord
-    let object = ObjectRecord {
-        id: object_id.clone(),
-        text: file_content,
-        metadata: metadata.clone(),
-    };
-
-    // Save copies for later use
-    let object_id_for_response = object_id.clone();
-    let operation_type_for_response = operation.to_string();
-    let text_length = object.text.len();
-
-    // Create inverted index
-    let mut inverted_index: HashMap<String, Vec<TokenPosition>> = std::collections::HashMap::new();
-
-    tokenize_into_index(&object.text, &mut inverted_index).await;
-
-    // Create the ObjectIndex
-    let object_index = ObjectIndex {
-        object_id: object_id.clone(),
-        field_name: "text".to_string(),
-        inverted_index: inverted_index.clone(),
-    };
-
-    // Save the number of terms for response
-    let unique_term_count = inverted_index.len();
-
-    info!(
-        "Created ObjectIndex from file with ID: {}, containing {} unique terms",
-        object_id,
-        inverted_index.len()
-    );
-
-    // Get a clone of the shared DB state for the background task
-    let db_state = state.db.clone();
-
-    // Clone object for background task
-    let object_clone = object.clone();
-
-    // Index and store the object in a background task
-    tokio::spawn(async move {
-        // Log that we're starting the database operations
-        info!("Adding file object to database: {}", object_id);
-
-        // Queue the object for indexing
-        db_state.index(object_index);
-
-        // Add the record to the RECORDS tree
-        info!("Adding file object to RECORDS tree: {}", object_id);
-        let records_handle = match db_state.open_tree(db_state.keyspace(), crate::db::TREE_RECORDS)
-        {
-            Ok(handle) => handle,
-            Err(e) => {
-                error!("Failed to open RECORDS collection: {}", e);
-                return;
-            }
-        };
-
-        // Convert to archivable format and serialize
-        let archivable = ArchivableObjectRecord::from(&object_clone);
-        match rkyv::to_bytes::<rkyv::rancor::Error>(&archivable) {
-            Ok(serialized) => {
-                // Insert the record into the tree
-                let obj_id_clone = object_id.clone();
-                if let Err(e) = records_handle.insert(obj_id_clone, serialized.to_vec()) {
-                    error!("Failed to insert record into RECORDS collection: {}", e);
-                } else {
-                    info!(
-                        "Successfully added file record to RECORDS tree: {}",
-                        object_id
-                    );
-                }
-            }
-            Err(e) => {
-                error!("Failed to serialize file record: {}", e);
-            }
-        }
-
-        info!("Successfully queued file for indexing: {}", object_id);
-    });
-
-    // Return success response
-    (
-        StatusCode::OK,
-        Json(json!({
-            "status": "success",
-            "message": if operation_type_for_response == "update" { "File successfully updated and queued for indexing" } else { "File successfully created and queued for indexing" },
-            "object_id": object_id_for_response,
-            "operation": operation_type_for_response,
-            "unique_terms": unique_term_count,
-            "text_length": text_length,
-            "metadata": metadata,
-        })),
-    )
+    return out;
 }
 
 /// Search in a specific namespace
@@ -858,32 +352,15 @@ async fn get_object_by_id(
 
     // Use the get method to retrieve the object (it now handles auto-repair for dummy items)
     match state.db.get(&object_id) {
-        Some(record) => {
+        Ok(results) => {
             // Return the full record with a note if it was auto-repaired
-            let was_repaired =
-                record.id.contains("dummy_item") && record.metadata.get("auto_repaired").is_some();
-
-            if was_repaired {
-                Json(json!({
-                    "id": record.id,
-                    "metadata": record.metadata,
-                    "text": record.text,
-                    "text_length": record.text.len(),
-                    "note": "This record was automatically repaired due to serialization issues"
-                }))
-            } else {
-                Json(json!({
-                    "id": record.id,
-                    "metadata": record.metadata,
-                    "text": record.text,
-                    "text_length": record.text.len()
-                }))
-            }
+            let record = results.get(0).unwrap();
+            Json(json!(record.to_json(&state.db.schema())))
         }
-        None => {
+        Err(e) => {
             // Return error if record doesn't exist or there was a deserialization issue
             Json(json!({
-                "error": format!("Object with ID '{}' not found", object_id)
+                "error": format!("error getting object with id {}: {}", object_id, e)
             }))
         }
     }
@@ -901,235 +378,6 @@ async fn list_namespace_filters(Path(namespace): Path<String>) -> Json<Value> {
 
     Json(json!({"namespace": namespace }))
 }
-
-/// Add a file to a namespace
-async fn add_file(Path(namespace): Path<String>, Json(payload): Json<Value>) -> Json<Value> {
-    let span = tracing_utils::server_span(&format!("/add/{}", namespace), "POST");
-    let _guard = span.enter();
-
-    debug!("Add file endpoint called for namespace: {}", namespace);
-
-    Json(json!({"namespace": namespace, "payload": payload}))
-}
-
-/// List all terms in the index for a specific object
-async fn list_object_terms(
-    State(state): State<Arc<AppState>>,
-    Path(object_id): Path<String>,
-) -> Json<Value> {
-    let span = tracing_utils::server_span(&format!("/objects/{}/terms", object_id), "GET");
-    let _guard = span.enter();
-
-    debug!("List terms endpoint called for object ID: {}", object_id);
-
-    // Get a reference to the db
-    let db_handle = state.db.clone();
-
-    // Construct the tree name for the object index
-    let tree_name = format!("{}:{}", PREFIX_RECORD_INDEX_TREE, object_id);
-
-    // Try to open the tree for the object
-    let object_handle = match db_handle.open_tree(db_handle.keyspace(), &tree_name) {
-        Ok(handle) => handle,
-        Err(e) => {
-            error!("Failed to open tree for object {}: {}", object_id, e);
-            return Json(json!({
-                "error": format!("Failed to open tree for object {}: {}", object_id, e)
-            }));
-        }
-    };
-
-    // Collect all terms and their positions
-    let mut terms = Vec::new();
-
-    // Iterate through all terms in the tree
-    let iter = match object_handle.iter() {
-        Ok(it) => it,
-        Err(e) => {
-            error!("Failed to create iterator for object partition: {}", e);
-            return Json(json!({
-                "error": format!("Failed to create iterator for object partition: {}", e)
-            }));
-        }
-    };
-    for item in iter {
-        match item {
-            Ok((key, value)) => {
-                // Try to convert key to string (term)
-                if let Ok(term) = std::str::from_utf8(&key) {
-                    // Try to deserialize value to positions
-                    match rkyv::from_bytes::<Vec<TokenPosition>, rkyv::rancor::Error>(&value) {
-                        Ok(positions) => {
-                            terms.push(json!({
-                                "term": term,
-                                "positions": positions,
-                                "count": positions.len()
-                            }));
-                        }
-                        Err(e) => {
-                            // Log error but continue with next term
-                            error!("Failed to deserialize positions for term {}: {}", term, e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Error iterating terms: {}", e);
-            }
-        }
-    }
-
-    // Sort terms by frequency (count) in descending order
-    terms.sort_by(|a, b| {
-        let a_count = a.get("count").and_then(|c| c.as_u64()).unwrap_or(0);
-        let b_count = b.get("count").and_then(|c| c.as_u64()).unwrap_or(0);
-        b_count.cmp(&a_count)
-    });
-
-    Json(json!({
-        "object_id": object_id,
-        "total_terms": terms.len(),
-        "terms": terms
-    }))
-}
-
-/// List all terms across all objects in the database
-async fn list_global_terms(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let span = tracing_utils::server_span("/terms", "GET");
-    let _guard = span.enter();
-
-    debug!("Global terms endpoint called");
-
-    // Get a reference to the db
-    let db_handle = state.db.clone();
-
-    // We'll try to get the names of all objects
-    let mut all_object_trees = Vec::new();
-
-    // We need a helper function to get tree names depending on which backend we're using
-    // This will be different depending on which backend is active
-
-    let tree_names_result = db_handle.partition_names();
-
-    let tree_names = tree_names_result
-        .into_iter()
-        .map(|name| name.into_bytes())
-        .collect::<Vec<_>>();
-
-    // Iterate through all trees to find objects
-    for name in tree_names {
-        if let Ok(name_str) = std::str::from_utf8(&name) {
-            if name_str.starts_with(PREFIX_RECORD_INDEX_TREE) {
-                // This is an object index tree
-                let object_id =
-                    name_str.trim_start_matches(&format!("{}:", PREFIX_RECORD_INDEX_TREE));
-                all_object_trees.push(object_id.to_string());
-            }
-        }
-    }
-
-    // Create a combined map of all terms
-    let mut term_stats: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-
-    // Iterate through all object trees
-    for object_id in all_object_trees {
-        let tree_name = format!("{}:{}", PREFIX_RECORD_INDEX_TREE, object_id);
-
-        match db_handle.open_tree(db_handle.keyspace(), &tree_name) {
-            Ok(tree_handle) => {
-                // Process each term in the tree
-                let term_iter = match tree_handle.iter() {
-                    Ok(it) => it,
-                    Err(e) => {
-                        error!("Failed to create iterator for tree {}: {}", tree_name, e);
-                        continue;
-                    }
-                };
-                for item in term_iter {
-                    match item {
-                        Ok((key, value)) => {
-                            if let Ok(term) = std::str::from_utf8(&key) {
-                                if let Ok(positions) = rkyv::from_bytes::<
-                                    Vec<TokenPosition>,
-                                    rkyv::rancor::Error,
-                                >(&value)
-                                {
-                                    // Update stats for this term
-                                    if let Some(existing) = term_stats.get_mut(term) {
-                                        // Term already exists, update count
-                                        let count = existing["doc_count"].as_u64().unwrap_or(0) + 1;
-                                        let total_occurrences =
-                                            existing["total_occurrences"].as_u64().unwrap_or(0)
-                                                + positions.len() as u64;
-
-                                        // Update values
-                                        *existing = json!({
-                                            "term": term,
-                                            "doc_count": count,
-                                            "total_occurrences": total_occurrences,
-                                            "objects": existing["objects"].as_array().unwrap_or(&Vec::new())
-                                                .iter()
-                                                .chain(std::iter::once(&json!(object_id)))
-                                                .map(|v| v.clone())
-                                                .collect::<Vec<_>>()
-                                        });
-                                    } else {
-                                        // New term
-                                        term_stats.insert(
-                                            term.to_string(),
-                                            json!({
-                                                "term": term,
-                                                "doc_count": 1,
-                                                "total_occurrences": positions.len(),
-                                                "objects": [object_id]
-                                            }),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Error iterating terms: {}", e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to open tree {}: {}", tree_name, e);
-            }
-        }
-    }
-
-    // Convert the map to a vector for sorting
-    let mut terms: Vec<Value> = term_stats.values().cloned().collect();
-
-    // Sort terms by total occurrences in descending order
-    terms.sort_by(|a, b| {
-        let a_count = a
-            .get("total_occurrences")
-            .and_then(|c| c.as_u64())
-            .unwrap_or(0);
-        let b_count = b
-            .get("total_occurrences")
-            .and_then(|c| c.as_u64())
-            .unwrap_or(0);
-        b_count.cmp(&a_count)
-    });
-
-    // Limit to top 1000 terms to avoid overwhelming responses
-    let terms = if terms.len() > 1000 {
-        terms[0..1000].to_vec()
-    } else {
-        terms
-    };
-
-    Json(json!({
-        "total_unique_terms": term_stats.len(),
-        "terms_shown": terms.len(),
-        "terms": terms
-    }))
-}
-
 /// Get all objects stored in the database
 async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
     let span = tracing_utils::server_span("/objects", "GET");
@@ -1138,119 +386,8 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
     debug!("List objects endpoint called");
 
     // Get a reference to the db
-    let db_handle = state.db.clone();
 
-    // Get the RECORDS tree
-    let records_handle = match db_handle.open_tree(db_handle.keyspace(), TREE_RECORDS) {
-        Ok(handle) => handle,
-        Err(e) => {
-            error!("Failed to open RECORDS collection: {}", e);
-            return Json(json!({
-                "error": format!("Failed to open RECORDS collection: {}", e)
-            }));
-        }
-    };
-
-    // Collect all records
-    let mut objects = Vec::new();
-
-    // Iterate through all records
-    let iter = match records_handle.iter() {
-        Ok(it) => it,
-        Err(e) => {
-            error!("Failed to create iterator for RECORDS collection: {}", e);
-            return Json(json!({
-                "error": format!("Failed to create iterator for RECORDS collection: {}", e)
-            }));
-        }
-    };
-    for item in iter {
-        match item {
-            Ok((key, value)) => {
-                // Try to convert key to string
-                if let Ok(key_str) = std::str::from_utf8(&key) {
-                    // Try to deserialize value to ArchivableObjectRecord and convert to ObjectRecord
-                    match rkyv::from_bytes::<ArchivableObjectRecord, rkyv::rancor::Error>(&value) {
-                        Ok(archivable) => {
-                            let record = ObjectRecord::from(archivable);
-                            objects.push(json!({
-                                "id": record.id,
-                                "metadata": record.metadata,
-                                "text_preview": if record.text.len() > 100 {
-                                    format!("{}...", &record.text)
-                                } else {
-                                    record.text
-                                }
-                            }));
-                        }
-                        Err(e) => {
-                            // Log error but continue with next record
-                            error!("Failed to deserialize record {}: {}", key_str, e);
-
-                            // If this is a dummy item with known format issues, try to clean it up
-                            if key_str.contains("dummy_item") {
-                                info!("Attempting to clean up corrupted dummy item: {}", key_str);
-
-                                // Create a fresh dummy object with the same ID
-                                let replacement =
-                                    crate::create_dummy_object(Some(key_str.to_string()));
-
-                                // Serialize it
-                                // Convert to archivable format for storage
-                                let archivable = ArchivableObjectRecord::from(&replacement);
-                                match rkyv::to_bytes::<rkyv::rancor::Error>(&archivable) {
-                                    Ok(serialized) => {
-                                        // Try to replace the corrupted record
-                                        if let Err(err) =
-                                            records_handle.insert(key_str, serialized.to_vec())
-                                        {
-                                            error!("Failed to replace corrupted record: {}", err);
-                                        } else {
-                                            info!(
-                                                "Successfully replaced corrupted record: {}",
-                                                key_str
-                                            );
-
-                                            // Add the replacement to the list
-                                            objects.push(json!({
-                                                "id": replacement.id,
-                                                "metadata": replacement.metadata,
-                                                "text_preview": if replacement.text.len() > 100 {
-                                                    format!("{}...", &replacement.text[..100])
-                                                } else {
-                                                    replacement.text
-                                                },
-                                                "note": "Automatically repaired due to serialization issues"
-                                            }));
-                                        }
-                                    }
-                                    Err(err) => {
-                                        error!("Failed to serialize replacement record: {}", err);
-                                    }
-                                }
-                            } else {
-                                // Add a placeholder for the corrupted record
-                                objects.push(json!({
-                                    "id": key_str,
-                                    "metadata": null,
-                                    "text_preview": "[Corrupted record]",
-                                    "error": format!("{}", e)
-                                }));
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Error iterating records: {}", e);
-            }
-        }
-    }
-
-    Json(json!({
-        "total": objects.len(),
-        "objects": objects
-    }))
+    Json(json!({}))
 }
 
 pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
@@ -1261,8 +398,11 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
         info!("Starting HTTP server with pre-initialized database");
 
         // Create the shared state with  FuguDB
+        let writer = fugu_db.clone().get_index().writer(50_000_000).unwrap();
+
         let app_state = Arc::new(AppState {
-            db: Arc::new(fugu_db),
+            db: fugu_db,
+            writer: Mutex::new(writer),
         });
         info!("Created shared application state");
 
@@ -1273,18 +413,9 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
             .route("/search", post(search))
             .route("/search/{namespace}", post(search_namespace))
             .route("/namespaces", get(list_namespaces))
-            .route("/filters/{namespace}", get(list_namespace_filters))
-            .route("/add/{namespace}", post(add_file))
-            // Demo index route
+            .route("/filters/", get(list_namespace_filters))
             // Database exploration endpoints
-            .route("/objects", get(list_objects))
-            .route("/objects/{object_id}", get(get_object_by_id))
-            .route("/objects/{object_id}/terms", get(list_object_terms))
-            .route("/terms", get(list_global_terms))
-            // Data ingestion endpoints
-            .route("/ingest", post(ingest_object))
-            .route("/batch-ingest", post(batch_ingest))
-            .route("/ingest-file", post(ingest_file))
+            .route("/ingest", post(ingest_objects))
             // Query API endpoints
             .route("/query", get(query_endpoints::query_text_get))
             .route("/query/{query}", get(query_endpoints::query_text_path))
@@ -1361,10 +492,6 @@ async fn shutdown_signal(app_state: Arc<AppState>) {
 
         // Persist database to disk before shutting down
         info!("Persisting database to disk before shutdown...");
-        match app_state.db.keyspace().persist(PersistMode::SyncAll) {
-            Ok(_) => info!("Database successfully persisted"),
-            Err(e) => error!("Error persisting database: {}", e),
-        }
     }
     .instrument(shutdown_span)
     .await
