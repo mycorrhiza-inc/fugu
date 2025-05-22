@@ -17,7 +17,7 @@ use crate::server::AppState;
 /// Simple text query parameters for GET requests
 #[derive(Debug, Deserialize)]
 pub struct TextQueryParams {
-    q: String,
+    query: String,
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -36,24 +36,22 @@ pub struct JsonQueryRequest {
 pub async fn query_text_get(
     State(state): State<Arc<AppState>>,
     Query(params): Query<TextQueryParams>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+) -> impl IntoResponse {
     // Create a span for this endpoint handler
-    let span = tracing_utils::server_span("/api/query", "GET");
-    Ok(Json(json!({})))
+    let span = tracing_utils::server_span("/search/:query", "GET");
+    info!("executing query: {}", params.query);
+    let result = state.db.simple_search(params.query).await;
+    Json(json!({
+        "result": result
+    }))
 }
 
 /// Execute a text query via URL path (URL-encoded)
 pub async fn query_text_path(
     State(state): State<Arc<AppState>>,
-    Path(encoded_query): Path<String>,
     Query(params): Query<TextQueryParams>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+) -> impl IntoResponse {
     // Create a span for this endpoint handler
-    let span = tracing_utils::server_span("/api/query/:query", "GET");
-    let result = state.db.simple_search(encoded_query);
-    Ok(Json(json!({
-        "result": result
-    })))
 }
 
 /// Execute a JSON query via POST
@@ -62,7 +60,7 @@ pub async fn query_json_post(
     Json(payload): Json<JsonQueryRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // Create a span for this endpoint handler
-    let span = tracing_utils::server_span("/api/query/json", "POST");
+    let span = tracing_utils::server_span("/search/", "POST");
     Ok(Json(json!({})))
 }
 

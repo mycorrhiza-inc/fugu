@@ -1,35 +1,24 @@
 use crate::db::FuguDB;
 use crate::query_endpoints;
-use crate::tokeinze::{Token, TokenPosition, TokenType, tokenize, tokenize_into_index};
 use crate::{ObjectRecord, tracing_utils};
-use anyhow::anyhow;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use fjall::PersistMode;
-use futures::future::Join;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize, result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::hash_map::HashMap;
-use std::hash::Hash;
 use std::sync::Arc;
-use std::thread::JoinHandle;
-use tantivy::schema::{Facet, Field};
-use tantivy::{Document, IndexWriter, TantivyDocument};
+use tantivy::Document;
 use tokio::signal;
-use tokio::sync::Mutex;
 use tracing::{Instrument, debug, error, info};
 
 // Define a shared application state for dependency injection
 pub struct AppState {
     // Using Arc for shared ownership across handlers, but no Mutex since only the compactor writes
     pub db: FuguDB,
-    pub writer: Mutex<IndexWriter>,
 }
 
 /// A default error response for most API errors.
@@ -76,15 +65,13 @@ impl IntoResponse for AppError {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
-#[rkyv(derive(Debug))]
+#[derive(Debug, Serialize, Deserialize)]
 struct Pagination {
     page: Option<usize>,
     per_page: Option<usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
-#[rkyv(derive(Debug))]
+#[derive(Debug, Serialize, Deserialize)]
 struct FuguSearchQuery {
     query: String,
     namespace: Option<String>,
@@ -142,177 +129,41 @@ async fn search(Json(payload): Json<FuguSearchQuery>) -> Json<Value> {
     }))
 }
 
-// quick and dirty positional tokenizer
-fn word_positions(text: &str) -> impl Iterator<Item = (&str, usize)> {
-    let mut start = None;
-    text.char_indices()
-        .chain(Some((text.len(), ' ')))
-        .filter_map(move |(i, c)| {
-            if !c.is_whitespace() {
-                if start.is_none() {
-                    start = Some(i);
-                }
-                None
-            } else {
-                if let Some(s) = start {
-                    start = None;
-                    Some((&text[s..i], s))
-                } else {
-                    None
-                }
-            }
-        })
-}
-
 // Helper function to check if serde_json::Value is effectively empty
-fn is_value_empty(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Null => true,
-        serde_json::Value::Bool(false) => false, // false is not empty
-        serde_json::Value::Bool(true) => false,  // false is not empty
-        serde_json::Value::Number(n) => n.as_f64().map(|x| x == 0.0).unwrap_or(false), // 0 is not empty
-        serde_json::Value::String(s) => s.is_empty(),
-        serde_json::Value::Array(arr) => arr.is_empty(),
-        serde_json::Value::Object(obj) => obj.is_empty(),
-    }
-}
 /// Ingest a single object into the database
 async fn ingest_objects(
     State(state): State<Arc<AppState>>,
-    Json(mut payload): Json<IndexRequest>,
+    Json(payload): Json<IndexRequest>,
 ) -> impl IntoResponse {
-    use tokio_stream::StreamExt; // Add this import to bring StreamExt trait into scope
-
     let span = tracing_utils::server_span("/ingest", "POST");
     let _guard = span.enter();
 
-    debug!(
+    info!(
         "Ingest endpoint called for {:?} objects",
         payload.data.len()
     );
 
-    // Extract and normalize fields
-    let objects = payload.data.clone();
+    let db = state.db.clone();
 
-    for object in objects {
-        // Check if the IDs are valid
-        if object.id.clone().is_empty() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "Object ID cannot be empty",
-                    "status": "error"
-                })),
-            );
-        }
-
-        let mut doc = TantivyDocument::new();
-
-        // Process metadata to extract additional fields and create indexes
-        let fields = process_additional_fields(&object);
-        doc.add_text(state.db.id_field(), object.id);
-        doc.add_text(state.db.text_field(), object.text);
-        // If we have additional fields, merge them into metadata
-        if !is_value_empty(&fields) {
-            // Create indexes for each additional field using depth-first traversal
-            let facets = create_facet_indexes(&fields, String::new(), &doc);
-            for f in facets {
-                doc.add_facet(state.db.metadata_field(), f.as_str());
-            }
-            // Merge additional fields into metadata
-        }
-        let w = state.writer.lock().await;
-        w.add_document(doc);
+    match db.ingest(payload.data).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+            })),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "failed",
+            })),
+        ),
     }
-    let mut w = state.writer.lock().await;
-    w.commit().unwrap();
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "status": "success",
-        })),
-    )
 }
 
 // Extract additional fields from JSON payload that aren't id, text, or metadata
-fn process_additional_fields(object_record: &ObjectRecord) -> serde_json::Value {
-    // Deserialize the entire object to a Value
-    let serialized = serde_json::to_string(object_record).unwrap_or_default();
-    let mut value: serde_json::Value =
-        serde_json::from_str(&serialized).unwrap_or(serde_json::Value::Null);
-
-    if let serde_json::Value::Object(ref mut map) = value {
-        // Return the remaining fields as a new Value
-        map.remove("id");
-        map.remove("text");
-        serde_json::Value::Object(map.clone())
-    } else {
-        serde_json::Value::Object(serde_json::Map::new())
-    }
-}
-
-// Merge additional fields into metadata
-fn merge_into_metadata(metadata: &mut serde_json::Value, additional_fields: serde_json::Value) {
-    if let serde_json::Value::Object(meta_map) = metadata {
-        if let serde_json::Value::Object(add_map) = additional_fields {
-            // Transfer all fields from additional fields to metadata
-            for (key, value) in add_map {
-                meta_map.insert(key, value);
-            }
-        }
-    } else {
-        // If metadata wasn't an object, replace it with additional fields
-        *metadata = additional_fields;
-    }
-}
 
 // Recursively create indexes for all fields depth-first
-fn create_facet_indexes(
-    value: &serde_json::Value,
-    prefix: String,
-    doc: &TantivyDocument,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    match value {
-        serde_json::Value::Object(map) => {
-            // Process each field in the object
-            for (key, val) in map {
-                let field_path = if prefix.is_empty() {
-                    format!("/{}", key.clone())
-                } else {
-                    format!("{}/{}", prefix, key)
-                };
-                let temp = create_facet_indexes(val, field_path, doc);
-                out.extend(temp);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            // Process each item in the array
-            for (i, item) in arr.iter().enumerate() {
-                let temp = create_facet_indexes(item, prefix.clone(), doc);
-                out.extend(temp);
-            }
-        }
-        _ => {
-            // For primitive values, index the string representation
-            let field_str = value.as_str().unwrap().to_string();
-            let facet_str = if prefix.is_empty() {
-                field_str
-            } else {
-                format!(
-                    "{}/{}",
-                    prefix,
-                    // urlencoding::Encoded(field_str.clone()).to_string()
-                    field_str.clone()
-                )
-            };
-            info!("new facet: {}", facet_str.clone());
-            out.push(facet_str);
-        }
-    }
-    return out;
-}
 
 /// Search in a specific namespace
 async fn search_namespace(
@@ -373,9 +224,9 @@ async fn get_filter(
     let span = tracing_utils::server_span(&format!("/filters/{}", namespace), "GET");
     let _guard = span.enter();
     debug!("get filter endpoint called for namespace");
-    let facets = state.db.clone().get_facets();
+    let facets = state.db.clone().get_facets().unwrap();
 
-    Json(json!({"namespace": namespace }))
+    Json(json!({"filters": facets }))
 }
 /// List filters for a specific namespace
 async fn list_filters(
@@ -413,12 +264,8 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
         info!("Starting HTTP server with pre-initialized database");
 
         // Create the shared state with  FuguDB
-        let writer = fugu_db.clone().get_index().writer(50_000_000).unwrap();
 
-        let app_state = Arc::new(AppState {
-            db: fugu_db,
-            writer: Mutex::new(writer),
-        });
+        let app_state = Arc::new(AppState { db: fugu_db });
         info!("Created shared application state");
 
         // Create the router with shared state
@@ -430,7 +277,7 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
             .route("/ingest", post(ingest_objects))
             // Query API endpoints
             .route("/search", get(query_endpoints::query_text_get))
-            .route("/search/{query}", get(query_endpoints::query_text_path))
+            // .route("/search/{query}", get(query_endpoints::query_text_path))
             .route("/search", post(query_endpoints::query_json_post))
             .route(
                 "/query/advanced",
