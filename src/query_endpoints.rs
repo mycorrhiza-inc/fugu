@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use rkyv::with;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -49,7 +50,10 @@ pub async fn query_text_path(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // Create a span for this endpoint handler
     let span = tracing_utils::server_span("/api/query/:query", "GET");
-    Ok(Json(json!({})))
+    let result = state.db.simple_search(encoded_query);
+    Ok(Json(json!({
+        "result": result
+    })))
 }
 
 /// Execute a JSON query via POST

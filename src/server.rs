@@ -366,11 +366,26 @@ async fn get_object_by_id(
     }
 }
 
+async fn get_filter(
+    State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
+) -> Json<Value> {
+    let span = tracing_utils::server_span(&format!("/filters/{}", namespace), "GET");
+    let _guard = span.enter();
+    debug!("get filter endpoint called for namespace");
+    let facets = state.db.clone().get_facets();
+
+    Json(json!({"namespace": namespace }))
+}
 /// List filters for a specific namespace
-async fn list_namespace_filters(Path(namespace): Path<String>) -> Json<Value> {
+async fn list_filters(
+    State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
+) -> Json<Value> {
     let span = tracing_utils::server_span(&format!("/filters/{}", namespace), "GET");
     let _guard = span.enter();
 
+    let facets = state.db.clone().get_facets();
     debug!(
         "List namespace filters endpoint called for namespace: {}",
         namespace
@@ -410,16 +425,13 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
         let app = Router::new()
             // API routes
             .route("/health", get(health))
-            .route("/search", post(search))
-            .route("/search/{namespace}", post(search_namespace))
-            .route("/namespaces", get(list_namespaces))
-            .route("/filters/", get(list_namespace_filters))
-            // Database exploration endpoints
+            .route("/filters/", get(list_filters))
+            .route("/filters/{filter}", get(get_filter))
             .route("/ingest", post(ingest_objects))
             // Query API endpoints
-            .route("/query", get(query_endpoints::query_text_get))
-            .route("/query/{query}", get(query_endpoints::query_text_path))
-            .route("/query", post(query_endpoints::query_json_post))
+            .route("/search", get(query_endpoints::query_text_get))
+            .route("/search/{query}", get(query_endpoints::query_text_path))
+            .route("/search", post(query_endpoints::query_json_post))
             .route(
                 "/query/advanced",
                 post(query_endpoints::query_advanced_post),

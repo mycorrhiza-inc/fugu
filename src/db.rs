@@ -89,6 +89,21 @@ impl FuguDB {
             .try_into()?;
         Ok(reader.searcher())
     }
+    pub fn list_facet(self, from_level: String) -> anyhow::Result<Vec<(Facet, u64)>> {
+        let searcher = self.searcher()?;
+        let facet = Facet::from(from_level.as_str());
+        let facet_term = Term::from_facet(self.metadata_field(), &facet);
+        let facet_term_query = TermQuery::new(facet_term, IndexRecordOption::Basic);
+        let mut facet_collector = FacetCollector::for_field("metadata");
+        facet_collector.add_facet("/");
+        let facet_counts = searcher.search(&facet_term_query, &facet_collector)?;
+        let facets: Vec<(&Facet, u64)> = facet_counts.get(from_level.as_str()).collect();
+        let mut out: Vec<(Facet, u64)> = Vec::new();
+        for f in facets {
+            out.push((f.0.clone(), f.1))
+        }
+        return Ok(out);
+    }
 
     pub fn get_facets(self) -> anyhow::Result<Vec<(Facet, u64)>> {
         let searcher = self.searcher()?;
