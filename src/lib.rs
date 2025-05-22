@@ -1,7 +1,6 @@
 pub mod cli;
 pub mod db;
 pub mod object;
-pub mod query;
 pub mod query_endpoints;
 pub mod server;
 // pub mod time_index;
@@ -13,8 +12,7 @@ mod query_test;
 mod test_inverted_index;
 mod tokeinze;
 pub mod tracing_utils;
-pub use object::{ObjectIndex, ObjectRecord};
-pub use query::{QueryConfig, QueryEngine, QueryHit, QueryResults};
+pub use object::ObjectRecord;
 
 use serde_json::json;
 use tracing::{debug, info};
