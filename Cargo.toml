@@ -3,6 +3,10 @@ name = "fugu"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "fugu"
+path = "./src/main.rs"
+
 [features]
 default = ["json"]
 json = ["tracing-subscriber/json"]
