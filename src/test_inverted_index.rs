@@ -37,6 +37,7 @@ mod tests {
 
         let object_index = ObjectIndex {
             object_id: "test_object_1".to_string(),
+            field_name: "text".to_string(),
             inverted_index,
         };
 
@@ -44,11 +45,7 @@ mod tests {
         db.index(object_index);
 
         // Verify the index was created correctly
-        let index_tree_name = format!(
-            "{}:{}",
-            crate::db::PREFIX_RECORD_INDEX_TREE,
-            "test_object_1"
-        );
+        let index_tree_name = format!("{}{}", crate::db::PREFIX_RECORD_INDEX_TREE, "test_object_1");
         let index_tree = db
             .open_tree(&index_tree_name)
             .expect("Failed to open index tree");
@@ -92,6 +89,7 @@ mod tests {
 
         let object_index1 = ObjectIndex {
             object_id: "test_object_2".to_string(),
+            field_name: "text".to_string(),
             inverted_index: inverted_index1,
         };
 
@@ -101,6 +99,7 @@ mod tests {
 
         let object_index2 = ObjectIndex {
             object_id: "test_object_2".to_string(),
+            field_name: "text".to_string(),
             inverted_index: inverted_index2,
         };
 
@@ -111,11 +110,7 @@ mod tests {
         db.index(object_index2);
 
         // Verify the merged positions
-        let index_tree_name = format!(
-            "{}:{}",
-            crate::db::PREFIX_RECORD_INDEX_TREE,
-            "test_object_2"
-        );
+        let index_tree_name = format!("{}{}", crate::db::PREFIX_RECORD_INDEX_TREE, "test_object_2");
         let index_tree = db
             .open_tree(&index_tree_name)
             .expect("Failed to open index tree");
@@ -156,6 +151,7 @@ mod tests {
 
         let object_index1 = ObjectIndex {
             object_id: "batch_object_1".to_string(),
+            field_name: "text".to_string(),
             inverted_index: inverted_index1,
         };
 
@@ -164,15 +160,17 @@ mod tests {
 
         let object_index2 = ObjectIndex {
             object_id: "batch_object_2".to_string(),
+            field_name: "text".to_string(),
             inverted_index: inverted_index2,
         };
 
         // Batch index them
         db.batch_index(vec![object_index1, object_index2]);
+        println!("passed first");
 
         // Verify both indices were created
         let index_tree_name1 = format!(
-            "{}:{}",
+            "{}{}",
             crate::db::PREFIX_RECORD_INDEX_TREE,
             "batch_object_1"
         );
@@ -181,7 +179,7 @@ mod tests {
             .expect("Failed to open index tree 1");
 
         let index_tree_name2 = format!(
-            "{}:{}",
+            "{}{}",
             crate::db::PREFIX_RECORD_INDEX_TREE,
             "batch_object_2"
         );
@@ -243,4 +241,3 @@ mod tests {
         );
     }
 }
-

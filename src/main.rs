@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     } else {
         // Only run server mode if no CLI arguments were provided
-        let server_mode_span = tracing::span!(tracing::Level::INFO, "server_mode");
+        let server_mode_span = tracing::span!(tracing::Level::INFO, "server");
         info!("Running in server mode");
         async { run_server_mode().await }
             .instrument(server_mode_span)
@@ -88,8 +88,6 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
     // We just pass the FuguDB instance directly to the server
     let server_db = fdb.clone();
 
-    // Set up compactor shutdown channel
-    let (_compactor_shutdown_tx, compactor_shutdown_rx) = oneshot::channel::<()>();
     debug!("Created shutdown channel...");
 
     // Start the server and compactor services
@@ -104,9 +102,6 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
             _ = server::start_http_server(3301, server_db) => {
                 info!("HTTP server has shut down");
             },
-            _ = run_compactor(fdb, compactor_shutdown_rx) => {
-                info!("Compactor has shut down");
-            }
         }
         info!("Server shutdown complete");
     }

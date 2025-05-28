@@ -1,22 +1,17 @@
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap as StandardHashMap;
+use tantivy::schema::{FAST, FacetOptions, STORED, STRING, SchemaBuilder, TEXT};
 
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-pub struct ObjectIndex {
-    pub object_id: String,
-    pub inverted_index: StandardHashMap<String, Vec<usize>>, // term : positions
-}
-
-// Structure for a object that can be indexed
-// Note: We can't directly derive Archive for a struct containing serde_json::Value
-// So we'll implement serialization/deserialization for this type separately
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ObjectRecord {
     pub id: String,
+    //pub name: String,
     pub text: String,
+    // pub date_created: i64,
+    // pub date_upated: i64,
+    // pub date_published: Option<i64>,
     pub metadata: Value,
+    //pub data: Option<Value>,
 }
 
 // Define an archivable version without serde_json::Value
