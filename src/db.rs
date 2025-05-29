@@ -1,21 +1,21 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
-use rkyv::string;
 use serde_json::{Value as SerdeValue, json};
 
 use anyhow::{Result, anyhow};
 use std::fs;
+use tantivy::columnar::DocId;
 use tantivy::indexer::UserOperation;
 use tantivy::schema::Value;
 use tokio::sync::{Mutex, MutexGuard};
+use tracing_subscriber::filter;
 
-use rkyv::ser::writer;
 use tantivy::collector::{FacetCollector, TopDocs};
-use tantivy::query::{AllQuery, QueryParser, TermQuery};
-use tantivy::{DateTime, Directory, Searcher, schema::*};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, QueryParser, TermQuery};
+use tantivy::{DateTime, Directory, DocAddress, Score, Searcher, SegmentReader, schema::*};
 use tantivy::{Index, IndexWriter, ReloadPolicy};
 use tracing::{Instrument, debug, error, info};
 
@@ -42,23 +42,25 @@ pub enum BatchOperation {
 #[derive(Clone)]
 pub struct FuguDB {
     schema: Schema,
-    path: PathBuf,
+    _path: PathBuf,
     index: Index,
     writer: Arc<Mutex<IndexWriter>>,
 }
 
 impl FuguDB {
-    /// Initialize the database by creating necessary trees/partitions
     pub fn new(path: PathBuf) -> Self {
         let schema_builder = Schema::builder();
-        fs::create_dir_all(&path);
+        match fs::create_dir_all(&path) {
+            Ok(_) => {}
+            Err(_) => {}
+        };
         let dir = tantivy::directory::MmapDirectory::open(&path).unwrap();
         let schema = crate::object::build_object_record_schema(schema_builder);
         let index = Index::open_or_create(dir, schema.clone()).unwrap();
         let writer = index.writer(50_000_000).unwrap();
         Self {
             schema,
-            path,
+            _path: path,
             index,
             writer: Arc::new(Mutex::new(writer)),
         }
@@ -145,18 +147,62 @@ impl FuguDB {
     }
 
     async fn search_query(query: String) {}
-    async fn filter_search(&self, query: String, filters: Vec<String>) {
-        let facet = self.facet_field();
-        let facets: Vec<Facet> = filters
-            .iter()
-            .map(|f| Facet::from_text(f).unwrap())
-            .collect();
-        let terms: Vec<Term> = facets
-            .iter()
-            .map(|key| Term::from_facet(facet.clone(), key))
-            .collect();
-        let searcher = self.searcher().unwrap();
-        let mut facet_collector = FacetCollector::for_field("metadata");
+
+    async fn filter_search(
+        &self,
+        query: String,
+        filters: Vec<String>,
+        max: Option<usize>,
+    ) -> Result<()> {
+        // validate data
+        let facets: Vec<Facet> = filters.iter().map(|f| Facet::from(f)).collect();
+
+        let limit = match max {
+            Some(m) => m,
+            None => 10,
+        };
+
+        // build query
+        let facet_field = self.facet_field();
+
+        let searcher = self.searcher()?;
+
+        let qp = QueryParser::for_index(&self.index, vec![self.text_field(), self.name_field()]);
+        let string_query = qp.parse_query(&query).unwrap();
+        let facet_query = Box::new(BooleanQuery::new_multiterms_query(
+            facets
+                .iter()
+                .map(|key| Term::from_facet(facet_field, key))
+                .collect(),
+        ));
+        let query = BooleanQuery::new(vec![
+            (Occur::Must, string_query),
+            (Occur::Must, facet_query),
+        ]);
+        let top_docs_by_custom_score =
+            // Call TopDocs with a custom tweak score
+            TopDocs::with_limit(limit).tweak_score(move |segment_reader: &SegmentReader| {
+                let filter_reader = segment_reader.facet_reader("facets").unwrap();
+                let facet_dict = filter_reader.facet_dict();
+
+                let query_ords: HashSet<u64> = facets
+                    .iter()
+                    .filter_map(|key| facet_dict.term_ord(key.encoded_str()).unwrap())
+                    .collect();
+
+                move |doc: DocId, original_score: Score| {
+                    // Update the original score with a tweaked score
+                    let missing_filters = filter_reader
+                        .facet_ords(doc)
+                        .filter(|ord| !query_ords.contains(ord))
+                        .count();
+                    let tweak = 1.0 / 4_f32.powi(missing_filters as i32);
+
+                    original_score * tweak
+                }
+            });
+        let top_docs = searcher.search(&query, &top_docs_by_custom_score)?;
+        Ok(())
     }
 
     pub fn list_facet(self, from_level: String) -> anyhow::Result<Vec<(Facet, u64)>> {
@@ -167,7 +213,7 @@ impl FuguDB {
         let mut facet_collector = FacetCollector::for_field("facet");
         facet_collector.add_facet(from_level.as_str());
         let facet_counts = searcher.search(&AllQuery, &facet_collector)?;
-        let facets: Vec<(&Facet, u64)> = facet_counts.get("/").collect();
+        let facets: Vec<(&Facet, u64)> = facet_counts.get(from_level.as_str()).collect();
         info!("found {} facets", facets.len());
         let mut out: Vec<(Facet, u64)> = Vec::new();
         for f in facets {
