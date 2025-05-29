@@ -74,7 +74,7 @@ struct Pagination {
 #[derive(Debug, Serialize, Deserialize)]
 struct FuguSearchQuery {
     query: String,
-    namespace: Option<String>,
+    filters: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -125,7 +125,7 @@ async fn search(Json(payload): Json<FuguSearchQuery>) -> Json<Value> {
 
     Json(json!({
         "query": payload.query,
-        "namespace": payload.namespace
+        "filters": payload.filters
     }))
 }
 
@@ -280,7 +280,7 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
             // Query API endpoints
             .route("/search", get(query_endpoints::query_text_get))
             // .route("/search/{query}", get(query_endpoints::query_text_path))
-            .route("/search", post(query_endpoints::query_json_post))
+            .route("/search", post(search))
             .route(
                 "/query/advanced",
                 post(query_endpoints::query_advanced_post),
