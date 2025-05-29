@@ -8,6 +8,7 @@ pub mod server;
 mod document_statistics_test;
 #[cfg(test)]
 mod query_test;
+mod s3;
 #[cfg(test)]
 mod test_inverted_index;
 mod tokeinze;
