@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use rkyv::with;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -258,6 +259,17 @@ async fn list_objects(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({}))
 }
 
+async fn sayhi(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let span = tracing_utils::server_span("/", "GET");
+    let _guard = span.enter();
+
+    info!("api endpoint hit");
+
+    // Get a reference to the db
+
+    Json(json!({"message":"hi!"}))
+}
+
 pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
     // Create a main span for the HTTP server
     let server_span = tracing::span!(tracing::Level::INFO, "http_server", port = http_port);
@@ -273,6 +285,7 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
         // Create the router with shared state
         let app = Router::new()
             // API routes
+            .route("/", get(|| async move { "Hello from `GET /`" }))
             .route("/health", get(health))
             .route("/filters", get(list_filters))
             .route("/filters/{*filters}", get(get_filter))

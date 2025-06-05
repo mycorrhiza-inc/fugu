@@ -52,7 +52,7 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
 
     // Database initialization - properly separated from HTTP server logic
     info!("Initializing database");
-    let fdb = FuguDB::new("/tmp/fugu/testdb/".into());
+    let fdb = FuguDB::new("fugu_db".into());
     info!("Database initialized successfully");
 
     // With the unified backend, we don't need mailbox or compactor queue anymore

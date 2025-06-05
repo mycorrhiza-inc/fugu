@@ -26,4 +26,5 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/target/release/fugu /usr/local/bin
+EXPOSE 3301
 ENTRYPOINT ["/usr/local/bin/fugu"]
