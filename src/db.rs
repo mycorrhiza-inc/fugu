@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use tantivy::collector::{FacetCollector, TopDocs};
 use tantivy::query::{AllQuery, BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::{DateTime, Directory, DocAddress, Score, Searcher, SegmentReader, schema::*};
 use tantivy::{Index, IndexWriter, ReloadPolicy};
-use tracing::{Instrument, debug, error, info};
+use tracing::{Instrument, debug, error, info, warn};
 
 use crate::object::ObjectRecord;
 
@@ -46,7 +47,14 @@ pub struct FuguDB {
     index: Index,
     writer: Arc<Mutex<IndexWriter>>,
 }
-
+#[derive(Debug, Clone, Serialize)] // Add Serialize for JSON responses
+pub struct FuguSearchResult {
+    pub id: String,
+    pub score: f32,
+    pub text: String,
+    pub metadata: Option<serde_json::Value>,
+    pub facets: Option<Vec<String>>,
+}
 impl FuguDB {
     pub fn new(path: PathBuf) -> Self {
         let schema_builder = Schema::builder();
@@ -118,33 +126,177 @@ impl FuguDB {
             .try_into()?;
         Ok(reader.searcher())
     }
+    /// Perform a search query
+    pub async fn search(
+        &self,
+        query: &str,
+        filters: &[String],
+        page: usize,
+        per_page: usize,
+    ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
+        info!(
+            "Searching for query: '{}' with {} filters, page: {}, per_page: {}",
+            query,
+            filters.len(),
+            page,
+            per_page
+        );
 
-    pub async fn simple_search(&self, q: String) -> Vec<SerdeValue> {
-        let index = self.get_index();
-        let text = self.text_field();
-        let searcher = self.searcher().unwrap();
-        let query_parser = QueryParser::for_index(index, vec![text]);
-        let query = query_parser.parse_query(&q).unwrap();
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(50)).unwrap();
+        // Get the searcher
+        let reader = self.index.reader()?;
+        let searcher = reader.searcher();
 
-        let mut d = Vec::new();
-        for (score, doc_address) in top_docs {
-            let retrieved_doc: TantivyDocument = searcher.doc(doc_address).unwrap();
-            let a = serde_json::from_str(retrieved_doc.to_json(&self.schema()).as_str()).unwrap();
-            let s = serde_json::Number::from_f64(score as f64).unwrap();
-            // set the score per doc
-            let o = match a {
-                SerdeValue::Object(m) => {
-                    let mut m = m.clone();
-                    m.insert("score".to_string(), SerdeValue::Number(s));
-                    SerdeValue::Object(m)
+        // Get the text field for searching
+        let text_field = self
+            .schema
+            .get_field("text")
+            .map_err(|e| format!("Text field not found in schema: {}", e))?;
+
+        // Create query parser
+        let query_parser = QueryParser::for_index(&self.index, vec![text_field]);
+
+        // Parse the query
+        let parsed_query = match query_parser.parse_query(query) {
+            Ok(q) => q,
+            Err(e) => {
+                warn!("Failed to parse query '{}': {}", query, e);
+                // Fallback to a term query or phrase query
+                let escaped_query = query.replace(['(', ')', '[', ']', '{', '}', '"'], "");
+                query_parser.parse_query(&escaped_query)?
+            }
+        };
+
+        debug!("Parsed query successfully");
+
+        // Calculate offset for pagination
+        let offset = page * per_page;
+        let limit = per_page + offset; // Get extra docs to handle pagination
+
+        // Execute the search
+        let top_docs = searcher.search(&parsed_query, &TopDocs::with_limit(limit))?;
+
+        debug!("Found {} total documents", top_docs.len());
+
+        // Apply pagination and convert results
+        let results: Vec<FuguSearchResult> = top_docs
+            .into_iter()
+            .skip(offset)
+            .take(per_page)
+            .map(|(score, doc_address)| match searcher.doc(doc_address) {
+                Ok(doc) => self.convert_doc_to_search_result(doc, score),
+                Err(e) => {
+                    error!("Failed to retrieve document: {}", e);
+                    FuguSearchResult {
+                        id: "error".to_string(),
+                        score: 0.0,
+                        text: "Error retrieving document".to_string(),
+                        metadata: None,
+                        facets: None,
+                    }
                 }
-                v => v.clone(),
-            };
-            d.push(o);
-        }
-        return d;
+            })
+            .collect();
+
+        info!("Search completed, returning {} results", results.len());
+        Ok(results)
     }
+
+    /// Simple search method for basic queries
+    pub async fn simple_search(
+        &self,
+        query: String,
+    ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
+        self.search(&query, &[], 0, 20).await
+    }
+
+    /// Convert a Tantivy document to a search result
+    fn convert_doc_to_search_result(&self, doc: TantivyDocument, score: f32) -> FuguSearchResult {
+        // Get field references - handle errors gracefully
+        let id = if let Ok(id_field) = self.schema.get_field("id") {
+            doc.get_first(id_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string()
+        } else {
+            "unknown".to_string()
+        };
+
+        let text = if let Ok(text_field) = self.schema.get_field("text") {
+            doc.get_first(text_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            "".to_string()
+        };
+
+        // Extract metadata if present
+        let metadata = if let Ok(metadata_field) = self.schema.get_field("metadata") {
+            doc.get_first(metadata_field)
+                .and_then(|v| v.as_str())
+                .and_then(|s| serde_json::from_str(s).ok())
+        } else {
+            None
+        };
+
+        // Extract namespace as facet if present
+        let facets = if let Ok(namespace_field) = self.schema.get_field("namespace") {
+            doc.get_first(namespace_field)
+                .and_then(|v| v.as_str())
+                .map(|ns| vec![ns.to_string()])
+        } else {
+            None
+        };
+
+        FuguSearchResult {
+            id,
+            score,
+            text,
+            metadata,
+            facets,
+        }
+    }
+
+    /// Search with more advanced options (for future expansion)
+    pub async fn advanced_search(
+        &self,
+        query: &str,
+        filters: &[String],
+        page: usize,
+        per_page: usize,
+        _boost_fields: Option<&[String]>, // For future use
+    ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
+        // For now, just delegate to the regular search
+        // In the future, you can implement field boosting, complex filters, etc.
+        self.search(query, filters, page, per_page).await
+    }
+
+    // pub async fn simple_search(&self, q: String) -> Vec<SerdeValue> {
+    //     let index = self.get_index();
+    //     let text = self.text_field();
+    //     let searcher = self.searcher().unwrap();
+    //     let query_parser = QueryParser::for_index(index, vec![text]);
+    //     let query = query_parser.parse_query(&q).unwrap();
+    //     let top_docs = searcher.search(&query, &TopDocs::with_limit(50)).unwrap();
+
+    //     let mut d = Vec::new();
+    //     for (score, doc_address) in top_docs {
+    //         let retrieved_doc: TantivyDocument = searcher.doc(doc_address).unwrap();
+    //         let a = serde_json::from_str(retrieved_doc.to_json(&self.schema()).as_str()).unwrap();
+    //         let s = serde_json::Number::from_f64(score as f64).unwrap();
+    //         // set the score per doc
+    //         let o = match a {
+    //             SerdeValue::Object(m) => {
+    //                 let mut m = m.clone();
+    //                 m.insert("score".to_string(), SerdeValue::Number(s));
+    //                 SerdeValue::Object(m)
+    //             }
+    //             v => v.clone(),
+    //         };
+    //         d.push(o);
+    //     }
+    //     return d;
+    // }
 
     async fn search_query(query: String) {}
 

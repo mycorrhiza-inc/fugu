@@ -76,6 +76,7 @@ struct Pagination {
 struct FuguSearchQuery {
     query: String,
     filters: Option<Vec<String>>,
+    page: Option<Pagination>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -270,34 +271,39 @@ async fn sayhi(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"message":"hi!"}))
 }
 
+// Update your start_http_server function in your server file
+
 pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
-    // Create a main span for the HTTP server
     let server_span = tracing::span!(tracing::Level::INFO, "http_server", port = http_port);
 
     async {
         info!("Starting HTTP server with pre-initialized database");
-
-        // Create the shared state with  FuguDB
 
         let app_state = Arc::new(AppState { db: fugu_db });
         info!("Created shared application state");
 
         // Create the router with shared state
         let app = Router::new()
-            // API routes
-            .route("/", get(|| async move { "Hello from `GET /`" }))
+            // Basic routes
+            .route("/", get(|| async move { "Hello from Fugu API" }))
             .route("/health", get(health))
+            // Filter routes
             .route("/filters", get(list_filters))
             .route("/filters/{*filters}", get(get_filter))
+            // Ingest route
             .route("/ingest", post(ingest_objects))
-            // Query API endpoints
+            // Search routes
             .route("/search", get(query_endpoints::query_text_get))
-            // .route("/search/{query}", get(query_endpoints::query_text_path))
-            .route("/search", post(search))
+            .route("/search", post(query_endpoints::query_json_post)) // Updated to use the real implementation
+            .route("/search/{query}", get(query_endpoints::query_text_path)) // URL path search
+            // Query routes - ADD THESE
+            .route("/query", post(query_endpoints::query_json_post)) // Same as POST /search
             .route(
                 "/query/advanced",
                 post(query_endpoints::query_advanced_post),
-            )
+            ) // Advanced queries
+            // Object routes
+            .route("/objects/{object_id}", get(get_object_by_id))
             // Add the shared state
             .with_state(app_state.clone());
 
@@ -318,9 +324,18 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
         };
 
         info!(
-            "HTTP server started on {}. Press Ctrl+C to stop.",
+            "HTTP server started on {}. Available endpoints:",
             server_addr,
         );
+        info!("  GET  /health");
+        info!("  GET  /search?q=<query>");
+        info!("  GET  /search/<query>");
+        info!("  POST /search");
+        info!("  POST /query"); // Your curl command endpoint
+        info!("  POST /query/advanced");
+        info!("  POST /ingest");
+        info!("  GET  /filters");
+        info!("  GET  /objects/{{id}}");
 
         // Start the server with graceful shutdown
         axum::serve(http_listener, app)
@@ -332,7 +347,6 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
     .instrument(server_span)
     .await
 }
-
 async fn shutdown_signal(app_state: Arc<AppState>) {
     // Create a span for the shutdown signal handler
     let shutdown_span = tracing::span!(tracing::Level::INFO, "shutdown_signal");
