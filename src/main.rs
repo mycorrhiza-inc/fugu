@@ -56,7 +56,7 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
     info!("Database initialized successfully");
 
     // With the unified backend, we don't need mailbox or compactor queue anymore
-    // These were part of the old implementation before the backend abstraction
+    // These were part of the old implementation before the backend abstraction  
 
     // We just pass the FuguDB instance directly to the server
     let server_db = fdb.clone();
