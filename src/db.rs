@@ -411,6 +411,55 @@ impl FuguDB {
         self.list_facet(root)
     }
 
+    /// Construct a Tantivy document from an ObjectRecord
+    fn build_tantivy_doc(&self, object: &ObjectRecord) -> TantivyDocument {
+        // Serialize to JSON document
+        let mut doc = TantivyDocument::parse_json(
+            &self.schema,
+            serde_json::to_string(object).unwrap().as_str(),
+        )
+        .unwrap();
+
+        // Process metadata fields
+        let fields = process_additional_fields(object);
+        let object_map: BTreeMap<String, OwnedValue> = match &fields {
+            serde_json::Value::Object(map) => map
+                .iter()
+                .map(|(k, v)| (k.clone(), OwnedValue::from(v.clone())))
+                .collect(),
+            _ => BTreeMap::new(),
+        };
+        doc.add_object(self.metadata_field(), object_map);
+        if !is_value_empty(&fields) {
+            let facets = create_facet_indexes(&fields, Vec::new(), &doc);
+            for f in facets {
+                doc.add_facet(self.facet_field(), Facet::from_path(f));
+            }
+        }
+        doc
+    }
+
+    /// Upsert a vector of objects: delete existing by ID then add new
+    pub async fn upsert(&self, records: Vec<ObjectRecord>) -> Result<(), impl IntoResponse> {
+        let mut w = self.writer().await;
+        for object in records {
+            if object.id.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"Object ID cannot be empty","status":"error"})),
+                ));
+            }
+            // Delete existing document by ID term
+            let term = Term::from_field_text(self.id_field(), &object.id);
+            w.delete_term(term);
+            // Add new document
+            let doc = self.build_tantivy_doc(&object);
+            w.add_document(doc);
+        }
+        w.commit().unwrap();
+        Ok(())
+    }
+
     /// Index a vector of objects
     pub async fn ingest(&self, records: Vec<ObjectRecord>) -> Result<(), impl IntoResponse> {
         let mut w = self.writer().await;
