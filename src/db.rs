@@ -397,11 +397,6 @@ impl FuguDB {
         UserOperation::Delete(doc_id_term)
     }
 
-    pub fn delete_document(&self, doc_id: String) {
-        let ops = vec![self.prep_delete_op(doc_id)];
-        self.execute(ops);
-    }
-
     pub fn get_facets(self, namespace: Option<String>) -> anyhow::Result<Vec<(Facet, u64)>> {
         let root = match namespace {
             Some(n) => n,
@@ -412,13 +407,14 @@ impl FuguDB {
     }
 
     /// Construct a Tantivy document from an ObjectRecord
-    fn build_tantivy_doc(&self, object: &ObjectRecord) -> TantivyDocument {
+    /// Safe version of build_tantivy_doc that returns Result
+    fn build_tantivy_doc_safe(&self, object: &ObjectRecord) -> anyhow::Result<TantivyDocument> {
         // Serialize to JSON document
-        let mut doc = TantivyDocument::parse_json(
-            &self.schema,
-            serde_json::to_string(object).unwrap().as_str(),
-        )
-        .unwrap();
+        let json_str = serde_json::to_string(object)
+            .map_err(|e| anyhow!("Failed to serialize object: {}", e))?;
+
+        let mut doc = TantivyDocument::parse_json(&self.schema, &json_str)
+            .map_err(|e| anyhow!("Failed to parse JSON document: {}", e))?;
 
         // Process metadata fields
         let fields = process_additional_fields(object);
@@ -430,80 +426,58 @@ impl FuguDB {
             _ => BTreeMap::new(),
         };
         doc.add_object(self.metadata_field(), object_map);
+
         if !is_value_empty(&fields) {
             let facets = create_facet_indexes(&fields, Vec::new(), &doc);
             for f in facets {
                 doc.add_facet(self.facet_field(), Facet::from_path(f));
             }
         }
-        doc
+
+        Ok(doc)
     }
 
     /// Upsert a vector of objects: delete existing by ID then add new
-    pub async fn upsert(&self, records: Vec<ObjectRecord>) -> Result<(), impl IntoResponse> {
+    pub async fn upsert(&self, records: Vec<ObjectRecord>) -> anyhow::Result<()> {
         let mut w = self.writer().await;
         for object in records {
             if object.id.is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error":"Object ID cannot be empty","status":"error"})),
-                ));
+                return Err(anyhow!("Object ID cannot be empty"));
             }
             // Delete existing document by ID term
             let term = Term::from_field_text(self.id_field(), &object.id);
             w.delete_term(term);
             // Add new document
-            let doc = self.build_tantivy_doc(&object);
-            w.add_document(doc);
+            let doc = self.build_tantivy_doc_safe(&object)?;
+            w.add_document(doc)?;
         }
-        w.commit().unwrap();
+        w.commit()?;
         Ok(())
     }
 
+    /// Batch upsert with better error handling
+    pub async fn batch_upsert(&self, records: Vec<ObjectRecord>) -> anyhow::Result<usize> {
+        // Delegate to regular upsert since they now do the same thing
+        self.upsert(records.clone()).await?;
+        Ok(records.len())
+    }
+
     /// Index a vector of objects
-    pub async fn ingest(&self, records: Vec<ObjectRecord>) -> Result<(), impl IntoResponse> {
-        let mut w = self.writer().await;
-        for object in records {
-            // Check if the IDs are valid
-            if object.id.clone().is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": "Object ID cannot be empty",
-                        "status": "error"
-                    })),
-                ));
-            }
+    pub async fn ingest(&self, records: Vec<ObjectRecord>) -> anyhow::Result<()> {
+        // Delegate to upsert since all ingests should be upserts
+        self.upsert(records).await
+    }
 
-            let mut doc = TantivyDocument::parse_json(
-                &self.schema,
-                serde_json::to_string(&object).unwrap().as_str(),
-            )
-            .unwrap();
-
-            // Process metadata to extract additional fields and create indexes
-            let fields = process_additional_fields(&object);
-            // Convert serde_json Value to BTreeMap<String, OwnedValue> for indexing, without moving `fields`
-            let object_map: BTreeMap<String, OwnedValue> = match &fields {
-                serde_json::Value::Object(map) => map.iter()
-                    .map(|(k, v)| (k.clone(), OwnedValue::from(v.clone())))
-                    .collect(),
-                _ => BTreeMap::new(),
-            };
-            // Index raw metadata JSON object
-            doc.add_object(self.metadata_field(), object_map);
-            // If we have additional fields, merge them into metadata
-            if !is_value_empty(&fields) {
-                // Create indexes for each additional field using depth-first traversal
-                let facets = create_facet_indexes(&fields, Vec::new(), &doc);
-                for f in facets {
-                    doc.add_facet(self.facet_field(), Facet::from_path(f));
-                }
-                // Merge additional fields into metadata
-            }
-            w.add_document(doc);
+    /// Delete a single document by ID
+    pub async fn delete_document(&self, doc_id: String) -> anyhow::Result<()> {
+        if doc_id.is_empty() {
+            return Err(anyhow!("Document ID cannot be empty"));
         }
-        w.commit().unwrap();
+        let mut w = self.writer().await;
+        let id_field = self.id_field();
+        let doc_id_term = Term::from_field_text(id_field, &doc_id);
+        w.delete_term(doc_id_term);
+        w.commit()?;
         Ok(())
     }
 }

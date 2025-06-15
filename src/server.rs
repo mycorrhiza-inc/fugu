@@ -6,7 +6,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post, put},
 };
 use rkyv::with;
 use serde::{Deserialize, Serialize};
@@ -131,8 +131,7 @@ async fn search(Json(payload): Json<FuguSearchQuery>) -> Json<Value> {
     }))
 }
 
-// Helper function to check if serde_json::Value is effectively empty
-/// Ingest a single object into the database
+/// Ingest objects into the database (now performs upserts)
 async fn ingest_objects(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<IndexRequest>,
@@ -141,25 +140,127 @@ async fn ingest_objects(
     let _guard = span.enter();
 
     info!(
-        "Ingest endpoint called for {:?} objects",
+        "Ingest endpoint called for {} objects (performing upserts)",
         payload.data.len()
     );
 
     let db = state.db.clone();
-
     match db.ingest(payload.data).await {
         Ok(_) => (
             StatusCode::OK,
             Json(json!({
                 "status": "success",
+                "message": "Objects ingested successfully (upserted)"
             })),
         ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+        Err(e) => {
+            error!("Failed to ingest objects: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to ingest objects: {}", e)
+                })),
+            )
+        }
+    }
+}
+
+/// Upsert multiple objects: delete existing by ID then insert new ones
+async fn upsert_objects(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<IndexRequest>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/objects", "PUT");
+    let _guard = span.enter();
+
+    info!("Upsert endpoint called for {} objects", payload.data.len());
+
+    let db = state.db.clone();
+    match db.upsert(payload.data).await {
+        Ok(_) => (
+            StatusCode::OK,
             Json(json!({
-                "status": "failed",
+                "status": "success",
+                "message": "Objects upserted successfully"
             })),
         ),
+        Err(e) => {
+            error!("Failed to upsert objects: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to upsert objects: {}", e)
+                })),
+            )
+        }
+    }
+}
+
+/// Delete a single object by ID
+async fn delete_object(
+    State(state): State<Arc<AppState>>,
+    Path(object_id): Path<String>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span(&format!("/objects/{}", object_id), "DELETE");
+    let _guard = span.enter();
+
+    info!("Delete object endpoint called for ID: {}", object_id);
+
+    let db = state.db.clone();
+    match db.delete_document(object_id.clone()).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "message": format!("Object with ID '{}' deleted successfully", object_id)
+            })),
+        ),
+        Err(e) => {
+            error!("Failed to delete object {}: {}", object_id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to delete object: {}", e)
+                })),
+            )
+        }
+    }
+}
+async fn batch_upsert_objects(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BatchIndexRequest>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/batch/upsert", "POST");
+    let _guard = span.enter();
+
+    info!(
+        "Batch upsert endpoint called for {} objects",
+        payload.objects.len()
+    );
+
+    let db = state.db.clone();
+    match db.batch_upsert(payload.objects).await {
+        Ok(successful_count) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "message": format!("Successfully upserted {} objects", successful_count),
+                "upserted_count": successful_count
+            })),
+        ),
+        Err(e) => {
+            error!("Failed to batch upsert objects: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to batch upsert objects: {}", e)
+                })),
+            )
+        }
     }
 }
 
@@ -290,20 +391,18 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
             // Filter routes
             .route("/filters", get(list_filters))
             .route("/filters/{*filters}", get(get_filter))
-            // Ingest route
-            .route("/ingest", post(ingest_objects))
+            // Ingest and Upsert routes (all ingests are now upserts)
+            .route("/ingest", post(ingest_objects)) // Now performs upserts
+            .route("/objects", put(upsert_objects)) // Explicit upsert
+            .route("/batch/upsert", post(batch_upsert_objects)) // Batch upsert with detailed response
+            // .route("/insert", post(insert_only_objects)) // Insert-only (allows duplicates)
             // Search routes
             .route("/search", get(query_endpoints::query_text_get))
-            .route("/search", post(query_endpoints::query_json_post)) // Updated to use the real implementation
-            .route("/search/{query}", get(query_endpoints::query_text_path)) // URL path search
-            // Query routes - ADD THESE
-            .route("/query", post(query_endpoints::query_json_post)) // Same as POST /search
-            .route(
-                "/query/advanced",
-                post(query_endpoints::query_advanced_post),
-            ) // Advanced queries
+            .route("/search", post(query_endpoints::query_json_post))
+            .route("/search/{query}", get(query_endpoints::query_text_path))
             // Object routes
             .route("/objects/{object_id}", get(get_object_by_id))
+            .route("/objects/{object_id}", delete(delete_object)) // Delete single object
             // Add the shared state
             .with_state(app_state.clone());
 
@@ -331,8 +430,6 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
         info!("  GET  /search?q=<query>");
         info!("  GET  /search/<query>");
         info!("  POST /search");
-        info!("  POST /query"); // Your curl command endpoint
-        info!("  POST /query/advanced");
         info!("  POST /ingest");
         info!("  GET  /filters");
         info!("  GET  /objects/{{id}}");

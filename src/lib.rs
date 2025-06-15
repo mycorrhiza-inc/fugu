@@ -19,5 +19,8 @@ mod tokeinze;
 pub mod tracing_utils;
 pub use object::ObjectRecord;
 
+#[cfg(test)]
+mod db_test;
+
 use serde_json::json;
 use tracing::{debug, info};
