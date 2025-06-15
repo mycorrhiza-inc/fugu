@@ -57,6 +57,7 @@ pub struct FuguSearchResult {
 }
 impl FuguDB {
     pub fn new(path: PathBuf) -> Self {
+        info!("FuguDB::new – initializing with path {:?}", path);
         let schema_builder = Schema::builder();
         match fs::create_dir_all(&path) {
             Ok(_) => {}
@@ -77,6 +78,7 @@ impl FuguDB {
     /// Direct get method for convenience (assumes TREE_RECORDS)
     /// Returns the deserialized ObjectRecord if found and successfully deserialized
     pub fn get(&self, id: &str) -> anyhow::Result<Vec<TantivyDocument>> {
+        info!("FuguDB::get – querying id={}", id);
         let searcher = self.searcher()?;
         let query_parser = QueryParser::for_index(&self.index, vec![self.id_field()]);
         let query = query_parser.parse_query(id)?;
@@ -128,6 +130,13 @@ impl FuguDB {
     }
     /// Perform a search query
     pub async fn search(
+        &self,
+        query: &str,
+        filters: &[String],
+        page: usize,
+        per_page: usize,
+    ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
+        info!("FuguDB::search – query=\'{}\', filters={:?}, page={}, per_page={}", query, filters, page, per_page);
         &self,
         query: &str,
         filters: &[String],
@@ -427,6 +436,8 @@ impl FuguDB {
 
             // Process metadata to extract additional fields and create indexes
             let fields = process_additional_fields(&object);
+            // Always index raw metadata JSON
+            doc.add_json(self.metadata_field(), &fields).unwrap();
             // If we have additional fields, merge them into metadata
             if !is_value_empty(&fields) {
                 // Create indexes for each additional field using depth-first traversal

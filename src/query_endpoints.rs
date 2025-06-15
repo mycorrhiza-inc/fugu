@@ -252,10 +252,14 @@ pub async fn query_advanced_post(
     let _guard = span.enter();
     info!("Advanced query received: {}", payload);
 
-    // ... existing advanced logic unchanged ...
+    // TODO: implement advanced search logic
+    Err(
+        (StatusCode::NOT_IMPLEMENTED,
+         Json(json!({ "error": "Advanced search not implemented yet" })))
+    )
 }
 
-/// Perform the actual search logic
+
 async fn perform_search(
     db: &crate::db::FuguDB,
     query: &str,

@@ -1,3 +1,7 @@
+#![allow(unused_imports, unused_variables, unused_mut, dead_code, unused_must_use)]
+
+#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_must_use)]
+
 pub mod cli;
 pub mod db;
 pub mod object;
