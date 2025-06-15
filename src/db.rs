@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,6 +16,7 @@ use tracing_subscriber::filter;
 
 use tantivy::collector::{FacetCollector, TopDocs};
 use tantivy::query::{AllQuery, BooleanQuery, Occur, QueryParser, TermQuery};
+use tantivy::schema::OwnedValue;
 use tantivy::{DateTime, Directory, DocAddress, Score, Searcher, SegmentReader, schema::*};
 use tantivy::{Index, IndexWriter, ReloadPolicy};
 use tracing::{Instrument, debug, error, info, warn};
@@ -136,13 +137,10 @@ impl FuguDB {
         page: usize,
         per_page: usize,
     ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
-        info!("FuguDB::search – query=\'{}\', filters={:?}, page={}, per_page={}", query, filters, page, per_page);
-        &self,
-        query: &str,
-        filters: &[String],
-        page: usize,
-        per_page: usize,
-    ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
+        info!(
+            "FuguDB::search – query=\'{}\', filters={:?}, page={}, per_page={}",
+            query, filters, page, per_page
+        );
         info!(
             "Searching for query: '{}' with {} filters, page: {}, per_page: {}",
             query,
@@ -436,8 +434,15 @@ impl FuguDB {
 
             // Process metadata to extract additional fields and create indexes
             let fields = process_additional_fields(&object);
-            // Always index raw metadata JSON
-            doc.add_json(self.metadata_field(), &fields).unwrap();
+            // Convert serde_json Value to BTreeMap<String, OwnedValue> for indexing, without moving `fields`
+            let object_map: BTreeMap<String, OwnedValue> = match &fields {
+                serde_json::Value::Object(map) => map.iter()
+                    .map(|(k, v)| (k.clone(), OwnedValue::from(v.clone())))
+                    .collect(),
+                _ => BTreeMap::new(),
+            };
+            // Index raw metadata JSON object
+            doc.add_object(self.metadata_field(), object_map);
             // If we have additional fields, merge them into metadata
             if !is_value_empty(&fields) {
                 // Create indexes for each additional field using depth-first traversal

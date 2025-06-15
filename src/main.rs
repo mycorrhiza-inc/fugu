@@ -1,10 +1,7 @@
-use std::time::Instant;
-use tokio::sync::oneshot;
-use tokio::time::{Duration, interval};
-use tracing::{Instrument, debug, error, info, warn};
+use tracing::{Instrument, debug, info};
 
 // Import our crate modules
-use fugu::db::{FuguDB, FuguDBBackend};
+use fugu::db::FuguDB;
 use fugu::server;
 use fugu::tracing_utils;
 
