@@ -23,6 +23,21 @@ use tracing::{Instrument, debug, error, info, warn};
 
 use crate::object::ObjectRecord;
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FacetNode {
+    pub name: String,
+    pub path: String,
+    pub count: u64,
+    pub children: BTreeMap<String, FacetNode>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FacetTreeResponse {
+    pub tree: BTreeMap<String, FacetNode>,
+    pub max_depth: usize,
+    pub total_facets: usize,
+}
+
 // Database handle abstraction
 #[derive(Clone)]
 pub enum FuguDBBackend {
@@ -405,6 +420,46 @@ impl FuguDB {
         info!("getting facets for: {}", root);
         self.list_facet(root)
     }
+    fn collect_facets_recursive(
+        &self,
+        searcher: &Searcher,
+        facet_path: &str,
+        current_depth: usize,
+        max_depth: Option<usize>,
+        all_facets: &mut Vec<(Facet, u64)>,
+    ) -> anyhow::Result<()> {
+        // Check if we've reached max depth
+        if let Some(max_d) = max_depth {
+            if current_depth >= max_d {
+                return Ok(());
+            }
+        }
+
+        // Create facet collector for this level
+        let mut facet_collector = FacetCollector::for_field("facet");
+        facet_collector.add_facet(facet_path);
+
+        // Search and collect facets at this level
+        let facet_counts = searcher.search(&AllQuery, &facet_collector)?;
+        let facets_at_level: Vec<(&Facet, u64)> = facet_counts.get(facet_path).collect();
+
+        // Add these facets to our collection and recurse
+        for (facet, count) in facets_at_level {
+            all_facets.push((facet.clone(), count));
+
+            // Recursively collect children of this facet
+            let facet_str = facet.to_string();
+            self.collect_facets_recursive(
+                searcher,
+                &facet_str,
+                current_depth + 1,
+                max_depth,
+                all_facets,
+            )?;
+        }
+
+        Ok(())
+    }
 
     /// Construct a Tantivy document from an ObjectRecord
     /// Safe version of build_tantivy_doc that returns Result
@@ -428,9 +483,29 @@ impl FuguDB {
         doc.add_object(self.metadata_field(), object_map);
 
         if !is_value_empty(&fields) {
-            let facets = create_facet_indexes(&fields, Vec::new(), &doc);
-            for f in facets {
-                doc.add_facet(self.facet_field(), Facet::from_path(f));
+            let facet_paths = create_facet_indexes(&fields, Vec::new(), &doc);
+            for path_vec in facet_paths {
+                if let Some(path) = path_vec.first() {
+                    // Ensure the path starts with / and use proper formatting
+                    let normalized_path = if path.starts_with('/') {
+                        path.clone()
+                    } else {
+                        format!("/{}", path)
+                    };
+
+                    match Facet::from_text(&normalized_path) {
+                        Ok(facet) => {
+                            doc.add_facet(self.facet_field(), facet);
+                            info!("Added facet: {}", normalized_path);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to create facet from path '{}': {}",
+                                normalized_path, e
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -479,6 +554,291 @@ impl FuguDB {
         w.delete_term(doc_id_term);
         w.commit()?;
         Ok(())
+    }
+}
+impl FuguDB {
+    /// Get all facets and build a tree structure up to max_depth - 1
+    pub fn get_facet_tree(&self, max_depth: Option<usize>) -> anyhow::Result<FacetTreeResponse> {
+        info!("Getting facet tree with max_depth: {:?}", max_depth);
+
+        let searcher = self.searcher()?;
+        let mut all_facets = Vec::new();
+
+        // Start by collecting facets from the root
+        self.collect_facets_recursive(&searcher, "/", 0, max_depth, &mut all_facets)?;
+
+        let mut tree: BTreeMap<String, FacetNode> = BTreeMap::new();
+        let mut actual_max_depth = 0;
+        let total_facets = all_facets.len();
+
+        info!("Found {} total facets", total_facets);
+
+        for (facet, count) in all_facets {
+            let facet_str = facet.to_string();
+            info!("Processing facet: {} with count: {}", facet_str, count);
+
+            // Skip root facet "/"
+            if facet_str == "/" {
+                continue;
+            }
+
+            // Split the facet path into components, removing empty strings
+            let components: Vec<&str> = facet_str.split('/').filter(|s| !s.is_empty()).collect();
+
+            let depth = components.len();
+            actual_max_depth = actual_max_depth.max(depth);
+
+            // Apply max_depth filter if specified
+            if let Some(max_d) = max_depth {
+                if depth >= max_d {
+                    continue;
+                }
+            }
+
+            // Build the tree path
+            let mut current_map = &mut tree;
+            let mut current_path = String::new();
+
+            for (i, component) in components.iter().enumerate() {
+                current_path.push('/');
+                current_path.push_str(component);
+
+                let is_leaf = i == components.len() - 1;
+
+                current_map
+                    .entry(component.to_string())
+                    .or_insert_with(|| FacetNode {
+                        name: component.to_string(),
+                        path: current_path.clone(),
+                        count: if is_leaf { count } else { 0 },
+                        children: BTreeMap::new(),
+                    });
+
+                // If this is the leaf node, update its count
+                if is_leaf {
+                    if let Some(node) = current_map.get_mut(*component) {
+                        node.count = count;
+                    }
+                } else {
+                    // Move to the next level
+                    current_map = &mut current_map.get_mut(*component).unwrap().children;
+                }
+            }
+        }
+
+        // Update parent counts by summing children
+        fn update_parent_counts(node: &mut FacetNode) -> u64 {
+            if node.children.is_empty() {
+                return node.count;
+            }
+
+            let mut total = node.count;
+            for child in node.children.values_mut() {
+                total += update_parent_counts(child);
+            }
+            node.count = total;
+            total
+        }
+
+        for node in tree.values_mut() {
+            update_parent_counts(node);
+        }
+
+        Ok(FacetTreeResponse {
+            tree,
+            max_depth: actual_max_depth,
+            total_facets,
+        })
+    }
+}
+impl FuguDB {
+    /// Get all parent paths that have leaf children, plus their leaf values
+    pub fn get_all_filter_paths(&self) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
+        let tree_response = self.get_facet_tree(None)?;
+        let mut filter_paths = BTreeMap::new();
+
+        fn collect_parent_leaf_paths(
+            node: &FacetNode,
+            results: &mut BTreeMap<String, Vec<String>>,
+        ) {
+            // If this node has children, check if any are leaves
+            if !node.children.is_empty() {
+                let mut leaf_values = Vec::new();
+                let mut has_leaf_children = false;
+
+                for (child_name, child_node) in &node.children {
+                    if child_node.children.is_empty() {
+                        // This is a leaf
+                        leaf_values.push(child_name.clone());
+                        has_leaf_children = true;
+                    }
+                }
+
+                // If this node has leaf children, add it as a filter path
+                if has_leaf_children {
+                    results.insert(node.path.clone(), leaf_values);
+                }
+
+                // Recursively process children
+                for child_node in node.children.values() {
+                    collect_parent_leaf_paths(child_node, results);
+                }
+            }
+        }
+
+        for root_node in tree_response.tree.values() {
+            collect_parent_leaf_paths(root_node, &mut filter_paths);
+        }
+
+        Ok(filter_paths)
+    }
+
+    /// Get filter paths for documents that have a specific namespace facet
+    pub fn get_filter_paths_for_namespace(
+        &self,
+        namespace: &str,
+    ) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
+        let searcher = self.searcher()?;
+
+        // Create a query to filter by namespace facet
+        let namespace_facet = Facet::from_text(&format!("/namespace/{}", namespace))?;
+        let namespace_term = Term::from_facet(self.facet_field(), &namespace_facet);
+        let namespace_query = TermQuery::new(namespace_term, IndexRecordOption::Basic);
+
+        // Get all documents with this namespace
+        let top_docs = searcher.search(&namespace_query, &TopDocs::with_limit(10000))?;
+
+        // Collect all facets from these documents
+        let mut namespace_facets = std::collections::HashMap::new();
+
+        for (_score, doc_address) in top_docs {
+            let doc: TantivyDocument = searcher.doc(doc_address)?;
+
+            // Collect facets from this document
+            let facet_field = self.facet_field();
+            let doc_facets: Vec<Facet> = doc
+                .get_all(facet_field)
+                .filter_map(|field_value| {
+                    if let Some(facet_str) = field_value.as_facet() {
+                        Facet::from_text(facet_str).ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Process the collected facets
+            for facet in doc_facets {
+                let facet_str = facet.to_string();
+                // Skip namespace facets themselves
+                if !facet_str.starts_with("/namespace/") {
+                    *namespace_facets.entry(facet).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Build tree from these facets
+        let mut filter_paths = BTreeMap::new();
+        let mut facet_tree = BTreeMap::new();
+
+        // First, build the tree structure
+        for (facet, count) in namespace_facets {
+            let facet_str = facet.to_string();
+            if facet_str == "/" {
+                continue;
+            }
+
+            let components: Vec<&str> = facet_str.split('/').filter(|s| !s.is_empty()).collect();
+            let mut current_map = &mut facet_tree;
+            let mut current_path = String::new();
+
+            for (i, component) in components.iter().enumerate() {
+                current_path.push('/');
+                current_path.push_str(component);
+
+                let is_leaf = i == components.len() - 1;
+
+                current_map
+                    .entry(component.to_string())
+                    .or_insert_with(|| FacetNode {
+                        name: component.to_string(),
+                        path: current_path.clone(),
+                        count: if is_leaf { count } else { 0 },
+                        children: BTreeMap::new(),
+                    });
+
+                if !is_leaf {
+                    current_map = &mut current_map
+                        .get_mut(&component.to_string())
+                        .unwrap()
+                        .children;
+                }
+            }
+        }
+
+        // Now extract parent-leaf relationships
+        fn collect_namespace_parent_leaf_paths(
+            node: &FacetNode,
+            results: &mut BTreeMap<String, Vec<String>>,
+        ) {
+            if !node.children.is_empty() {
+                let mut leaf_values = Vec::new();
+                let mut has_leaf_children = false;
+
+                for (child_name, child_node) in &node.children {
+                    if child_node.children.is_empty() {
+                        leaf_values.push(child_name.clone());
+                        has_leaf_children = true;
+                    }
+                }
+
+                if has_leaf_children {
+                    results.insert(node.path.clone(), leaf_values);
+                }
+
+                for child_node in node.children.values() {
+                    collect_namespace_parent_leaf_paths(child_node, results);
+                }
+            }
+        }
+
+        for root_node in facet_tree.values() {
+            collect_namespace_parent_leaf_paths(root_node, &mut filter_paths);
+        }
+
+        Ok(filter_paths)
+    }
+
+    /// Get the values (children) at a specific filter path
+    pub fn get_filter_values_at_path(&self, filter_path: &str) -> anyhow::Result<Vec<String>> {
+        let searcher = self.searcher()?;
+        let mut facet_collector = FacetCollector::for_field("facet");
+
+        // Ensure the path starts with /
+        let normalized_path = if filter_path.starts_with('/') {
+            filter_path.to_string()
+        } else {
+            format!("/{}", filter_path)
+        };
+
+        facet_collector.add_facet(&normalized_path);
+        let facet_counts = searcher.search(&AllQuery, &facet_collector)?;
+
+        let facets_at_path: Vec<(&Facet, u64)> = facet_counts.get(&normalized_path).collect();
+
+        let mut values = Vec::new();
+        for (facet, _count) in facets_at_path {
+            let facet_str = facet.to_string();
+            // Extract just the last component of the path
+            if let Some(last_component) = facet_str.split('/').last() {
+                if !last_component.is_empty() {
+                    values.push(last_component.to_string());
+                }
+            }
+        }
+
+        values.sort();
+        Ok(values)
     }
 }
 

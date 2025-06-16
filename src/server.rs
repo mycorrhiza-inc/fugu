@@ -3,7 +3,7 @@ use crate::query_endpoints;
 use crate::{ObjectRecord, tracing_utils};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -372,6 +372,150 @@ async fn sayhi(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"message":"hi!"}))
 }
 
+#[derive(Debug, Deserialize)]
+struct FacetTreeParams {
+    max_depth: Option<usize>,
+}
+// Add this endpoint to your server.rs file
+/// Get the complete facet tree up to max_depth - 1
+async fn get_facet_tree(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<FacetTreeParams>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/facets/tree", "GET");
+    let _guard = span.enter();
+
+    info!(
+        "Get facet tree endpoint called with max_depth: {:?}",
+        params.max_depth
+    );
+
+    // Apply max_depth - 1 if specified
+    let effective_max_depth = params.max_depth.map(|d| if d > 0 { d - 1 } else { 0 });
+
+    match state.db.get_facet_tree(effective_max_depth) {
+        Ok(tree_response) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "data": tree_response
+            })),
+        ),
+        Err(e) => {
+            error!("Failed to get facet tree: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to get facet tree: {}", e)
+                })),
+            )
+        }
+    }
+}
+
+/// Get filter paths for a specific namespace
+async fn get_namespace_filters(
+    State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span(&format!("/filters/namespace/{}", namespace), "GET");
+    let _guard = span.enter();
+
+    info!(
+        "Get namespace filter paths endpoint called for namespace: {}",
+        namespace
+    );
+
+    match state.db.get_filter_paths_for_namespace(&namespace) {
+        Ok(filter_paths) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "namespace": namespace,
+                "filter_paths": filter_paths
+            })),
+        ),
+        Err(e) => {
+            error!(
+                "Failed to get filter paths for namespace {}: {}",
+                namespace, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to get filter paths for namespace: {}", e)
+                })),
+            )
+        }
+    }
+}
+
+async fn get_all_filters(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/filters/all", "GET");
+    let _guard = span.enter();
+
+    info!("Get all filter paths endpoint called");
+
+    match state.db.get_all_filter_paths() {
+        Ok(filter_paths) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "filter_paths": filter_paths
+            })),
+        ),
+        Err(e) => {
+            error!("Failed to get all filter paths: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to get filter paths: {}", e)
+                })),
+            )
+        }
+    }
+}
+/// Get filter values at a specific path
+async fn get_filter_values_at_path(
+    State(state): State<Arc<AppState>>,
+    Path(filter_path): Path<String>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span(&format!("/filters/path/{}", filter_path), "GET");
+    let _guard = span.enter();
+
+    info!(
+        "Get filter values endpoint called for path: {}",
+        filter_path
+    );
+
+    match state.db.get_filter_values_at_path(&filter_path) {
+        Ok(values) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "path": filter_path,
+                "values": values
+            })),
+        ),
+        Err(e) => {
+            error!(
+                "Failed to get filter values for path {}: {}",
+                filter_path, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to get filter values: {}", e)
+                })),
+            )
+        }
+    }
+}
+
 // Update your start_http_server function in your server file
 
 pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
@@ -389,8 +533,9 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
             .route("/", get(|| async move { "Hello from Fugu API" }))
             .route("/health", get(health))
             // Filter routes
-            .route("/filters", get(list_filters))
-            .route("/filters/{*filters}", get(get_filter))
+            .route("/filters/all", get(get_all_filters))
+            .route("/filters/namespace/{namespace}", get(get_namespace_filters))
+            .route("/filters/path/{*filter}", get(get_filter_values_at_path))
             // Ingest and Upsert routes (all ingests are now upserts)
             .route("/ingest", post(ingest_objects)) // Now performs upserts
             .route("/objects", put(upsert_objects)) // Explicit upsert
