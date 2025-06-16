@@ -1859,6 +1859,7 @@ dependencies = [
  "sled",
  "tantivy",
  "tempfile",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
