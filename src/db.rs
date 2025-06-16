@@ -199,8 +199,31 @@ impl FuguDB {
         let offset = page * per_page;
         let limit = per_page + offset; // Get extra docs to handle pagination
 
-        // Execute the search
-        let top_docs = searcher.search(&parsed_query, &TopDocs::with_limit(limit))?;
+        // Combine with facet filters if provided
+        let query_with_facets: Box<dyn tantivy::query::Query> = if !filters.is_empty() {
+            let facet_field = self.facet_field();
+            let mut facet_terms = Vec::new();
+            for filter in filters {
+                let facet_path = if filter.starts_with('/') {
+                    filter.clone()
+                } else {
+                    format!("/{}", filter)
+                };
+                if let Ok(facet) = tantivy::schema::Facet::from_text(&facet_path) {
+                    facet_terms.push(tantivy::Term::from_facet(facet_field, &facet));
+                }
+            }
+            if !facet_terms.is_empty() {
+                let facet_query = Box::new(tantivy::query::BooleanQuery::new_multiterms_query(facet_terms));
+                Box::new(tantivy::query::BooleanQuery::new(vec![(Occur::Must, parsed_query), (Occur::Must, facet_query)]))
+            } else {
+                parsed_query
+            }
+        } else {
+            parsed_query
+        };
+        // Execute the search with combined query
+        let top_docs = searcher.search(&query_with_facets, &TopDocs::with_limit(limit))?;
 
         debug!("Found {} total documents", top_docs.len());
 
@@ -401,11 +424,20 @@ impl FuguDB {
             None
         };
 
-        // Extract namespace as facet if present
-        let facets = if let Ok(namespace_field) = self.schema.get_field("namespace") {
-            doc.get_first(namespace_field)
-                .and_then(|v| v.as_str())
-                .map(|ns| vec![ns.to_string()])
+        // Extract all facets for the document
+        let facets = if let Ok(facet_field) = self.schema.get_field("facet") {
+            let facet_vals: Vec<String> = doc
+                .get_all(facet_field)
+                .filter_map(|value| value.as_facet().map(|s| {
+                    let raw = s.to_string();
+                    raw.replace('\u{0000}', "/")
+                }))
+                .collect();
+            if !facet_vals.is_empty() {
+                Some(facet_vals)
+            } else {
+                None
+            }
         } else {
             None
         };

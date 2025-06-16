@@ -99,7 +99,7 @@ pub fn build_object_record_schema(mut schema_builder: SchemaBuilder) -> Schema {
     schema_builder.add_text_field("data_type", TEXT | STORED);
 
     // Facet field for hierarchical filtering
-    schema_builder.add_facet_field("facet", INDEXED);
+    schema_builder.add_facet_field("facet", INDEXED | STORED);
 
     // Metadata as JSON object
     schema_builder.add_json_field("metadata", STORED);

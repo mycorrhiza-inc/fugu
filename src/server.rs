@@ -119,17 +119,45 @@ async fn health() -> &'static str {
     "OK"
 }
 
-/// Search all namespaces
-async fn search(Json(payload): Json<FuguSearchQuery>) -> Json<Value> {
+/// Search endpoint returning full facet paths for each result
+async fn search(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<FuguSearchQuery>,
+) -> impl IntoResponse {
     let span = tracing_utils::server_span("/search", "POST");
     let _guard = span.enter();
 
-    debug!("Search endpoint called with query: {}", payload.query);
+    let query = payload.query.clone();
+    let filters = payload.filters.clone().unwrap_or_default();
+    let page = payload.page.as_ref().and_then(|p| p.page).unwrap_or(0);
+    let per_page = payload.page.as_ref().and_then(|p| p.per_page).unwrap_or(20);
 
-    Json(json!({
-        "query": payload.query,
-        "filters": payload.filters
-    }))
+    info!("Search endpoint called with query: {} and filters: {:?}", query, filters);
+
+    match state.db.search(&query, &filters, page, per_page).await {
+        Ok(results) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "query": query,
+                "filters": filters,
+                "page": page,
+                "per_page": per_page,
+                "total": results.len(),
+                "results": results
+            })),
+        ),
+        Err(e) => {
+            error!("Search failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Search failed: {}", e)
+                })),
+            )
+        }
+    }
 }
 
 /// Ingest objects into the database (now performs upserts)
@@ -850,9 +878,7 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
             // Existing routes
             .route("/objects", put(upsert_objects))
             .route("/batch/upsert", post(batch_upsert_objects))
-            .route("/search", get(query_endpoints::query_text_get))
-            .route("/search", post(query_endpoints::query_json_post))
-            .route("/search/{query}", get(query_endpoints::query_text_path))
+            .route("/search", post(search))
             .route("/objects/{object_id}", get(get_object_by_id))
             .route("/objects/{object_id}", delete(delete_object))
             // Add the shared state
