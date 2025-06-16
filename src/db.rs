@@ -1,3 +1,4 @@
+// db.rs
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -36,18 +37,6 @@ pub struct FacetTreeResponse {
     pub tree: BTreeMap<String, FacetNode>,
     pub max_depth: usize,
     pub total_facets: usize,
-}
-
-// Database handle abstraction
-#[derive(Clone)]
-pub enum FuguDBBackend {
-    Fjall(fjall::Keyspace),
-}
-
-// Tree handle abstraction
-#[derive(Clone)]
-pub enum TreeHandle {
-    Fjall(fjall::PartitionHandle),
 }
 
 // Batch operation abstraction
@@ -130,6 +119,22 @@ impl FuguDB {
     }
     pub fn date_created(&self) -> tantivy::schema::Field {
         self.schema.get_field("date_updated").unwrap()
+    }
+    // New field accessors for namespace-aware fields
+    pub fn namespace_field(&self) -> tantivy::schema::Field {
+        self.schema.get_field("namespace").unwrap()
+    }
+
+    pub fn organization_field(&self) -> tantivy::schema::Field {
+        self.schema.get_field("organization").unwrap()
+    }
+
+    pub fn conversation_id_field(&self) -> tantivy::schema::Field {
+        self.schema.get_field("conversation_id").unwrap()
+    }
+
+    pub fn data_type_field(&self) -> tantivy::schema::Field {
+        self.schema.get_field("data_type").unwrap()
     }
 
     pub fn schema(&self) -> tantivy::schema::Schema {
@@ -222,7 +227,142 @@ impl FuguDB {
         info!("Search completed, returning {} results", results.len());
         Ok(results)
     }
+    /// Enhanced search with namespace facet filtering
+    pub async fn search_with_namespace_facets(
+        &self,
+        query: &str,
+        namespace_filters: &[String], // e.g., ["namespace/NYPUC/organization", "namespace/DOE/data"]
+        page: usize,
+        per_page: usize,
+    ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
+        info!(
+            "Searching with namespace facets: query='{}', facets={:?}",
+            query, namespace_filters
+        );
 
+        let reader = self.index.reader()?;
+        let searcher = reader.searcher();
+
+        // Build the main text query
+        let text_field = self.text_field();
+        let query_parser = QueryParser::for_index(&self.index, vec![text_field]);
+        let text_query = match query_parser.parse_query(query) {
+            Ok(q) => q,
+            Err(e) => {
+                warn!("Failed to parse query '{}': {}", query, e);
+                let escaped_query = query.replace(['(', ')', '[', ']', '{', '}', '"'], "");
+                query_parser.parse_query(&escaped_query)?
+            }
+        };
+
+        // Build facet filters
+        if !namespace_filters.is_empty() {
+            let facet_field = self.facet_field();
+            let mut facet_terms = Vec::new();
+
+            for filter in namespace_filters {
+                let facet_path = if filter.starts_with('/') {
+                    filter.clone()
+                } else {
+                    format!("/{}", filter)
+                };
+
+                match tantivy::schema::Facet::from_text(&facet_path) {
+                    Ok(facet) => {
+                        let term = Term::from_facet(facet_field, &facet);
+                        facet_terms.push(term);
+                    }
+                    Err(e) => {
+                        warn!("Invalid facet path '{}': {}", facet_path, e);
+                    }
+                }
+            }
+
+            if !facet_terms.is_empty() {
+                // Combine text query with facet filters using BooleanQuery
+                let facet_query = Box::new(BooleanQuery::new_multiterms_query(facet_terms));
+                let combined_query =
+                    BooleanQuery::new(vec![(Occur::Must, text_query), (Occur::Must, facet_query)]);
+
+                let offset = page * per_page;
+                let limit = per_page + offset;
+                let top_docs = searcher.search(&combined_query, &TopDocs::with_limit(limit))?;
+
+                let results: Vec<FuguSearchResult> = top_docs
+                    .into_iter()
+                    .skip(offset)
+                    .take(per_page)
+                    .map(|(score, doc_address)| match searcher.doc(doc_address) {
+                        Ok(doc) => self.convert_doc_to_search_result(doc, score),
+                        Err(e) => {
+                            error!("Failed to retrieve document: {}", e);
+                            FuguSearchResult {
+                                id: "error".to_string(),
+                                score: 0.0,
+                                text: "Error retrieving document".to_string(),
+                                metadata: None,
+                                facets: None,
+                            }
+                        }
+                    })
+                    .collect();
+
+                return Ok(results);
+            }
+        }
+
+        // Fallback to regular search if no valid facet filters
+        self.search(query, &[], page, per_page).await
+    }
+
+    /// Get facets for a specific namespace
+    pub fn get_namespace_facets(
+        &self,
+        namespace: &str,
+    ) -> anyhow::Result<Vec<(tantivy::schema::Facet, u64)>> {
+        let searcher = self.searcher()?;
+        let namespace_root = format!("/namespace/{}", namespace);
+
+        let mut facet_collector = FacetCollector::for_field("facet");
+        facet_collector.add_facet(&namespace_root);
+
+        let facet_counts = searcher.search(&AllQuery, &facet_collector)?;
+        let facets: Vec<(&tantivy::schema::Facet, u64)> =
+            facet_counts.get(&namespace_root).collect();
+
+        let mut result = Vec::new();
+        for (facet, count) in facets {
+            result.push((facet.clone(), count));
+        }
+
+        Ok(result)
+    }
+
+    /// Get all available namespaces
+    pub fn get_available_namespaces(&self) -> anyhow::Result<Vec<String>> {
+        let searcher = self.searcher()?;
+        let mut facet_collector = FacetCollector::for_field("facet");
+        facet_collector.add_facet("/namespace");
+
+        let facet_counts = searcher.search(&AllQuery, &facet_collector)?;
+        let facets: Vec<(&tantivy::schema::Facet, u64)> = facet_counts.get("/namespace").collect();
+
+        let mut namespaces = Vec::new();
+        for (facet, _count) in facets {
+            let facet_str = facet.to_string();
+            // Extract namespace from "/namespace/NYPUC" format
+            if let Some(namespace) = facet_str.strip_prefix("/namespace/") {
+                if !namespace.contains('/') {
+                    // Only top-level namespaces
+                    namespaces.push(namespace.to_string());
+                }
+            }
+        }
+
+        namespaces.sort();
+        namespaces.dedup();
+        Ok(namespaces)
+    }
     /// Simple search method for basic queries
     pub async fn simple_search(
         &self,
@@ -463,49 +603,115 @@ impl FuguDB {
 
     /// Construct a Tantivy document from an ObjectRecord
     /// Safe version of build_tantivy_doc that returns Result
+    /// Enhanced build_tantivy_doc_safe with namespace facet generation
     fn build_tantivy_doc_safe(&self, object: &ObjectRecord) -> anyhow::Result<TantivyDocument> {
-        // Serialize to JSON document
-        let json_str = serde_json::to_string(object)
-            .map_err(|e| anyhow!("Failed to serialize object: {}", e))?;
+        let mut doc = TantivyDocument::new();
 
-        let mut doc = TantivyDocument::parse_json(&self.schema, &json_str)
-            .map_err(|e| anyhow!("Failed to parse JSON document: {}", e))?;
+        // Core fields
+        doc.add_text(self.id_field(), &object.id);
+        doc.add_text(self.text_field(), &object.text);
 
-        // Process metadata fields
-        let fields = process_additional_fields(object);
-        let object_map: BTreeMap<String, OwnedValue> = match &fields {
-            serde_json::Value::Object(map) => map
-                .iter()
-                .map(|(k, v)| (k.clone(), OwnedValue::from(v.clone())))
-                .collect(),
-            _ => BTreeMap::new(),
-        };
-        doc.add_object(self.metadata_field(), object_map);
+        // Add namespace field
+        if let Some(namespace) = &object.namespace {
+            doc.add_text(self.namespace_field(), namespace);
+        }
 
-        if !is_value_empty(&fields) {
-            let facet_paths = create_facet_indexes(&fields, Vec::new(), &doc);
-            for path_vec in facet_paths {
-                if let Some(path) = path_vec.first() {
-                    // Ensure the path starts with / and use proper formatting
+        // Add new namespace-aware fields
+        if let Some(organization) = &object.organization {
+            doc.add_text(self.organization_field(), organization);
+        }
+
+        if let Some(conversation_id) = &object.conversation_id {
+            doc.add_text(self.conversation_id_field(), conversation_id);
+        }
+
+        if let Some(data_type) = &object.data_type {
+            doc.add_text(self.data_type_field(), data_type);
+        }
+
+        // Add metadata if present
+        if let Some(metadata) = &object.metadata {
+            let object_map: std::collections::BTreeMap<String, OwnedValue> = match metadata {
+                serde_json::Value::Object(map) => map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), OwnedValue::from(v.clone())))
+                    .collect(),
+                _ => std::collections::BTreeMap::new(),
+            };
+            doc.add_object(self.metadata_field(), object_map);
+        }
+
+        // Generate and add namespace facets
+        let namespace_facets = object.generate_namespace_facets();
+        for facet_path in namespace_facets {
+            match tantivy::schema::Facet::from_text(&facet_path) {
+                Ok(facet) => {
+                    doc.add_facet(self.facet_field(), facet);
+                    info!("Added namespace facet: {}", facet_path);
+                }
+                Err(e) => {
+                    warn!("Failed to create facet from path '{}': {}", facet_path, e);
+                }
+            }
+        }
+
+        // Process additional metadata facets
+        if let Some(metadata) = &object.metadata {
+            let additional_facets = create_metadata_facets(metadata, Vec::new());
+            for facet_path in additional_facets {
+                if let Some(path) = facet_path.first() {
                     let normalized_path = if path.starts_with('/') {
                         path.clone()
                     } else {
-                        format!("/{}", path)
+                        format!("/metadata/{}", path)
                     };
 
-                    match Facet::from_text(&normalized_path) {
+                    match tantivy::schema::Facet::from_text(&normalized_path) {
                         Ok(facet) => {
                             doc.add_facet(self.facet_field(), facet);
-                            info!("Added facet: {}", normalized_path);
+                            info!("Added metadata facet: {}", normalized_path);
                         }
                         Err(e) => {
                             warn!(
-                                "Failed to create facet from path '{}': {}",
+                                "Failed to create metadata facet from path '{}': {}",
                                 normalized_path, e
                             );
                         }
                     }
                 }
+            }
+        }
+
+        // Add date fields if present
+        // FIXED: Add date fields with proper DateTime conversion
+        if let Some(date_str) = &object.date_created {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str) {
+                // Convert to OffsetDateTime and then to tantivy DateTime
+                let offset_dt = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
+                    .map_err(|e| anyhow!("Failed to convert timestamp: {}", e))?
+                    .replace_nanosecond(dt.timestamp_subsec_nanos())
+                    .map_err(|e| anyhow!("Failed to set nanoseconds: {}", e))?;
+                doc.add_date(self.date_created(), DateTime::from_utc(offset_dt));
+            }
+        }
+
+        if let Some(date_str) = &object.date_updated {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str) {
+                let offset_dt = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
+                    .map_err(|e| anyhow!("Failed to convert timestamp: {}", e))?
+                    .replace_nanosecond(dt.timestamp_subsec_nanos())
+                    .map_err(|e| anyhow!("Failed to set nanoseconds: {}", e))?;
+                doc.add_date(self.date_updated(), DateTime::from_utc(offset_dt));
+            }
+        }
+
+        if let Some(date_str) = &object.date_published {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str) {
+                let offset_dt = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
+                    .map_err(|e| anyhow!("Failed to convert timestamp: {}", e))?
+                    .replace_nanosecond(dt.timestamp_subsec_nanos())
+                    .map_err(|e| anyhow!("Failed to set nanoseconds: {}", e))?;
+                doc.add_date(self.date_published(), DateTime::from_utc(offset_dt));
             }
         }
 
@@ -902,4 +1108,36 @@ fn is_value_empty(value: &serde_json::Value) -> bool {
         serde_json::Value::Array(arr) => arr.is_empty(),
         serde_json::Value::Object(obj) => obj.is_empty(),
     }
+}
+// Helper function to create metadata facets
+fn create_metadata_facets(value: &serde_json::Value, mut prefix: Vec<String>) -> Vec<Vec<String>> {
+    let mut facets = Vec::new();
+
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map {
+                let mut new_prefix = prefix.clone();
+                new_prefix.push(key.clone());
+                let sub_facets = create_metadata_facets(val, new_prefix);
+                facets.extend(sub_facets);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                let sub_facets = create_metadata_facets(item, prefix.clone());
+                facets.extend(sub_facets);
+            }
+        }
+        _ => {
+            // For primitive values, create a facet path
+            if let Some(value_str) = value.as_str() {
+                if !value_str.is_empty() {
+                    prefix.push(value_str.to_string());
+                    facets.push(prefix);
+                }
+            }
+        }
+    }
+
+    facets
 }

@@ -1,5 +1,6 @@
+// query_endpoints.rs
+use crate::db::FuguSearchResult; // Import from your db module
 use crate::tracing_utils;
-use crate::db::FuguSearchResult;  // Import from your db module
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -18,7 +19,7 @@ use crate::server::AppState;
 /// now also accepts ?text=true/false
 #[derive(Debug, Deserialize)]
 pub struct TextQueryParams {
-    q: String,              // Changed from "query" to "q" to match standard
+    q: String, // Changed from "query" to "q" to match standard
     #[serde(default)]
     limit: Option<usize>,
     /// whether to include the `text` of each hit
@@ -78,7 +79,7 @@ pub async fn query_text_get(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": "Query parameter 'q' cannot be empty"
-            }))
+            })),
         );
     }
 
@@ -99,7 +100,10 @@ pub async fn query_text_get(
                     }
                 }
             }
-            info!("Search completed successfully with {} results", response.results.len());
+            info!(
+                "Search completed successfully with {} results",
+                response.results.len()
+            );
             (StatusCode::OK, Json(out))
         }
         Err(err) => {
@@ -108,7 +112,7 @@ pub async fn query_text_get(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": format!("Search failed: {}", err)
-                }))
+                })),
             )
         }
     }
@@ -131,7 +135,7 @@ pub async fn query_text_path(
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": "Invalid URL encoding in query"
-                }))
+                })),
             );
         }
     };
@@ -142,7 +146,7 @@ pub async fn query_text_path(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": "Query cannot be empty"
-            }))
+            })),
         );
     }
 
@@ -160,7 +164,10 @@ pub async fn query_text_path(
                     }
                 }
             }
-            info!("Search completed successfully with {} results", response.results.len());
+            info!(
+                "Search completed successfully with {} results",
+                response.results.len()
+            );
             (StatusCode::OK, Json(out))
         }
         Err(err) => {
@@ -169,7 +176,7 @@ pub async fn query_text_path(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": format!("Search failed: {}", err)
-                }))
+                })),
             )
         }
     }
@@ -190,12 +197,12 @@ pub async fn query_json_post(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": "Query cannot be empty"
-            }))
+            })),
         ));
     }
 
     // resolve text inclusion flags
-    let url_text  = flag.text.unwrap_or(false);
+    let url_text = flag.text.unwrap_or(false);
     let body_text = payload.text.unwrap_or(false);
     let include_text = if flag.text.is_some() {
         url_text
@@ -205,13 +212,13 @@ pub async fn query_json_post(
     let mut developer_message = None;
     if flag.text.is_some() && payload.text.is_some() && url_text != body_text {
         developer_message = Some(
-            "url and request body are set to different values; using url:true/false".to_string()
+            "url and request body are set to different values; using url:true/false".to_string(),
         );
     }
 
     let filters = payload.filters.unwrap_or_default();
-    let page    = payload.page.as_ref().and_then(|p| p.page).unwrap_or(0);
-    let per_page= payload.page.as_ref().and_then(|p| p.per_page).unwrap_or(20);
+    let page = payload.page.as_ref().and_then(|p| p.page).unwrap_or(0);
+    let per_page = payload.page.as_ref().and_then(|p| p.per_page).unwrap_or(20);
 
     // Perform the search
     match perform_search(&state.db, &payload.query, &filters, page, per_page).await {
@@ -227,17 +234,21 @@ pub async fn query_json_post(
                 }
             }
             if let Some(msg) = developer_message {
-                out.as_object_mut().unwrap()
+                out.as_object_mut()
+                    .unwrap()
                     .insert("developer_message".into(), json!(msg));
             }
-            info!("Search completed successfully with {} results", response.results.len());
+            info!(
+                "Search completed successfully with {} results",
+                response.results.len()
+            );
             Ok(Json(out))
         }
         Err(err) => {
             error!("Search failed: {}", err);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("Search failed: {}", err) }))
+                Json(json!({ "error": format!("Search failed: {}", err) })),
             ))
         }
     }
@@ -253,12 +264,11 @@ pub async fn query_advanced_post(
     info!("Advanced query received: {}", payload);
 
     // TODO: implement advanced search logic
-    Err(
-        (StatusCode::NOT_IMPLEMENTED,
-         Json(json!({ "error": "Advanced search not implemented yet" })))
-    )
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({ "error": "Advanced search not implemented yet" })),
+    ))
 }
-
 
 async fn perform_search(
     db: &crate::db::FuguDB,
@@ -267,26 +277,44 @@ async fn perform_search(
     page: usize,
     per_page: usize,
 ) -> Result<SearchResponse, Box<dyn std::error::Error + Send + Sync>> {
-    info!("Performing search for query: '{}' with {} filters", query, filters.len());
+    info!(
+        "Performing search for query: '{}' with {} filters",
+        query,
+        filters.len()
+    );
 
     // Validate pagination parameters
-    let per_page = if per_page == 0 || per_page > 100 { 20 } else { per_page };
+    let per_page = if per_page == 0 || per_page > 100 {
+        20
+    } else {
+        per_page
+    };
 
     // Perform the search using FuguDB
     match db.search(query, filters, page, per_page).await {
         Ok(search_results) => {
             let results = search_results;
             let total = results.len();
-            info!("Search completed successfully with {} results", results.len());
+            info!(
+                "Search completed successfully with {} results",
+                results.len()
+            );
 
-            Ok(SearchResponse { results, total, page, per_page, query: query.to_string() })
+            Ok(SearchResponse {
+                results,
+                total,
+                page,
+                per_page,
+                query: query.to_string(),
+            })
         }
         Err(e) => {
             error!("Database search failed: {}", e);
             Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Search failed: {}", e)
+                format!("Search failed: {}", e),
             )))
         }
     }
 }
+

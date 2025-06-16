@@ -1,3 +1,4 @@
+// server.rs
 use crate::db::FuguDB;
 use crate::query_endpoints;
 use crate::{ObjectRecord, tracing_utils};
@@ -269,19 +270,304 @@ async fn batch_upsert_objects(
 // Recursively create indexes for all fields depth-first
 
 /// Search in a specific namespace
-async fn search_namespace(
-    Path(namespace): Path<String>,
-    Json(payload): Json<Value>,
-) -> Json<Value> {
-    let span = tracing_utils::server_span(&format!("/search/{}", namespace), "POST");
+// Enhanced server.rs endpoints for namespace facet support
+
+/// Enhanced search endpoint with namespace facet support
+async fn search_with_namespace_facets(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<FuguSearchQuery>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/search/namespace", "POST");
     let _guard = span.enter();
 
-    debug!(
-        "Namespace search endpoint called for namespace: {}",
+    info!(
+        "Namespace facet search endpoint called with query: {}",
+        payload.query
+    );
+
+    let db = state.db.clone();
+    let filters = payload.filters.unwrap_or_default();
+    let page = payload.page.as_ref().and_then(|p| p.page).unwrap_or(0);
+    let per_page = payload.page.as_ref().and_then(|p| p.per_page).unwrap_or(20);
+
+    match db
+        .search_with_namespace_facets(&payload.query, &filters, page, per_page)
+        .await
+    {
+        Ok(results) => {
+            let response = json!({
+                "status": "success",
+                "results": results,
+                "query": payload.query,
+                "filters": filters,
+                "total": results.len(),
+                "page": page,
+                "per_page": per_page
+            });
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            error!("Namespace facet search failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Search failed: {}", e)
+                })),
+            )
+        }
+    }
+}
+
+/// Get facets for a specific namespace
+async fn get_namespace_facets(
+    State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span(&format!("/namespaces/{}/facets", namespace), "GET");
+    let _guard = span.enter();
+
+    info!("Get namespace facets endpoint called for: {}", namespace);
+
+    let db = state.db.clone();
+    match db.get_namespace_facets(&namespace) {
+        Ok(facets) => {
+            let facet_list: Vec<serde_json::Value> = facets
+                .iter()
+                .map(|(facet, count)| {
+                    json!({
+                        "path": facet.to_string(),
+                        "count": count
+                    })
+                })
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "success",
+                    "namespace": namespace,
+                    "facets": facet_list
+                })),
+            )
+        }
+        Err(e) => {
+            error!("Failed to get namespace facets for {}: {}", namespace, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to get namespace facets: {}", e)
+                })),
+            )
+        }
+    }
+}
+
+/// Get all available namespaces
+async fn get_available_namespaces(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/namespaces", "GET");
+    let _guard = span.enter();
+
+    info!("Get available namespaces endpoint called");
+
+    let db = state.db.clone();
+    match db.get_available_namespaces() {
+        Ok(namespaces) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "namespaces": namespaces
+            })),
+        ),
+        Err(e) => {
+            error!("Failed to get available namespaces: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to get namespaces: {}", e)
+                })),
+            )
+        }
+    }
+}
+
+/// Enhanced ingest endpoint that supports namespace facets
+async fn ingest_objects_with_namespace_facets(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<IndexRequest>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/ingest/namespace", "POST");
+    let _guard = span.enter();
+
+    info!(
+        "Enhanced ingest endpoint called for {} objects with namespace facet support",
+        payload.data.len()
+    );
+
+    // Validate all objects first
+    for (i, object) in payload.data.iter().enumerate() {
+        if let Err(e) = object.validate() {
+            error!("Validation failed for object at index {}: {}", i, e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Validation failed for object at index {}: {}", i, e)
+                })),
+            );
+        }
+    }
+
+    let db = state.db.clone();
+    match db.upsert(payload.data).await {
+        Ok(_) => {
+            info!("Successfully ingested objects with namespace facets");
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "success",
+                    "message": "Objects ingested successfully with namespace facets"
+                })),
+            )
+        }
+        Err(e) => {
+            error!("Failed to ingest objects with namespace facets: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to ingest objects: {}", e)
+                })),
+            )
+        }
+    }
+}
+
+/// Get organization types for a namespace
+async fn get_namespace_organizations(
+    State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
+) -> impl IntoResponse {
+    let span =
+        tracing_utils::server_span(&format!("/namespaces/{}/organizations", namespace), "GET");
+    let _guard = span.enter();
+
+    info!(
+        "Get namespace organizations endpoint called for: {}",
         namespace
     );
 
-    Json(json!({"namespace": namespace, "payload": payload}))
+    let db = state.db.clone();
+    let filter_path = format!("/namespace/{}/organization", namespace);
+
+    match db.get_filter_values_at_path(&filter_path) {
+        Ok(organizations) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "namespace": namespace,
+                "organizations": organizations
+            })),
+        ),
+        Err(e) => {
+            error!(
+                "Failed to get organizations for namespace {}: {}",
+                namespace, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to get organizations: {}", e)
+                })),
+            )
+        }
+    }
+}
+
+/// Get conversation IDs for a namespace
+async fn get_namespace_conversations(
+    State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
+) -> impl IntoResponse {
+    let span =
+        tracing_utils::server_span(&format!("/namespaces/{}/conversations", namespace), "GET");
+    let _guard = span.enter();
+
+    info!(
+        "Get namespace conversations endpoint called for: {}",
+        namespace
+    );
+
+    let db = state.db.clone();
+    let filter_path = format!("/namespace/{}/conversation", namespace);
+
+    match db.get_filter_values_at_path(&filter_path) {
+        Ok(conversations) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "namespace": namespace,
+                "conversations": conversations
+            })),
+        ),
+        Err(e) => {
+            error!(
+                "Failed to get conversations for namespace {}: {}",
+                namespace, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to get conversations: {}", e)
+                })),
+            )
+        }
+    }
+}
+
+/// Get data types for a namespace
+async fn get_namespace_data_types(
+    State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span(&format!("/namespaces/{}/data", namespace), "GET");
+    let _guard = span.enter();
+
+    info!(
+        "Get namespace data types endpoint called for: {}",
+        namespace
+    );
+
+    let db = state.db.clone();
+    let filter_path = format!("/namespace/{}/data", namespace);
+
+    match db.get_filter_values_at_path(&filter_path) {
+        Ok(data_types) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "namespace": namespace,
+                "data_types": data_types
+            })),
+        ),
+        Err(e) => {
+            error!(
+                "Failed to get data types for namespace {}: {}",
+                namespace, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Failed to get data types: {}", e)
+                })),
+            )
+        }
+    }
 }
 
 /// List all namespaces
@@ -530,24 +816,45 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
         // Create the router with shared state
         let app = Router::new()
             // Basic routes
-            .route("/", get(|| async move { "Hello from Fugu API" }))
+            .route(
+                "/",
+                get(|| async move { "Hello from Fugu API with Namespace Facets" }),
+            )
             .route("/health", get(health))
-            // Filter routes
+            // Enhanced namespace routes
+            .route("/namespaces", get(get_available_namespaces))
+            .route("/namespaces/{namespace}/facets", get(get_namespace_facets))
+            .route(
+                "/namespaces/{namespace}/organizations",
+                get(get_namespace_organizations),
+            )
+            .route(
+                "/namespaces/{namespace}/conversations",
+                get(get_namespace_conversations),
+            )
+            .route(
+                "/namespaces/{namespace}/data",
+                get(get_namespace_data_types),
+            )
+            // Filter routes (existing)
             .route("/filters/all", get(get_all_filters))
             .route("/filters/namespace/{namespace}", get(get_namespace_filters))
             .route("/filters/path/{*filter}", get(get_filter_values_at_path))
-            // Ingest and Upsert routes (all ingests are now upserts)
-            .route("/ingest", post(ingest_objects)) // Now performs upserts
-            .route("/objects", put(upsert_objects)) // Explicit upsert
-            .route("/batch/upsert", post(batch_upsert_objects)) // Batch upsert with detailed response
-            // .route("/insert", post(insert_only_objects)) // Insert-only (allows duplicates)
-            // Search routes
+            // Enhanced ingest and search routes
+            .route("/ingest", post(ingest_objects)) // Regular ingest (now with namespace facet support)
+            .route(
+                "/ingest/namespace",
+                post(ingest_objects_with_namespace_facets),
+            ) // Explicit namespace facet ingest
+            .route("/search/namespace", post(search_with_namespace_facets)) // Enhanced search
+            // Existing routes
+            .route("/objects", put(upsert_objects))
+            .route("/batch/upsert", post(batch_upsert_objects))
             .route("/search", get(query_endpoints::query_text_get))
             .route("/search", post(query_endpoints::query_json_post))
             .route("/search/{query}", get(query_endpoints::query_text_path))
-            // Object routes
             .route("/objects/{object_id}", get(get_object_by_id))
-            .route("/objects/{object_id}", delete(delete_object)) // Delete single object
+            .route("/objects/{object_id}", delete(delete_object))
             // Add the shared state
             .with_state(app_state.clone());
 
@@ -572,11 +879,16 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
             server_addr,
         );
         info!("  GET  /health");
+        info!("  GET  /namespaces");
+        info!("  GET  /namespaces/{{namespace}}/facets");
+        info!("  GET  /namespaces/{{namespace}}/organizations");
+        info!("  GET  /namespaces/{{namespace}}/conversations");
+        info!("  GET  /namespaces/{{namespace}}/data");
+        info!("  POST /ingest (with namespace facet support)");
+        info!("  POST /ingest/namespace");
+        info!("  POST /search/namespace");
         info!("  GET  /search?q=<query>");
-        info!("  GET  /search/<query>");
         info!("  POST /search");
-        info!("  POST /ingest");
-        info!("  GET  /filters");
         info!("  GET  /objects/{{id}}");
 
         // Start the server with graceful shutdown
