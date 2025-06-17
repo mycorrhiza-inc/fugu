@@ -178,9 +178,13 @@ impl FuguDB {
             .schema
             .get_field("text")
             .map_err(|e| format!("Text field not found in schema: {}", e))?;
+        let name_field = self
+            .schema
+            .get_field("name")
+            .map_err(|e| format!("Text field not found in schema: {}", e))?;
 
         // Create query parser
-        let query_parser = QueryParser::for_index(&self.index, vec![text_field]);
+        let query_parser = QueryParser::for_index(&self.index, vec![text_field, name_field]);
 
         // Parse the query
         let parsed_query = match query_parser.parse_query(query) {
@@ -214,8 +218,13 @@ impl FuguDB {
                 }
             }
             if !facet_terms.is_empty() {
-                let facet_query = Box::new(tantivy::query::BooleanQuery::new_multiterms_query(facet_terms));
-                Box::new(tantivy::query::BooleanQuery::new(vec![(Occur::Must, parsed_query), (Occur::Must, facet_query)]))
+                let facet_query = Box::new(tantivy::query::BooleanQuery::new_multiterms_query(
+                    facet_terms,
+                ));
+                Box::new(tantivy::query::BooleanQuery::new(vec![
+                    (Occur::Must, parsed_query),
+                    (Occur::Must, facet_query),
+                ]))
             } else {
                 parsed_query
             }
@@ -428,10 +437,12 @@ impl FuguDB {
         let facets = if let Ok(facet_field) = self.schema.get_field("facet") {
             let facet_vals: Vec<String> = doc
                 .get_all(facet_field)
-                .filter_map(|value| value.as_facet().map(|s| {
-                    let raw = s.to_string();
-                    raw.replace('\u{0000}', "/")
-                }))
+                .filter_map(|value| {
+                    value.as_facet().map(|s| {
+                        let raw = s.to_string();
+                        raw.replace('\u{0000}', "/")
+                    })
+                })
                 .collect();
             if !facet_vals.is_empty() {
                 Some(facet_vals)
@@ -661,16 +672,12 @@ impl FuguDB {
             doc.add_text(self.data_type_field(), data_type);
         }
 
-        // Add metadata if present
+        // Add metadata JSON if present
         if let Some(metadata) = &object.metadata {
-            let object_map: std::collections::BTreeMap<String, OwnedValue> = match metadata {
-                serde_json::Value::Object(map) => map
-                    .iter()
-                    .map(|(k, v)| (k.clone(), OwnedValue::from(v.clone())))
-                    .collect(),
-                _ => std::collections::BTreeMap::new(),
-            };
-            doc.add_object(self.metadata_field(), object_map);
+            // Serialize to JSON text
+            let json_str = serde_json::to_string(metadata)?;
+            // Store in the "metadata" field
+            doc.add_text(self.metadata_field(), &json_str);
         }
 
         // Generate and add namespace facets

@@ -90,6 +90,7 @@ impl ObjectRecord {
 pub fn build_object_record_schema(mut schema_builder: SchemaBuilder) -> Schema {
     // Core fields
     schema_builder.add_text_field("id", TEXT | STORED);
+    schema_builder.add_text_field("name", TEXT | STORED);
     schema_builder.add_text_field("text", TEXT | STORED);
     schema_builder.add_text_field("namespace", TEXT | STORED);
 
