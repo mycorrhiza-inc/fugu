@@ -1,9 +1,11 @@
+// main.rs
 use tracing::{Instrument, debug, info};
 
 // Import our crate modules
 use fugu::db::FuguDB;
-use fugu::server;
 use fugu::tracing_utils;
+
+use fugu::server;
 
 // Main entry point
 #[tokio::main]
@@ -60,13 +62,13 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
 
     debug!("Created shutdown channel...");
 
-    // Start the server and compactor services
+    // Start the server
     info!("Starting Fugu server...");
 
     // Create a span for the server runtime
     let runtime_span = tracing::span!(tracing::Level::INFO, "server_runtime");
 
-    // Run the HTTP server and compactor concurrently within the runtime span
+    // Run the HTTP server within the runtime span
     async {
         tokio::select! {
             _ = server::start_http_server(3301, server_db) => {

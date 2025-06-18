@@ -1,18 +1,8 @@
-2025-05-22T19:09:27.665430Z  INFO main ThreadId(01) fugu::tracing_utils: src/tracing_utils.rs:90: Tracing initialized with comprehensive logging to console and file: logs/fugu.log
-2025-05-22T19:09:27.665635Z  INFO main ThreadId(01) fugu: src/main.rs:39: Running in server mode
-2025-05-22T19:09:27.665784Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}: fugu: src/main.rs:54: Initializing database
-2025-05-22T19:09:27.670427Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}: fugu: src/main.rs:56: Database initialized successfully
-2025-05-22T19:09:27.670691Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}: fugu: src/main.rs:67: Starting Fugu server...
-2025-05-22T19:09:27.670842Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}:server_runtime:http_server{[3mport[0m[2m=[0m3301}: fugu::server: src/server.rs:264: Starting HTTP server with pre-initialized database
-2025-05-22T19:09:27.670905Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}:server_runtime:http_server{[3mport[0m[2m=[0m3301}: fugu::server: src/server.rs:269: Created shared application state
-2025-05-22T19:09:27.672062Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}:server_runtime:http_server{[3mport[0m[2m=[0m3301}: fugu::server: src/server.rs:292: Binding HTTP server to 0.0.0.0:3301
-2025-05-22T19:09:27.672199Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}:server_runtime:http_server{[3mport[0m[2m=[0m3301}: fugu::server: src/server.rs:296: Successfully bound to 0.0.0.0:3301
-2025-05-22T19:09:27.672239Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}:server_runtime:http_server{[3mport[0m[2m=[0m3301}: fugu::server: src/server.rs:305: HTTP server started on 0.0.0.0:3301. Press Ctrl+C to stop.
-2025-05-22T19:09:31.121143Z  INFO tokio-runtime-worker ThreadId(07) fugu::query_endpoints: src/query_endpoints.rs:42: executing query: DIANE X. BURMAN
-2025-05-22T19:09:31.128929Z  INFO thread-tantivy-meta-file-watcher ThreadId(18) tantivy::directory::file_watcher: /Users/orchid/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-0.24.1/src/directory/file_watcher.rs:54: Meta file "/private/tmp/fugu/testdb/meta.json" was modified    
-2025-05-22T19:10:34.021787Z  INFO             tokio-runtime-worker ThreadId(09) fugu::query_endpoints: src/query_endpoints.rs:42: executing query: DIANE X. BURMAN
-2025-05-22T19:11:16.720845Z  INFO             tokio-runtime-worker ThreadId(09) shutdown_signal: fugu::server: src/server.rs:350: Shutdown signal received, starting graceful shutdown
-2025-05-22T19:11:16.721599Z  INFO             tokio-runtime-worker ThreadId(09) shutdown_signal: fugu::server: src/server.rs:353: Persisting database to disk before shutdown...
-2025-05-22T19:11:16.722690Z  INFO                             main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}:server_runtime:http_server{[3mport[0m[2m=[0m3301}: fugu::server: src/server.rs:315: Server shut down gracefully
-2025-05-22T19:11:16.722849Z  INFO                             main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}:server_runtime: fugu: src/main.rs:76: HTTP server has shut down
-2025-05-22T19:11:16.722937Z  INFO                             main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}:server_runtime: fugu: src/main.rs:79: Server shutdown complete
+2025-06-18T01:59:06.612904Z  INFO main ThreadId(01) fugu::tracing_utils: src/tracing_utils.rs:90: Tracing initialized with comprehensive logging to console and file: logs/fugu.log
+2025-06-18T01:59:06.613423Z  INFO main ThreadId(01) fugu: src/main.rs:38: Running in server mode
+2025-06-18T01:59:06.613662Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}: fugu: src/main.rs:53: Initializing database
+2025-06-18T01:59:06.613750Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}: fugu::db::core: src/db/core.rs:24: FuguDB::new – initializing with path "fugu_db"
+2025-06-18T01:59:06.620162Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}: fugu: src/main.rs:55: Database initialized successfully
+2025-06-18T01:59:06.620373Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}: fugu: src/main.rs:66: Starting Fugu server...
+2025-06-18T01:59:06.620635Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}:server_runtime:http_server{[3mport[0m[2m=[0m3301}: fugu::server::server_main: src/server/server_main.rs:20: Starting HTTP server with pre-initialized database
+2025-06-18T01:59:06.620690Z  INFO main ThreadId(01) server:database{[3moperation[0m[2m=[0m"setup"}:server_runtime:http_server{[3mport[0m[2m=[0m3301}: fugu::server::server_main: src/server/server_main.rs:23: Created shared application state

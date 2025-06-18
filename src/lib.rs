@@ -1,26 +1,19 @@
-#![allow(unused_imports, unused_variables, unused_mut, dead_code, unused_must_use)]
-
-#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_must_use)]
-
+// src/lib.rs
 pub mod cli;
 pub mod db;
+use db::{FuguDB, FuguSearchResult, SearchOptions, DocumentOperations};
+
 pub mod object;
-pub mod query_endpoints;
 pub mod server;
-// pub mod time_index;
-#[cfg(test)]
-mod document_statistics_test;
-#[cfg(test)]
-mod query_test;
-mod s3;
-#[cfg(test)]
-mod test_inverted_index;
-mod tokeinze;
 pub mod tracing_utils;
+
+// Re-export commonly used types
 pub use object::ObjectRecord;
 
-#[cfg(test)]
-mod db_test;
+// Optional modules
+#[cfg(feature = "s3")]
+pub mod s3;
 
-use serde_json::json;
-use tracing::{debug, info};
+// Test modules
+#[cfg(test)]
+pub mod db_test;
