@@ -25,6 +25,7 @@ pub struct ObjectRecord {
 
 impl ObjectRecord {
     /// Creates namespace facets based on the object's namespace and type fields
+    /// Only adds data facets for objects that are NOT conversations or organizations
     pub fn generate_namespace_facets(&self) -> Vec<String> {
         let mut facets = Vec::new();
 
@@ -50,10 +51,16 @@ impl ObjectRecord {
                 ));
             }
 
-            // Add data type facet if present
+            // Add data type facet ONLY if this is NOT a conversation or organization
+            // (i.e., only add data facets for general data objects)
             if let Some(data_type) = &self.data_type {
-                facets.push(format!("/namespace/{}/data", namespace));
-                facets.push(format!("/namespace/{}/data/{}", namespace, data_type));
+                let is_conversation = self.conversation_id.is_some();
+                let is_organization = self.organization.is_some();
+                
+                if !is_conversation && !is_organization {
+                    facets.push(format!("/namespace/{}/data", namespace));
+                    facets.push(format!("/namespace/{}/data/{}", namespace, data_type));
+                }
             }
         }
 
@@ -61,7 +68,7 @@ impl ObjectRecord {
     }
 
     /// Converts ObjectRecord to JSON for API responses
-    pub fn to_json(&self, schema: &Schema) -> serde_json::Value {
+    pub fn to_json(&self, _schema: &Schema) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 
@@ -90,6 +97,7 @@ impl ObjectRecord {
 pub fn build_object_record_schema(mut schema_builder: SchemaBuilder) -> Schema {
     // Core fields
     schema_builder.add_text_field("id", TEXT | STORED);
+    schema_builder.add_text_field("name", TEXT | STORED);
     schema_builder.add_text_field("text", TEXT | STORED);
     schema_builder.add_text_field("namespace", TEXT | STORED);
 
