@@ -1,12 +1,11 @@
-use std::time::Instant;
-use tokio::sync::oneshot;
-use tokio::time::{Duration, interval};
-use tracing::{Instrument, debug, error, info, warn};
+// main.rs
+use tracing::{Instrument, debug, info};
 
 // Import our crate modules
-use fugu::db::{FuguDB, FuguDBBackend};
-use fugu::server;
+use fugu::db::FuguDB;
 use fugu::tracing_utils;
+
+use fugu::server;
 
 // Main entry point
 #[tokio::main]
@@ -52,24 +51,24 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
 
     // Database initialization - properly separated from HTTP server logic
     info!("Initializing database");
-    let fdb = FuguDB::new("/tmp/fugu/testdb/".into());
+    let fdb = FuguDB::new("fugu_db".into());
     info!("Database initialized successfully");
 
     // With the unified backend, we don't need mailbox or compactor queue anymore
-    // These were part of the old implementation before the backend abstraction
+    // These were part of the old implementation before the backend abstraction  
 
     // We just pass the FuguDB instance directly to the server
     let server_db = fdb.clone();
 
     debug!("Created shutdown channel...");
 
-    // Start the server and compactor services
+    // Start the server
     info!("Starting Fugu server...");
 
     // Create a span for the server runtime
     let runtime_span = tracing::span!(tracing::Level::INFO, "server_runtime");
 
-    // Run the HTTP server and compactor concurrently within the runtime span
+    // Run the HTTP server within the runtime span
     async {
         tokio::select! {
             _ = server::start_http_server(3301, server_db) => {

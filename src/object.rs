@@ -1,28 +1,121 @@
+// object.rs - Enhanced ObjectRecord with namespace facet support
+use chrono::{DateTime as ChronoDateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tantivy::schema::{FAST, FacetOptions, STORED, STRING, SchemaBuilder, TEXT};
+use std::collections::HashMap;
+use tantivy::schema::*;
+use tantivy::{DateTime, Document as TantivyDocument};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectRecord {
     pub id: String,
-    //pub name: String,
     pub text: String,
-    // pub date_created: i64,
-    // pub date_upated: i64,
-    // pub date_published: Option<i64>,
-    pub metadata: Value,
-    //pub data: Option<Value>,
+    pub metadata: Option<serde_json::Value>,
+    pub namespace: Option<String>,
+
+    // New fields for namespace facets
+    pub organization: Option<String>,
+    pub conversation_id: Option<String>,
+    pub data_type: Option<String>,
+
+    // Optional timestamps
+    pub date_created: Option<String>,
+    pub date_updated: Option<String>,
+    pub date_published: Option<String>,
 }
 
-pub fn build_object_record_schema(mut schema_builder: SchemaBuilder) -> tantivy::schema::Schema {
-    schema_builder.add_text_field("id", STRING | STORED);
+impl ObjectRecord {
+    /// Creates namespace facets based on the object's namespace and type fields
+    /// Only adds data facets for objects that are NOT conversations or organizations
+    pub fn generate_namespace_facets(&self) -> Vec<String> {
+        let mut facets = Vec::new();
+
+        if let Some(namespace) = &self.namespace {
+            // Add base namespace facet
+            facets.push(format!("/namespace/{}", namespace));
+
+            // Add organization facet if present
+            if let Some(organization) = &self.organization {
+                facets.push(format!("/namespace/{}/organization", namespace));
+                facets.push(format!(
+                    "/namespace/{}/organization/{}",
+                    namespace, organization
+                ));
+            }
+
+            // Add conversation facet if present
+            if let Some(conversation_id) = &self.conversation_id {
+                facets.push(format!("/namespace/{}/conversation", namespace));
+                facets.push(format!(
+                    "/namespace/{}/conversation/{}",
+                    namespace, conversation_id
+                ));
+            }
+
+            // Add data type facet ONLY if this is NOT a conversation or organization
+            // (i.e., only add data facets for general data objects)
+            if let Some(data_type) = &self.data_type {
+                let is_conversation = self.conversation_id.is_some();
+                let is_organization = self.organization.is_some();
+                
+                if !is_conversation && !is_organization {
+                    facets.push(format!("/namespace/{}/data", namespace));
+                    facets.push(format!("/namespace/{}/data/{}", namespace, data_type));
+                }
+            }
+        }
+
+        facets
+    }
+
+    /// Converts ObjectRecord to JSON for API responses
+    pub fn to_json(&self, _schema: &Schema) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Validates the object record
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.id.is_empty() {
+            return Err(anyhow::anyhow!("Object ID cannot be empty"));
+        }
+
+        if self.text.is_empty() {
+            return Err(anyhow::anyhow!("Object text cannot be empty"));
+        }
+
+        // Validate namespace format if present
+        if let Some(namespace) = &self.namespace {
+            if namespace.is_empty() || namespace.contains('/') || namespace.contains(' ') {
+                return Err(anyhow::anyhow!("Invalid namespace format"));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Builds the Tantivy schema for ObjectRecord
+pub fn build_object_record_schema(mut schema_builder: SchemaBuilder) -> Schema {
+    // Core fields
+    schema_builder.add_text_field("id", TEXT | STORED);
+    schema_builder.add_text_field("name", TEXT | STORED);
     schema_builder.add_text_field("text", TEXT | STORED);
-    // schema_builder.add_text_field("name", TEXT | STORED);
-    // schema_builder.add_date_field("date_published", STORED | FAST);
-    // schema_builder.add_date_field("date_created", STORED | FAST);
-    // schema_builder.add_date_field("date_updated", STORED | FAST);
-    schema_builder.add_facet_field("facet", FacetOptions::default());
-    schema_builder.add_json_field("metadata", STORED | FAST);
-    let schema = schema_builder.build();
-    return schema;
+    schema_builder.add_text_field("namespace", TEXT | STORED);
+
+    // New namespace-aware fields
+    schema_builder.add_text_field("organization", TEXT | STORED);
+    schema_builder.add_text_field("conversation_id", TEXT | STORED);
+    schema_builder.add_text_field("data_type", TEXT | STORED);
+
+    // Facet field for hierarchical filtering
+    schema_builder.add_facet_field("facet", INDEXED | STORED);
+
+    // Metadata as JSON object
+    schema_builder.add_json_field("metadata", STORED);
+
+    // Date fields
+    schema_builder.add_date_field("date_created", INDEXED | STORED);
+    schema_builder.add_date_field("date_updated", INDEXED | STORED);
+    schema_builder.add_date_field("date_published", INDEXED | STORED);
+
+    schema_builder.build()
 }

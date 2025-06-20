@@ -1,69 +1,18 @@
-// query_endpoints.rs
-use crate::db::FuguSearchResult; // Import from your db module
+// src/server/handlers/search.rs - Search endpoint handlers
 use crate::tracing_utils;
+use crate::server::types::*;
 use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::IntoResponse,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use urlencoding::decode;
 
 use crate::server::server_main::AppState;
-
-/// Simple text query parameters for GET requests
-/// now also accepts ?text=true/false
-#[derive(Debug, Deserialize)]
-pub struct TextQueryParams {
-    q: String, // Changed from "query" to "q" to match standard
-    #[serde(default)]
-    limit: Option<usize>,
-    /// whether to include the `text` of each hit
-    #[serde(default)]
-    text: Option<bool>,
-}
-
-/// Pagination parameters
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Pagination {
-    page: Option<usize>,
-    per_page: Option<usize>,
-}
-
-/// JSON query request body for POST requests
-#[derive(Debug, Deserialize)]
-pub struct JsonQueryRequest {
-    query: String,
-    filters: Option<Vec<String>>,
-    page: Option<Pagination>,
-    /// whether to include the full text in each hit
-    #[serde(default)]
-    pub text: Option<bool>,
-}
-
-/// helper for POST?text=...
-#[derive(Debug, Deserialize)]
-pub struct IncludeTextFlag {
-    #[serde(default)]
-    pub text: Option<bool>,
-}
-
-/// Search result item - use an alias to the db type
-pub type SearchResultItem = FuguSearchResult;
-
-/// Search response
-#[derive(Debug, Serialize)]
-pub struct SearchResponse {
-    results: Vec<SearchResultItem>,
-    total: usize,
-    page: usize,
-    per_page: usize,
-    query: String,
-}
 
 /// Execute a text query via GET with URL parameters
 pub async fn query_text_get(
@@ -86,8 +35,11 @@ pub async fn query_text_get(
     let limit = params.limit.unwrap_or(20);
     let include_text = params.text.unwrap_or(false);
 
+    // For GET requests without filters, include all data by default
+    let filters = Vec::new();
+
     // Perform the search
-    match perform_search(&state.db, &params.q, &[], 0, limit).await {
+    match perform_search(&state.db, &params.q, &filters, 0, limit).await {
         Ok(response) => {
             // build JSON and strip text if needed
             let mut out = serde_json::to_value(&response).unwrap();
@@ -150,9 +102,11 @@ pub async fn query_text_path(
         );
     }
 
-    // Perform the search with default limit
+    // For path-based searches without filters, include all data by default
+    let filters = Vec::new();
     let include_text = params.text.unwrap_or(false);
-    match perform_search(&state.db, &query, &[], 0, 20).await {
+
+    match perform_search(&state.db, &query, &filters, 0, 20).await {
         Ok(response) => {
             let mut out = serde_json::to_value(&response).unwrap();
             if !include_text {
@@ -182,11 +136,55 @@ pub async fn query_text_path(
     }
 }
 
+/// Search endpoint returning full facet paths for each result
+pub async fn search(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<FuguSearchQuery>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/search", "POST");
+    let _guard = span.enter();
+
+    let query = payload.query.clone();
+    let filters = payload.filters.clone().unwrap_or_default();
+    let page = payload.page.as_ref().and_then(|p| p.page).unwrap_or(0);
+    let per_page = payload.page.as_ref().and_then(|p| p.per_page).unwrap_or(20);
+
+    info!(
+        "Search endpoint called with query: {} and filters: {:?}",
+        query, filters
+    );
+
+    match state.db.search(&query, &filters, page, per_page).await {
+        Ok(results) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "query": query,
+                "filters": filters,
+                "page": page,
+                "per_page": per_page,
+                "total": results.len(),
+                "results": results
+            })),
+        ),
+        Err(e) => {
+            error!("Search failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Search failed: {}", e)
+                })),
+            )
+        }
+    }
+}
+
 /// Execute a JSON query via POST
 pub async fn query_json_post(
     State(state): State<Arc<AppState>>,
     Query(flag): Query<IncludeTextFlag>,
-    Json(mut payload): Json<JsonQueryRequest>,
+    Json(payload): Json<JsonQueryRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let span = tracing_utils::server_span("/search", "POST");
     let _guard = span.enter();
@@ -209,6 +207,7 @@ pub async fn query_json_post(
     } else {
         body_text
     };
+
     let mut developer_message = None;
     if flag.text.is_some() && payload.text.is_some() && url_text != body_text {
         developer_message = Some(
@@ -220,7 +219,21 @@ pub async fn query_json_post(
     let page = payload.page.as_ref().and_then(|p| p.page).unwrap_or(0);
     let per_page = payload.page.as_ref().and_then(|p| p.per_page).unwrap_or(20);
 
-    // Perform the search
+    // Determine if we should include data objects
+    // By default, include data unless specifically targeting conversations/organizations
+    let targeting_conv_or_org = crate::server::handlers::utils::is_targeting_conversations_or_organizations(&filters);
+    let include_data = payload
+        .include_data
+        .or(flag.include_data)
+        .unwrap_or(!targeting_conv_or_org);
+
+    info!(
+        "Search targeting conv/org: {}, include_data: {}, filters: {:?}",
+        targeting_conv_or_org, include_data, filters
+    );
+
+    // The database search method now handles conditional data inclusion automatically
+    // based on the filters, so we just pass the filters as-is
     match perform_search(&state.db, &payload.query, &filters, page, per_page).await {
         Ok(response) => {
             let mut out = serde_json::to_value(&response).unwrap();
@@ -238,6 +251,15 @@ pub async fn query_json_post(
                     .unwrap()
                     .insert("developer_message".into(), json!(msg));
             }
+            // Add metadata about data inclusion
+            out.as_object_mut()
+                .unwrap()
+                .insert("includes_data_objects".into(), json!(include_data));
+            out.as_object_mut().unwrap().insert(
+                "targeting_conversations_or_organizations".into(),
+                json!(targeting_conv_or_org),
+            );
+
             info!(
                 "Search completed successfully with {} results",
                 response.results.len()
@@ -254,23 +276,54 @@ pub async fn query_json_post(
     }
 }
 
-/// Execute a query with advanced options via POST
-pub async fn query_advanced_post(
+/// Enhanced search endpoint with namespace facet support
+pub async fn search_with_namespace_facets(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let span = tracing_utils::server_span("/query/advanced", "POST");
+    Json(payload): Json<FuguSearchQuery>,
+) -> impl IntoResponse {
+    let span = tracing_utils::server_span("/search/namespace", "POST");
     let _guard = span.enter();
-    info!("Advanced query received: {}", payload);
 
-    // TODO: implement advanced search logic
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({ "error": "Advanced search not implemented yet" })),
-    ))
+    info!(
+        "Namespace facet search endpoint called with query: {}",
+        payload.query
+    );
+
+    let db = state.db.clone();
+    let filters = payload.filters.unwrap_or_default();
+    let page = payload.page.as_ref().and_then(|p| p.page).unwrap_or(0);
+    let per_page = payload.page.as_ref().and_then(|p| p.per_page).unwrap_or(20);
+
+    match db
+        .search_with_namespace_facets(&payload.query, &filters, page, per_page)
+        .await
+    {
+        Ok(results) => {
+            let response = json!({
+                "status": "success",
+                "results": results,
+                "query": payload.query,
+                "filters": filters,
+                "total": results.len(),
+                "page": page,
+                "per_page": per_page
+            });
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            error!("Namespace facet search failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Search failed: {}", e)
+                })),
+            )
+        }
+    }
 }
 
-async fn perform_search(
+pub async fn perform_search(
     db: &crate::db::FuguDB,
     query: &str,
     filters: &[String],
@@ -290,7 +343,7 @@ async fn perform_search(
         per_page
     };
 
-    // Perform the search using FuguDB
+    // The database search method now handles conditional data inclusion automatically
     match db.search(query, filters, page, per_page).await {
         Ok(search_results) => {
             let results = search_results;
@@ -317,4 +370,3 @@ async fn perform_search(
         }
     }
 }
-

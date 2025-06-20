@@ -3,6 +3,10 @@ name = "fugu"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "fugu"
+path = "./src/main.rs"
+
 [features]
 default = ["json"]
 json = ["tracing-subscriber/json"]
@@ -45,3 +49,4 @@ regex = "1.11.1"
 tantivy = "0.24.1"
 aws-sdk-s3 = "1.86.0"
 aws-config = "1.6.3"
+time = "0.3.41"
