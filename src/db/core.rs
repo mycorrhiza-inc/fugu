@@ -67,54 +67,34 @@ impl FuguDB {
     }
 }
 
-// Field accessor methods
-impl FuguDB {
-    pub fn id_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("id").unwrap()
-    }
+// Add to Cargo.toml: paste = "1.0"
+use paste::paste;
 
-    pub fn text_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("text").unwrap()
-    }
-
-    pub fn name_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("name").unwrap()
-    }
-
-    pub fn metadata_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("metadata").unwrap()
-    }
-
-    pub fn facet_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("facet").unwrap()
-    }
-
-    pub fn date_published_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("date_published").unwrap()
-    }
-
-    pub fn date_updated_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("date_created").unwrap()
-    }
-
-    pub fn date_created_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("date_updated").unwrap()
-    }
-
-    pub fn namespace_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("namespace").unwrap()
-    }
-
-    pub fn organization_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("organization").unwrap()
-    }
-
-    pub fn conversation_id_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("conversation_id").unwrap()
-    }
-
-    pub fn data_type_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("data_type").unwrap()
-    }
+macro_rules! generate_field_accessors {
+    ($($field:ident),*) => {
+        impl FuguDB {
+            $(
+                paste! {
+                    pub fn [<$field _field>](&self) -> tantivy::schema::Field {
+                        self.schema.get_field(stringify!($field)).unwrap()
+                    }
+                }
+            )*
+        }
+    };
 }
-
+// Generate field accessors using the macro
+generate_field_accessors!(
+    id,
+    text,
+    name,
+    metadata,
+    facet,
+    date_published,
+    date_updated,
+    date_created,
+    namespace,
+    organization,
+    conversation_id,
+    data_type
+);
