@@ -1,11 +1,11 @@
 //! Core FuguDB implementation with basic setup and field accessors
 
+use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, MutexGuard};
 use tantivy::{Index, IndexWriter, ReloadPolicy, Searcher, schema::Schema};
+use tokio::sync::{Mutex, MutexGuard};
 use tracing::info;
-use anyhow::Result;
 
 use crate::object::ObjectRecord;
 
@@ -22,17 +22,17 @@ impl FuguDB {
     /// Create a new FuguDB instance
     pub fn new(path: PathBuf) -> Self {
         info!("FuguDB::new – initializing with path {:?}", path);
-        
+
         let schema_builder = Schema::builder();
-        
+
         // Ensure directory exists
         let _ = std::fs::create_dir_all(&path);
-        
+
         let dir = tantivy::directory::MmapDirectory::open(&path).unwrap();
         let schema = crate::object::build_object_record_schema(schema_builder);
         let index = Index::open_or_create(dir, schema.clone()).unwrap();
         let writer = index.writer(50_000_000).unwrap();
-        
+
         Self {
             schema,
             _path: path,
@@ -89,15 +89,15 @@ impl FuguDB {
         self.schema.get_field("facet").unwrap()
     }
 
-    pub fn date_published(&self) -> tantivy::schema::Field {
+    pub fn date_published_field(&self) -> tantivy::schema::Field {
         self.schema.get_field("date_published").unwrap()
     }
 
-    pub fn date_updated(&self) -> tantivy::schema::Field {
+    pub fn date_updated_field(&self) -> tantivy::schema::Field {
         self.schema.get_field("date_created").unwrap()
     }
 
-    pub fn date_created(&self) -> tantivy::schema::Field {
+    pub fn date_created_field(&self) -> tantivy::schema::Field {
         self.schema.get_field("date_updated").unwrap()
     }
 
@@ -117,3 +117,4 @@ impl FuguDB {
         self.schema.get_field("data_type").unwrap()
     }
 }
+
