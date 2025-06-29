@@ -1,11 +1,11 @@
 //! Core FuguDB implementation with basic setup and field accessors
 
+use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, MutexGuard};
 use tantivy::{Index, IndexWriter, ReloadPolicy, Searcher, schema::Schema};
+use tokio::sync::{Mutex, MutexGuard};
 use tracing::info;
-use anyhow::Result;
 
 use crate::object::ObjectRecord;
 
@@ -22,17 +22,17 @@ impl FuguDB {
     /// Create a new FuguDB instance
     pub fn new(path: PathBuf) -> Self {
         info!("FuguDB::new – initializing with path {:?}", path);
-        
+
         let schema_builder = Schema::builder();
-        
+
         // Ensure directory exists
         let _ = std::fs::create_dir_all(&path);
-        
+
         let dir = tantivy::directory::MmapDirectory::open(&path).unwrap();
         let schema = crate::object::build_object_record_schema(schema_builder);
         let index = Index::open_or_create(dir, schema.clone()).unwrap();
         let writer = index.writer(50_000_000).unwrap();
-        
+
         Self {
             schema,
             _path: path,
@@ -67,53 +67,34 @@ impl FuguDB {
     }
 }
 
-// Field accessor methods
-impl FuguDB {
-    pub fn id_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("id").unwrap()
-    }
+// Add to Cargo.toml: paste = "1.0"
+use paste::paste;
 
-    pub fn text_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("text").unwrap()
-    }
-
-    pub fn name_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("name").unwrap()
-    }
-
-    pub fn metadata_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("metadata").unwrap()
-    }
-
-    pub fn facet_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("facet").unwrap()
-    }
-
-    pub fn date_published(&self) -> tantivy::schema::Field {
-        self.schema.get_field("date_published").unwrap()
-    }
-
-    pub fn date_updated(&self) -> tantivy::schema::Field {
-        self.schema.get_field("date_created").unwrap()
-    }
-
-    pub fn date_created(&self) -> tantivy::schema::Field {
-        self.schema.get_field("date_updated").unwrap()
-    }
-
-    pub fn namespace_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("namespace").unwrap()
-    }
-
-    pub fn organization_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("organization").unwrap()
-    }
-
-    pub fn conversation_id_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("conversation_id").unwrap()
-    }
-
-    pub fn data_type_field(&self) -> tantivy::schema::Field {
-        self.schema.get_field("data_type").unwrap()
-    }
+macro_rules! generate_field_accessors {
+    ($($field:ident),*) => {
+        impl FuguDB {
+            $(
+                paste! {
+                    pub fn [<$field _field>](&self) -> tantivy::schema::Field {
+                        self.schema.get_field(stringify!($field)).unwrap()
+                    }
+                }
+            )*
+        }
+    };
 }
+// Generate field accessors using the macro
+generate_field_accessors!(
+    id,
+    text,
+    name,
+    metadata,
+    facet,
+    date_published,
+    date_updated,
+    date_created,
+    namespace,
+    organization,
+    conversation_id,
+    data_type
+);
