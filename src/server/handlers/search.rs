@@ -1,6 +1,6 @@
 // src/server/handlers/search.rs - Search endpoint handlers
-use crate::tracing_utils;
 use crate::server::types::*;
+use crate::tracing_utils;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -221,7 +221,8 @@ pub async fn query_json_post(
 
     // Determine if we should include data objects
     // By default, include data unless specifically targeting conversations/organizations
-    let targeting_conv_or_org = crate::server::handlers::utils::is_targeting_conversations_or_organizations(&filters);
+    let targeting_conv_or_org =
+        crate::server::handlers::utils::is_targeting_conversations_or_organizations(&filters);
     let include_data = payload
         .include_data
         .or(flag.include_data)
@@ -276,52 +277,52 @@ pub async fn query_json_post(
     }
 }
 
-/// Enhanced search endpoint with namespace facet support
-pub async fn search_with_namespace_facets(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<FuguSearchQuery>,
-) -> impl IntoResponse {
-    let span = tracing_utils::server_span("/search/namespace", "POST");
-    let _guard = span.enter();
-
-    info!(
-        "Namespace facet search endpoint called with query: {}",
-        payload.query
-    );
-
-    let db = state.db.clone();
-    let filters = payload.filters.unwrap_or_default();
-    let page = payload.page.as_ref().and_then(|p| p.page).unwrap_or(0);
-    let per_page = payload.page.as_ref().and_then(|p| p.per_page).unwrap_or(20);
-
-    match db
-        .search_with_namespace_facets(&payload.query, &filters, page, per_page)
-        .await
-    {
-        Ok(results) => {
-            let response = json!({
-                "status": "success",
-                "results": results,
-                "query": payload.query,
-                "filters": filters,
-                "total": results.len(),
-                "page": page,
-                "per_page": per_page
-            });
-            (StatusCode::OK, Json(response))
-        }
-        Err(e) => {
-            error!("Namespace facet search failed: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "error",
-                    "error": format!("Search failed: {}", e)
-                })),
-            )
-        }
-    }
-}
+///// Enhanced search endpoint with namespace facet support
+//pub async fn search_with_namespace_facets(
+//    State(state): State<Arc<AppState>>,
+//    Json(payload): Json<FuguSearchQuery>,
+//) -> impl IntoResponse {
+//    let span = tracing_utils::server_span("/search/namespace", "POST");
+//    let _guard = span.enter();
+//
+//    info!(
+//        "Namespace facet search endpoint called with query: {}",
+//        payload.query
+//    );
+//
+//    let db = state.db.clone();
+//    let filters = payload.filters.unwrap_or_default();
+//    let page = payload.page.as_ref().and_then(|p| p.page).unwrap_or(0);
+//    let per_page = payload.page.as_ref().and_then(|p| p.per_page).unwrap_or(20);
+//
+//    match db
+//        .search_with_namespace_facets(&payload.query, &filters, page, per_page)
+//        .await
+//    {
+//        Ok(results) => {
+//            let response = json!({
+//                "status": "success",
+//                "results": results,
+//                "query": payload.query,
+//                "filters": filters,
+//                "total": results.len(),
+//                "page": page,
+//                "per_page": per_page
+//            });
+//            (StatusCode::OK, Json(response))
+//        }
+//        Err(e) => {
+//            error!("Namespace facet search failed: {}", e);
+//            (
+//                StatusCode::INTERNAL_SERVER_ERROR,
+//                Json(json!({
+//                    "status": "error",
+//                    "error": format!("Search failed: {}", e)
+//                })),
+//            )
+//        }
+//    }
+//}
 
 pub async fn perform_search(
     db: &crate::db::FuguDB,
@@ -370,3 +371,4 @@ pub async fn perform_search(
         }
     }
 }
+

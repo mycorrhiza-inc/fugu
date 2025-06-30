@@ -4,6 +4,7 @@ use serde_json::Value as SerdeValue;
 use tantivy::TantivyDocument;
 use tracing::info;
 
+use crate::db::{FuguDB, FuguSearchResult};
 use crate::object::ObjectRecord;
 
 /// Helper function to create metadata facets
@@ -73,8 +74,7 @@ pub fn create_facet_indexes(
 /// Process additional fields from ObjectRecord
 pub fn process_additional_fields(object_record: &ObjectRecord) -> SerdeValue {
     let serialized = serde_json::to_string(object_record).unwrap_or_default();
-    let mut value: SerdeValue =
-        serde_json::from_str(&serialized).unwrap_or(SerdeValue::Null);
+    let mut value: SerdeValue = serde_json::from_str(&serialized).unwrap_or(SerdeValue::Null);
 
     if let SerdeValue::Object(ref mut map) = value {
         map.remove("id");
@@ -115,11 +115,23 @@ mod tests {
 
         let facets = create_metadata_facets(&metadata, vec![]);
         assert!(!facets.is_empty());
-        
+
         // Should create facets for leaf values
-        assert!(facets.iter().any(|f| f.last() == Some(&"documents".to_string())));
-        assert!(facets.iter().any(|f| f.last() == Some(&"important".to_string())));
-        assert!(facets.iter().any(|f| f.last() == Some(&"legal".to_string())));
+        assert!(
+            facets
+                .iter()
+                .any(|f| f.last() == Some(&"documents".to_string()))
+        );
+        assert!(
+            facets
+                .iter()
+                .any(|f| f.last() == Some(&"important".to_string()))
+        );
+        assert!(
+            facets
+                .iter()
+                .any(|f| f.last() == Some(&"legal".to_string()))
+        );
     }
 
     #[test]
@@ -128,7 +140,7 @@ mod tests {
         assert!(is_value_empty(&json!("")));
         assert!(is_value_empty(&json!([])));
         assert!(is_value_empty(&json!({})));
-        
+
         assert!(!is_value_empty(&json!(false)));
         assert!(!is_value_empty(&json!(true)));
         assert!(!is_value_empty(&json!(0)));
@@ -145,7 +157,7 @@ mod tests {
 
         let facets = create_facet_indexes(&value, vec![], &test_doc);
         assert!(!facets.is_empty());
-        
+
         // Should create facet paths
         assert!(facets.iter().any(|f| f.contains(&"active".to_string())));
         assert!(facets.iter().any(|f| f.contains(&"urgent".to_string())));
@@ -154,7 +166,7 @@ mod tests {
     #[test]
     fn test_process_additional_fields() {
         use crate::object::ObjectRecord;
-        
+
         let record = ObjectRecord {
             id: "test_id".to_string(),
             text: "test text".to_string(),
@@ -169,7 +181,7 @@ mod tests {
         };
 
         let additional = process_additional_fields(&record);
-        
+
         // Should not contain id or text
         if let SerdeValue::Object(map) = additional {
             assert!(!map.contains_key("id"));
@@ -181,3 +193,4 @@ mod tests {
         }
     }
 }
+

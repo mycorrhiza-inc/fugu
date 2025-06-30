@@ -78,6 +78,9 @@ macro_rules! generate_field_accessors {
                     pub fn [<$field _field>](&self) -> tantivy::schema::Field {
                         self.schema.get_field(stringify!($field)).unwrap()
                     }
+                    pub fn [<$field _field_name>](&self) -> &str {
+                        stringify!($field)
+                    }
                 }
             )*
         }

@@ -10,18 +10,14 @@ use super::handlers::{
     get_filter, get_filter_values_at_path, get_namespace_conversations, get_namespace_data_types,
     get_namespace_facets, get_namespace_filters, get_namespace_organizations, get_object_by_id,
     health, ingest_objects, ingest_objects_with_namespace_facets, list_filters, list_objects,
-    query_json_post, query_text_get, query_text_path, sayhi, search, search_with_namespace_facets,
-    upsert_objects,
+    query_json_post, query_text_get, query_text_path, sayhi, search, upsert_objects,
 };
 use super::server_main::AppState;
 
 pub fn create_router() -> Router<std::sync::Arc<AppState>> {
     Router::new()
         // Basic routes
-        .route(
-            "/",
-            get(|| async move { "Hello from Fugu API with Namespace Facets" }),
-        )
+        .route("/", get(|| async move { "Hello from Fugu API" }))
         .route("/health", get(health))
         .route("/hi", get(sayhi))
         // Search routes
@@ -29,7 +25,7 @@ pub fn create_router() -> Router<std::sync::Arc<AppState>> {
         .route("/search", post(search))
         .route("/search/{query}", get(query_text_path))
         .route("/search/json", post(query_json_post))
-        .route("/search/namespace", post(search_with_namespace_facets))
+        // .route("/search/namespace", post(search_with_namespace_facets))
         // Object CRUD routes
         .route("/objects", get(list_objects))
         .route("/objects", put(upsert_objects))

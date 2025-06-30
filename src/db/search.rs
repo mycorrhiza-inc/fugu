@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tantivy::collector::TopDocs;
 use tantivy::columnar::DocId;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, QueryParser, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuery};
+
 use tantivy::schema::Facet;
 use tantivy::schema::Value;
 use tantivy::schema::document::CompactDocValue;
@@ -43,6 +44,22 @@ impl Default for SearchOptions {
         }
     }
 }
+/// Represents a parsed facet filter with optional operators
+#[derive(Debug, Clone)]
+pub struct FacetFilter {
+    pub path: String,
+    pub operator: FilterOperator,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilterOperator {
+    Equals,   // Exact match
+    Prefix,   // Prefix match (e.g., /namespace/*)
+    Contains, // Contains substring
+    Exists,   // Facet exists (regardless of value)
+    Wildcard, // Wildcard match (*text* - any facet containing text)
+}
 
 impl FuguDB {
     /// Simple search method for basic queries (includes all data types by default)
@@ -53,7 +70,6 @@ impl FuguDB {
         self.search(&query, &[], 0, 20).await
     }
 
-    /// Perform a search query with conditional data inclusion
     pub async fn search(
         &self,
         query: &str,
@@ -62,182 +78,379 @@ impl FuguDB {
         per_page: usize,
     ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
         info!(
-            "FuguDB::search – query=\'{}\', filters={:?}, page={}, per_page={}",
+            "FuguDB::search – query='{}', filters={:?}, page={}, per_page={}",
             query, filters, page, per_page
         );
 
         let reader = self.index.reader()?;
         let searcher = reader.searcher();
 
-        let text_field = self.text_field();
-        let name_field = self.name_field();
-
-        let query_parser = QueryParser::for_index(&self.index, vec![text_field, name_field]);
-
-        let parsed_query = match query_parser.parse_query(query) {
-            Ok(q) => q,
-            Err(e) => {
-                warn!("Failed to parse query '{}': {}", query, e);
-                let escaped_query = query.replace(['(', ')', '[', ']', '{', '}', '"'], "");
-                query_parser.parse_query(&escaped_query)?
-            }
-        };
-
-        debug!("Parsed query successfully");
-
-        let offset = page * per_page;
-        let limit = per_page + offset;
-
-        let query_with_facets: Box<dyn tantivy::query::Query> = if !filters.is_empty() {
-            let facet_field = self.facet_field();
-            let mut facet_terms = Vec::new();
-
-            let targeting_conv_or_org = self.is_targeting_conversations_or_organizations(filters);
-
-            for filter in filters {
-                let facet_path = if filter.starts_with('/') {
-                    filter.clone()
-                } else {
-                    format!("/{}", filter)
-                };
-                if let Ok(facet) = Facet::from_text(&facet_path) {
-                    facet_terms.push(Term::from_facet(facet_field, &facet));
-                }
-            }
-
-            if !facet_terms.is_empty() {
-                let facet_query = Box::new(BooleanQuery::new_multiterms_query(facet_terms));
-                Box::new(BooleanQuery::new(vec![
-                    (Occur::Must, parsed_query),
-                    (Occur::Must, facet_query),
-                ]))
-            } else {
-                parsed_query
-            }
-        } else {
-            parsed_query
-        };
-
-        let top_docs = searcher.search(&query_with_facets, &TopDocs::with_limit(limit))?;
-
-        debug!("Found {} total documents", top_docs.len());
-
-        let results: Vec<FuguSearchResult> = top_docs
-            .into_iter()
-            .skip(offset)
-            .take(per_page)
-            .map(|(score, doc_address)| match searcher.doc(doc_address) {
-                Ok(doc) => self.convert_doc_to_search_result(doc, score),
-                Err(e) => {
-                    error!("Failed to retrieve document: {}", e);
-                    FuguSearchResult {
-                        id: "error".to_string(),
-                        score: 0.0,
-                        text: "Error retrieving document".to_string(),
-                        metadata: None,
-                        facets: None,
-                    }
-                }
-            })
+        // Parse filters to check for wildcard patterns
+        let parsed_filters = self.parse_filters(filters);
+        let has_wildcard = parsed_filters
+            .iter()
+            .any(|f| f.operator == FilterOperator::Wildcard);
+        let wildcard_patterns: Vec<String> = parsed_filters
+            .iter()
+            .filter(|f| f.operator == FilterOperator::Wildcard)
+            .map(|f| f.path.to_lowercase())
             .collect();
 
-        info!("Search completed, returning {} results", results.len());
-        Ok(results)
-    }
+        // Separate wildcard filters from others
+        let non_wildcard_filters: Vec<String> = filters
+            .iter()
+            .filter(|f| !f.starts_with('*') || !f.ends_with('*'))
+            .cloned()
+            .collect();
 
-    /// Enhanced search with namespace facet filtering
-    pub async fn search_with_namespace_facets(
-        &self,
-        query: &str,
-        namespace_filters: &[String],
-        page: usize,
-        per_page: usize,
-    ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
-        info!(
-            "Searching with namespace facets: query='{}', facets={:?}",
-            query, namespace_filters
-        );
-
-        let reader = self.index.reader()?;
-        let searcher = reader.searcher();
-
+        // Parse the text query
         let text_field = self.text_field();
-        let query_parser = QueryParser::for_index(&self.index, vec![text_field]);
-        let text_query = match query_parser.parse_query(query) {
-            Ok(q) => q,
-            Err(e) => {
-                warn!("Failed to parse query '{}': {}", query, e);
-                let escaped_query = query.replace(['(', ')', '[', ']', '{', '}', '"'], "");
-                query_parser.parse_query(&escaped_query)?
+        let name_field = self.name_field();
+        let fields_to_search = vec![text_field, name_field];
+
+        let query_parser = QueryParser::for_index(&self.index, fields_to_search);
+
+        // Build the text query
+        let text_query = if query.trim().is_empty() {
+            Box::new(AllQuery) as Box<dyn Query>
+        } else {
+            match query_parser.parse_query(query) {
+                Ok(q) => q,
+                Err(e) => {
+                    warn!("Failed to parse query '{}': {}", query, e);
+                    // Fallback: escape special characters and retry
+                    let escaped_query = escape_query_string(query);
+                    query_parser.parse_query(&escaped_query)?
+                }
             }
         };
 
-        if !namespace_filters.is_empty() {
-            let facet_field = self.facet_field();
-            let mut facet_terms = Vec::new();
+        debug!("Parsed text query successfully");
 
-            for filter in namespace_filters {
-                let facet_path = if filter.starts_with('/') {
-                    filter.clone()
-                } else {
-                    format!("/{}", filter)
-                };
+        // Build the facet query if non-wildcard filters are provided
+        let base_query: Box<dyn Query> = if !non_wildcard_filters.is_empty() {
+            let facet_query = self.build_facet_query(&non_wildcard_filters)?;
 
-                match Facet::from_text(&facet_path) {
-                    Ok(facet) => {
-                        let term = Term::from_facet(facet_field, &facet);
-                        facet_terms.push(term);
-                    }
-                    Err(e) => {
-                        warn!("Invalid facet path '{}': {}", facet_path, e);
-                    }
-                }
+            // Combine text and facet queries
+            if query.trim().is_empty() {
+                // If no text query, just use facet query
+                facet_query
+            } else {
+                // Combine both queries with AND
+                Box::new(BooleanQuery::new(vec![
+                    (Occur::Must, text_query),
+                    (Occur::Must, facet_query),
+                ]))
             }
+        } else if query.trim().is_empty() && has_wildcard {
+            // If only wildcard filters, search all documents
+            Box::new(AllQuery)
+        } else {
+            text_query
+        };
 
-            if !facet_terms.is_empty() {
-                let facet_query = Box::new(BooleanQuery::new_multiterms_query(facet_terms));
-                let combined_query =
-                    BooleanQuery::new(vec![(Occur::Must, text_query), (Occur::Must, facet_query)]);
+        // Execute search with larger limit if we have wildcard filters (for post-filtering)
+        let offset = page * per_page;
+        let search_limit = if has_wildcard {
+            // Get more results for wildcard filtering
+            (offset + per_page) * 10 // 10x to ensure we have enough after filtering
+        } else {
+            offset + per_page
+        };
 
-                let offset = page * per_page;
-                let limit = per_page + offset;
-                let top_docs = searcher.search(&combined_query, &TopDocs::with_limit(limit))?;
+        let top_docs = searcher.search(&base_query, &TopDocs::with_limit(search_limit))?;
+        debug!(
+            "Found {} total documents before wildcard filtering",
+            top_docs.len()
+        );
 
-                let results: Vec<FuguSearchResult> = top_docs
-                    .into_iter()
-                    .skip(offset)
-                    .take(per_page)
-                    .map(|(score, doc_address)| match searcher.doc(doc_address) {
-                        Ok(doc) => self.convert_doc_to_search_result(doc, score),
-                        Err(e) => {
-                            error!("Failed to retrieve document: {}", e);
-                            FuguSearchResult {
-                                id: "error".to_string(),
-                                score: 0.0,
-                                text: "Error retrieving document".to_string(),
-                                metadata: None,
-                                facets: None,
+        // Convert and filter results
+        let mut results: Vec<FuguSearchResult> = Vec::new();
+        let mut processed = 0;
+
+        for (score, doc_address) in top_docs {
+            match searcher.doc(doc_address) {
+                Ok(doc) => {
+                    let result = self.convert_doc_to_search_result(doc, score);
+
+                    // Apply wildcard filtering if needed
+                    if has_wildcard {
+                        if let Some(facets) = &result.facets {
+                            // Check if any facet contains any of the wildcard patterns
+                            let matches = facets.iter().any(|facet| {
+                                let facet_lower = facet.to_lowercase();
+                                wildcard_patterns
+                                    .iter()
+                                    .any(|pattern| facet_lower.contains(pattern))
+                            });
+
+                            if matches {
+                                results.push(result);
                             }
                         }
-                    })
-                    .collect();
+                    } else {
+                        results.push(result);
+                    }
 
-                return Ok(results);
+                    processed += 1;
+
+                    // Stop if we have enough results
+                    if results.len() >= offset + per_page {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to retrieve document: {}", e);
+                }
             }
         }
 
-        self.search(query, &[], page, per_page).await
+        // Apply pagination to the filtered results
+        let paginated_results: Vec<FuguSearchResult> =
+            results.into_iter().skip(offset).take(per_page).collect();
+
+        info!(
+            "Search completed, returning {} results",
+            paginated_results.len()
+        );
+        Ok(paginated_results)
     }
 
-    /// Search with advanced options
-    pub async fn advanced_search(
-        &self,
-        query: &str,
-        options: SearchOptions,
-    ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
-        self.search(query, &options.filters, options.page, options.per_page)
-            .await
+    /// Build a facet query from filter strings
+    fn build_facet_query(&self, filters: &[String]) -> Result<Box<dyn Query>> {
+        let facet_field = self.facet_field();
+        let parsed_filters = self.parse_filters(filters);
+
+        // Group filters by their behavior
+        let mut exact_terms = Vec::new();
+        let mut prefix_queries = Vec::new();
+
+        for filter in parsed_filters {
+            match filter.operator {
+                FilterOperator::Equals => {
+                    // Exact facet match
+                    if let Ok(facet) = Facet::from_text(&filter.path) {
+                        exact_terms.push(Term::from_facet(facet_field, &facet));
+                    }
+                }
+                FilterOperator::Prefix => {
+                    // Prefix matching - we'll need to implement a custom query
+                    // For now, collect these for special handling
+                    prefix_queries.push(filter.path.clone());
+                }
+                FilterOperator::Wildcard => {
+                    // Wildcard filters are handled separately in the search method
+                    // Skip them here
+                    continue;
+                }
+                FilterOperator::Contains | FilterOperator::Exists => {
+                    // These would require more complex handling
+                    // For now, treat as exact match
+                    if let Ok(facet) = Facet::from_text(&filter.path) {
+                        exact_terms.push(Term::from_facet(facet_field, &facet));
+                    }
+                }
+            }
+        }
+
+        // Build the query
+        if exact_terms.is_empty() && prefix_queries.is_empty() {
+            // No valid filters
+            return Ok(Box::new(AllQuery));
+        }
+
+        let mut queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+        // Add exact term queries
+        if !exact_terms.is_empty() {
+            // Create OR query for all exact terms
+            let term_query = Box::new(BooleanQuery::new_multiterms_query(exact_terms));
+            queries.push((Occur::Should, term_query));
+        }
+
+        // Handle prefix queries (simplified for now)
+        for prefix in prefix_queries {
+            // In a real implementation, you'd want to use a prefix query
+            // For now, we'll create exact matches for the prefix
+            if let Ok(facet) = Facet::from_text(&prefix) {
+                let term = Term::from_facet(facet_field, &facet);
+                let term_query = Box::new(TermQuery::new(term, Default::default()));
+                queries.push((Occur::Should, term_query));
+            }
+        }
+
+        // If we have multiple queries, combine them
+        if queries.len() == 1 {
+            Ok(queries.into_iter().next().unwrap().1)
+        } else {
+            Ok(Box::new(BooleanQuery::new(queries)))
+        }
     }
+
+    /// Parse filter strings into structured FacetFilter objects
+    fn parse_filters(&self, filters: &[String]) -> Vec<FacetFilter> {
+        filters
+            .iter()
+            .map(|filter| {
+                let normalized = normalize_facet_path(filter);
+
+                // Check for operators
+                if normalized.ends_with("/*") {
+                    // Prefix match
+                    FacetFilter {
+                        path: normalized[..normalized.len() - 2].to_string(),
+                        operator: FilterOperator::Prefix,
+                        value: None,
+                    }
+                } else if normalized.contains("=") {
+                    // Key-value match
+                    let parts: Vec<&str> = normalized.splitn(2, '=').collect();
+                    FacetFilter {
+                        path: parts[0].to_string(),
+                        operator: FilterOperator::Equals,
+                        value: Some(parts[1].to_string()),
+                    }
+                } else {
+                    // Default to exact match
+                    FacetFilter {
+                        path: normalized,
+                        operator: FilterOperator::Equals,
+                        value: None,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Search with facet scoring boost
+    // pub async fn search_with_facet_boost(
+    //     &self,
+    //     query: &str,
+    //     filters: &[String],
+    //     boost_facets: &[String],
+    //     page: usize,
+    //     per_page: usize,
+    // ) -> Result<Vec<FuguSearchResult>, Box<dyn std::error::Error + Send + Sync>> {
+    //     info!(
+    //         "Search with facet boost: query='{}', boost_facets={:?}",
+    //         query, boost_facets
+    //     );
+    //
+    //     let reader = self.index.reader()?;
+    //     let searcher = reader.searcher();
+    //
+    //     // Build the base query
+    //     let text_field = self.text_field();
+    //     let name_field = self.name_field();
+    //     let query_parser = QueryParser::for_index(&self.index, vec![text_field, name_field]);
+    //
+    //     let text_query = if query.trim().is_empty() {
+    //         Box::new(AllQuery) as Box<dyn Query>
+    //     } else {
+    //         query_parser.parse_query(query)?
+    //     };
+    //
+    //     // Build facet query if filters provided
+    //     let base_query: Box<dyn Query> = if !filters.is_empty() {
+    //         let facet_query = self.build_facet_query(filters)?;
+    //         Box::new(BooleanQuery::new(vec![
+    //             (Occur::Must, text_query),
+    //             (Occur::Must, facet_query),
+    //         ]))
+    //     } else {
+    //         text_query
+    //     };
+    //
+    //     // Create boost facets set for scoring
+    //     let boost_facet_set: HashSet<String> = boost_facets
+    //         .iter()
+    //         .map(|f| normalize_facet_path(f))
+    //         .collect();
+    //
+    //     let offset = page * per_page;
+    //     let limit = per_page + offset;
+    //
+    //     // Custom scoring based on facet presence
+    //     let top_docs =
+    //         TopDocs::with_limit(limit).tweak_score(move |segment_reader: &SegmentReader| {
+    //             let facet_reader = segment_reader.facet_reader(self.facet_field_name()).ok();
+    //
+    //             move |doc: DocId, original_score: Score| {
+    //                 if let Some(reader) = &facet_reader {
+    //                     // Count matching boost facets
+    //                     let matching_boosts = reader
+    //                         .facet_ords(doc)
+    //                         .filter_map(|ord| {
+    //                             reader
+    //                                 .facet_dict()
+    //                                 .get_term(ord)
+    //                                 .ok()
+    //                                 .and_then(|bytes| std::str::from_utf8(bytes).ok())
+    //                                 .map(|s| s.replace('\u{0000}', "/"))
+    //                         })
+    //                         .filter(|facet| boost_facet_set.contains(facet))
+    //                         .count();
+    //
+    //                     // Apply boost: 1.5x for each matching facet
+    //                     original_score * (1.5_f32).powi(matching_boosts as i32)
+    //                 } else {
+    //                     original_score
+    //                 }
+    //             }
+    //         });
+    //
+    //     let results = searcher.search(&base_query, &top_docs)?;
+    //
+    //     // Convert results
+    //     let search_results: Vec<FuguSearchResult> = results
+    //         .into_iter()
+    //         .skip(offset)
+    //         .take(per_page)
+    //         .map(|(score, doc_address)| match searcher.doc(doc_address) {
+    //             Ok(doc) => self.convert_doc_to_search_result(doc, score),
+    //             Err(e) => {
+    //                 error!("Failed to retrieve document: {}", e);
+    //                 FuguSearchResult {
+    //                     id: "error".to_string(),
+    //                     score: 0.0,
+    //                     text: "Error retrieving document".to_string(),
+    //                     metadata: None,
+    //                     facets: None,
+    //                 }
+    //             }
+    //         })
+    //         .collect();
+    //
+    //     Ok(search_results)
+    // }
+
+    ///// Get facet statistics for search results
+    //pub async fn search_with_facet_counts(
+    //    &self,
+    //    query: &str,
+    //    filters: &[String],
+    //    page: usize,
+    //    per_page: usize,
+    //) -> Result<
+    //    (Vec<FuguSearchResult>, HashMap<String, usize>),
+    //    Box<dyn std::error::Error + Send + Sync>,
+    //> {
+    //    // First, get the search results
+    //    let results = self.search(query, filters, page, per_page).await?;
+    //
+    //    // Then, collect facet counts from the results
+    //    let mut facet_counts: HashMap<String, usize> = HashMap::new();
+    //
+    //    for result in &results {
+    //        if let Some(facets) = &result.facets {
+    //            for facet in facets {
+    //                *facet_counts.entry(facet.clone()).or_insert(0) += 1;
+    //            }
+    //        }
+    //    }
+    //
+    //    Ok((results, facet_counts))
+    //}
 
     /// Direct get method for convenience
     pub fn get(&self, id: &str) -> Result<Vec<TantivyDocument>> {
@@ -374,4 +587,23 @@ impl FuguDB {
             facets,
         }
     }
+}
+
+/// Normalize a facet path to ensure consistent formatting
+fn normalize_facet_path(path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{}", path)
+    }
+}
+
+/// Escape special characters in query strings
+fn escape_query_string(query: &str) -> String {
+    query.replace(
+        [
+            '(', ')', '[', ']', '{', '}', '"', ':', '+', '-', '!', '~', '*', '?', '\\', '^',
+        ],
+        "",
+    )
 }

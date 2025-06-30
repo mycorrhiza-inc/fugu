@@ -147,38 +147,37 @@ impl FuguDB {
             }
         }
 
-        // Add date fields if present
-        if let Some(date_str) = &object.date_created
-            && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str)
-        {
-            let offset_dt = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
-                .map_err(|e| anyhow!("Failed to convert timestamp: {}", e))?
-                .replace_nanosecond(dt.timestamp_subsec_nanos())
-                .map_err(|e| anyhow!("Failed to set nanoseconds: {}", e))?;
-            doc.add_date(self.date_created_field(), DateTime::from_utc(offset_dt));
+        // Add date fields if present - Fixed for stable Rust
+        if let Some(date_str) = &object.date_created {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str) {
+                let offset_dt = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
+                    .map_err(|e| anyhow!("Failed to convert timestamp: {}", e))?
+                    .replace_nanosecond(dt.timestamp_subsec_nanos())
+                    .map_err(|e| anyhow!("Failed to set nanoseconds: {}", e))?;
+                doc.add_date(self.date_created_field(), DateTime::from_utc(offset_dt));
+            }
         }
 
-        if let Some(date_str) = &object.date_updated
-            && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str)
-        {
-            let offset_dt = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
-                .map_err(|e| anyhow!("Failed to convert timestamp: {}", e))?
-                .replace_nanosecond(dt.timestamp_subsec_nanos())
-                .map_err(|e| anyhow!("Failed to set nanoseconds: {}", e))?;
-            doc.add_date(self.date_updated_field(), DateTime::from_utc(offset_dt));
+        if let Some(date_str) = &object.date_updated {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str) {
+                let offset_dt = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
+                    .map_err(|e| anyhow!("Failed to convert timestamp: {}", e))?
+                    .replace_nanosecond(dt.timestamp_subsec_nanos())
+                    .map_err(|e| anyhow!("Failed to set nanoseconds: {}", e))?;
+                doc.add_date(self.date_updated_field(), DateTime::from_utc(offset_dt));
+            }
         }
 
-        if let Some(date_str) = &object.date_published
-            && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str)
-        {
-            let offset_dt = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
-                .map_err(|e| anyhow!("Failed to convert timestamp: {}", e))?
-                .replace_nanosecond(dt.timestamp_subsec_nanos())
-                .map_err(|e| anyhow!("Failed to set nanoseconds: {}", e))?;
-            doc.add_date(self.date_published_field(), DateTime::from_utc(offset_dt));
+        if let Some(date_str) = &object.date_published {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str) {
+                let offset_dt = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
+                    .map_err(|e| anyhow!("Failed to convert timestamp: {}", e))?
+                    .replace_nanosecond(dt.timestamp_subsec_nanos())
+                    .map_err(|e| anyhow!("Failed to set nanoseconds: {}", e))?;
+                doc.add_date(self.date_published_field(), DateTime::from_utc(offset_dt));
+            }
         }
 
         Ok(doc)
     }
 }
-
