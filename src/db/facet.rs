@@ -1,3 +1,4 @@
+// path: src/db/facet.rs
 //! Facet operations and tree building for FuguDB
 
 use std::collections::BTreeMap;

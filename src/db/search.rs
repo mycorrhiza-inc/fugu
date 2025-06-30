@@ -1,3 +1,4 @@
+// path: src/db/search.rs
 //! Search functionality for FuguDB
 
 use anyhow::Result;

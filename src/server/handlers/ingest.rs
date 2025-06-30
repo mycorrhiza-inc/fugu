@@ -1,15 +1,10 @@
 // server/handlers/ingest.rs - Data ingest endpoint handlers
-use crate::tracing_utils;
 use crate::server::types::*;
-use axum::{
-    Json,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-};
+use crate::tracing_utils;
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde_json::json;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::server::server_main::AppState;
 
@@ -25,6 +20,20 @@ pub async fn ingest_objects(
         "Ingest endpoint called for {} objects (performing upserts)",
         payload.data.len()
     );
+
+    // Validate all objects first
+    for (i, object) in payload.data.iter().enumerate() {
+        if let Err(e) = object.validate() {
+            error!("Validation failed for object at index {}: {}", i, e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Validation failed for object at index {}: {}", i, e)
+                })),
+            );
+        }
+    }
 
     let db = state.db.clone();
     match db.ingest(payload.data).await {
@@ -48,7 +57,7 @@ pub async fn ingest_objects(
     }
 }
 
-/// Enhanced ingest endpoint that supports namespace facets
+/// Enhanced ingest endpoint that supports namespace facets - now with explicit facets support
 pub async fn ingest_objects_with_namespace_facets(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<IndexRequest>,
@@ -61,7 +70,10 @@ pub async fn ingest_objects_with_namespace_facets(
         payload.data.len()
     );
 
-    // Validate all objects first
+    // Validate all objects first and check for explicit facets
+    let mut explicit_facets_count = 0;
+    let mut generated_facets_count = 0;
+
     for (i, object) in payload.data.iter().enumerate() {
         if let Err(e) = object.validate() {
             error!("Validation failed for object at index {}: {}", i, e);
@@ -73,6 +85,20 @@ pub async fn ingest_objects_with_namespace_facets(
                 })),
             );
         }
+
+        // Count facet types for logging
+        if object.facets.is_some() {
+            explicit_facets_count += 1;
+        } else {
+            generated_facets_count += 1;
+        }
+    }
+
+    if explicit_facets_count > 0 {
+        info!(
+            "Received {} objects with explicit facets, {} with generated facets",
+            explicit_facets_count, generated_facets_count
+        );
     }
 
     let db = state.db.clone();
@@ -83,7 +109,9 @@ pub async fn ingest_objects_with_namespace_facets(
                 StatusCode::OK,
                 Json(json!({
                     "status": "success",
-                    "message": "Objects ingested successfully with namespace facets"
+                    "message": "Objects ingested successfully with namespace facets",
+                    "explicit_facets_count": explicit_facets_count,
+                    "generated_facets_count": generated_facets_count
                 })),
             )
         }
@@ -112,6 +140,20 @@ pub async fn batch_upsert_objects(
         "Batch upsert endpoint called for {} objects",
         payload.objects.len()
     );
+
+    // Validate all objects first
+    for (i, object) in payload.objects.iter().enumerate() {
+        if let Err(e) = object.validate() {
+            error!("Validation failed for object at index {}: {}", i, e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Validation failed for object at index {}: {}", i, e)
+                })),
+            );
+        }
+    }
 
     let db = state.db.clone();
     match db.batch_upsert(payload.objects).await {

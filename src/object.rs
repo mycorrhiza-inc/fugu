@@ -12,6 +12,10 @@ pub struct ObjectRecord {
     pub metadata: Option<serde_json::Value>,
     pub namespace: Option<String>,
 
+    // CRITICAL: Add explicit facets field to match Go SDK
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Vec<String>>,
+
     // New fields for namespace facets
     pub organization: Option<String>,
     pub conversation_id: Option<String>,
@@ -24,62 +28,22 @@ pub struct ObjectRecord {
 }
 
 impl ObjectRecord {
-    /// Creates namespace facets based on the object's namespace and type fields
-    /// Only adds data facets for objects that are NOT conversations or organizations
-    pub fn generate_namespace_facets(&self) -> Vec<String> {
-        let mut facets = Vec::new();
-
-        if let Some(namespace) = &self.namespace {
-            // Add base namespace facet
-            facets.push(format!("/namespace/{}", namespace));
-
-            // Add organization facet if present
-            if let Some(organization) = &self.organization {
-                facets.push(format!("/namespace/{}/organization", namespace));
-                facets.push(format!(
-                    "/namespace/{}/organization/{}",
-                    namespace, organization
-                ));
-            }
-
-            // Add conversation facet if present
-            if let Some(conversation_id) = &self.conversation_id {
-                facets.push(format!("/namespace/{}/conversation", namespace));
-                facets.push(format!(
-                    "/namespace/{}/conversation/{}",
-                    namespace, conversation_id
-                ));
-            }
-
-            // Add data type facet ONLY if this is NOT a conversation or organization
-            // (i.e., only add data facets for general data objects)
-            if let Some(data_type) = &self.data_type {
-                let is_conversation = self.conversation_id.is_some();
-                let is_organization = self.organization.is_some();
-                
-                if !is_conversation && !is_organization {
-                    facets.push(format!("/namespace/{}/data", namespace));
-                    facets.push(format!("/namespace/{}/data/{}", namespace, data_type));
-                }
-            }
-        }
-
-        facets
-    }
-
-    /// Converts ObjectRecord to JSON for API responses
-    pub fn to_json(&self, _schema: &Schema) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
-    }
-
     /// Validates the object record
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.id.is_empty() {
             return Err(anyhow::anyhow!("Object ID cannot be empty"));
         }
 
+        if self.id.len() > 256 {
+            return Err(anyhow::anyhow!("Object ID too long (max 256 characters)"));
+        }
+
         if self.text.is_empty() {
             return Err(anyhow::anyhow!("Object text cannot be empty"));
+        }
+
+        if self.text.len() > 10000 {
+            return Err(anyhow::anyhow!("Text too long (max 10000 characters)"));
         }
 
         // Validate namespace format if present
@@ -87,9 +51,64 @@ impl ObjectRecord {
             if namespace.is_empty() || namespace.contains('/') || namespace.contains(' ') {
                 return Err(anyhow::anyhow!("Invalid namespace format"));
             }
+            if namespace.len() > 128 {
+                return Err(anyhow::anyhow!("Namespace too long (max 128 characters)"));
+            }
+        }
+
+        // Validate facets if present
+        if let Some(facets) = &self.facets {
+            if facets.len() > 100 {
+                return Err(anyhow::anyhow!("Too many facets (max 100 per object)"));
+            }
+
+            for (i, facet) in facets.iter().enumerate() {
+                if facet.is_empty() {
+                    return Err(anyhow::anyhow!("Facet at index {} cannot be empty", i));
+                }
+                if facet.len() > 512 {
+                    return Err(anyhow::anyhow!(
+                        "Facet at index {} too long (max 512 characters)",
+                        i
+                    ));
+                }
+            }
         }
 
         Ok(())
+    }
+
+    /// Generate namespace facets (for backward compatibility)
+    pub fn generate_namespace_facets(&self) -> Vec<String> {
+        let mut facets = Vec::new();
+
+        // Add base namespace facet
+        if let Some(namespace) = &self.namespace {
+            facets.push(format!("/namespace/{}", namespace));
+
+            // Add organization facet
+            if let Some(organization) = &self.organization {
+                facets.push(format!(
+                    "/namespace/{}/organization/{}",
+                    namespace, organization
+                ));
+            }
+
+            // Add conversation facet
+            if let Some(conversation_id) = &self.conversation_id {
+                facets.push(format!(
+                    "/namespace/{}/conversation/{}",
+                    namespace, conversation_id
+                ));
+            }
+
+            // Add data type facet
+            if let Some(data_type) = &self.data_type {
+                facets.push(format!("/namespace/{}/data/{}", namespace, data_type));
+            }
+        }
+
+        facets
     }
 }
 

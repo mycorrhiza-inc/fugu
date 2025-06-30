@@ -25,9 +25,14 @@ impl FuguDB {
             if object.id.is_empty() {
                 return Err(anyhow!("Object ID cannot be empty"));
             }
+
+            // Validate the object before processing
+            object.validate()?;
+
             // Delete existing document by ID term
             let term = Term::from_field_text(self.id_field(), &object.id);
             w.delete_term(term);
+
             // Add new document
             let doc = self.build_tantivy_doc_safe(&object)?;
             w.add_document(doc)?;
@@ -73,8 +78,7 @@ impl FuguDB {
         UserOperation::Delete(doc_id_term)
     }
 
-    /// Construct a Tantivy document from an ObjectRecord
-    /// Enhanced build_tantivy_doc_safe with namespace facet generation
+    /// Construct a Tantivy document from an ObjectRecord with proper facet handling
     pub fn build_tantivy_doc_safe(&self, object: &ObjectRecord) -> Result<TantivyDocument> {
         let mut doc = TantivyDocument::new();
 
@@ -106,48 +110,78 @@ impl FuguDB {
             doc.add_text(self.metadata_field(), &json_str);
         }
 
-        // Generate and add namespace facets
-        let namespace_facets = object.generate_namespace_facets();
-        for facet_path in namespace_facets {
-            match tantivy::schema::Facet::from_text(&facet_path) {
-                Ok(facet) => {
-                    doc.add_facet(self.facet_field(), facet);
-                    info!("Added namespace facet: {}", facet_path);
-                }
-                Err(e) => {
-                    warn!("Failed to create facet from path '{}': {}", facet_path, e);
+        // **PRIORITY 1: Process explicit facets field from Go SDK**
+        if let Some(facets) = &object.facets {
+            info!("Processing {} explicit facets from Go SDK", facets.len());
+            for facet_path in facets {
+                // Ensure facet path starts with '/'
+                let normalized_path = if facet_path.starts_with('/') {
+                    facet_path.clone()
+                } else {
+                    format!("/{}", facet_path)
+                };
+
+                match tantivy::schema::Facet::from_text(&normalized_path) {
+                    Ok(facet) => {
+                        doc.add_facet(self.facet_field(), facet);
+                        info!("Added explicit facet: {}", normalized_path);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to create facet from path '{}': {}",
+                            normalized_path, e
+                        );
+                    }
                 }
             }
-        }
+        } else {
+            // **FALLBACK: Generate namespace facets if no explicit facets provided**
+            info!("No explicit facets provided, generating namespace facets");
+            let namespace_facets = object.generate_namespace_facets();
+            for facet_path in namespace_facets {
+                match tantivy::schema::Facet::from_text(&facet_path) {
+                    Ok(facet) => {
+                        doc.add_facet(self.facet_field(), facet);
+                        info!("Added generated namespace facet: {}", facet_path);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to create namespace facet from path '{}': {}",
+                            facet_path, e
+                        );
+                    }
+                }
+            }
 
-        // Process additional metadata facets
-        if let Some(metadata) = &object.metadata {
-            let additional_facets = create_metadata_facets(metadata, Vec::new());
-            for facet_path in additional_facets {
-                if let Some(path) = facet_path.first() {
-                    let normalized_path = if path.starts_with('/') {
-                        path.clone()
-                    } else {
-                        format!("/metadata/{}", path)
-                    };
+            // **FALLBACK: Process metadata facets if no explicit facets**
+            if let Some(metadata) = &object.metadata {
+                let additional_facets = create_metadata_facets(metadata, Vec::new());
+                for facet_path in additional_facets {
+                    if let Some(path) = facet_path.first() {
+                        let normalized_path = if path.starts_with('/') {
+                            path.clone()
+                        } else {
+                            format!("/metadata/{}", path)
+                        };
 
-                    match tantivy::schema::Facet::from_text(&normalized_path) {
-                        Ok(facet) => {
-                            doc.add_facet(self.facet_field(), facet);
-                            info!("Added metadata facet: {}", normalized_path);
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to create metadata facet from path '{}': {}",
-                                normalized_path, e
-                            );
+                        match tantivy::schema::Facet::from_text(&normalized_path) {
+                            Ok(facet) => {
+                                doc.add_facet(self.facet_field(), facet);
+                                info!("Added metadata facet: {}", normalized_path);
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to create metadata facet from path '{}': {}",
+                                    normalized_path, e
+                                );
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Add date fields if present - Fixed for stable Rust
+        // Add date fields if present
         if let Some(date_str) = &object.date_created {
             if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str) {
                 let offset_dt = time::OffsetDateTime::from_unix_timestamp(dt.timestamp())

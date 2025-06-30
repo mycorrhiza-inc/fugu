@@ -1,3 +1,4 @@
+// path: src/db/core.rs
 //! Core FuguDB implementation with basic setup and field accessors
 
 use anyhow::Result;
@@ -91,7 +92,7 @@ generate_field_accessors!(
     id,
     text,
     name,
-    metadata,
+    metadata, // Make sure this is included
     facet,
     date_published,
     date_updated,
