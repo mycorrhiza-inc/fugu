@@ -44,3 +44,4 @@ aws-sdk-s3 = "1.86.0"
 aws-config = "1.6.3"
 time = "0.3.41"
 paste = "1.0.15"
+opentelemetry_sdk = { version = "0.30.0", features = ["trace"] }

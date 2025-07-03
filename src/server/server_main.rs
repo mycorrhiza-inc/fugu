@@ -1,6 +1,6 @@
 // server/server_main.rs - Main server startup and configuration
-use crate::db::FuguDB;
 use crate::tracing_utils;
+use crate::{db::FuguDB, otel_setup::init_subscribers_and_loglevel};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{Instrument, debug, error, info};
@@ -22,9 +22,15 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
         let app_state = Arc::new(AppState { db: fugu_db });
         info!("Created shared application state");
 
+        let _ = init_subscribers_and_loglevel()
+            .expect("Failed to initialize opentelemetry tracing stuff");
+
         // Create the router with shared state using our modular route configuration
         let app = routes::create_router()
-            .with_state(app_state.clone());
+            .with_state(app_state.clone())
+            .layer(OtelInResponseLayer)
+            //start OpenTelemetry trace on incoming request
+            .layer(OtelAxumLayer::default());
 
         debug!("API routes configured with shared state");
 
@@ -96,3 +102,4 @@ async fn shutdown_signal(app_state: Arc<AppState>) {
     .instrument(shutdown_span)
     .await
 }
+
