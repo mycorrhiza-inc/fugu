@@ -1,6 +1,7 @@
 // server/server_main.rs - Main server startup and configuration
 use crate::tracing_utils;
 use crate::{db::FuguDB, otel_setup::init_subscribers_and_loglevel};
+use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{Instrument, debug, error, info};
@@ -102,4 +103,3 @@ async fn shutdown_signal(app_state: Arc<AppState>) {
     .instrument(shutdown_span)
     .await
 }
-
