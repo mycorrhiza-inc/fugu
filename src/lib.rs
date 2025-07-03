@@ -1,9 +1,10 @@
 // src/lib.rs
 pub mod cli;
 pub mod db;
-use db::{FuguDB, FuguSearchResult, SearchOptions, DocumentOperations};
+use db::{DocumentOperations, FuguDB, FuguSearchResult, SearchOptions};
 
 pub mod object;
+pub mod otel_setup;
 pub mod server;
 pub mod tracing_utils;
 
