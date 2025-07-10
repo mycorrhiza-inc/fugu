@@ -1,7 +1,11 @@
-FROM rust:1.86 AS base
-RUN cargo install sccache --version ^0.7
-RUN cargo install cargo-chef --version ^0.1
+FROM rust:1.88 AS base
+# Curl google to quickly debug if networking is broken inside docker before proceeding with the next steps
+RUN curl https://google.com
+RUN cargo install cargo-binstall
+RUN cargo binstall sccache --version ^0.7
+RUN cargo binstall cargo-chef --version ^0.1
 ENV RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache
+
 
 FROM base AS planner
 WORKDIR /app
