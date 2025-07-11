@@ -1,10 +1,10 @@
-use tempfile::tempdir;
-use std::path::PathBuf;
 use crate::db::FuguDB;
 use crate::object::ObjectRecord;
-use serde_json::Value;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use serde_json::Value;
+use std::path::PathBuf;
+use tempfile::tempdir;
 
 #[tokio::test]
 async fn test_upsert_insert_and_update() {
@@ -16,7 +16,8 @@ async fn test_upsert_insert_and_update() {
     let rec1 = ObjectRecord {
         id: "X".to_string(),
         text: "foo".to_string(),
-        metadata: serde_json::json!({"a":1}),
+        metadata: Some(serde_json::json!({"a":1})),
+        ..Default::default()
     };
     let res = db.upsert(vec![rec1.clone()]).await;
     assert!(res.is_ok(), "Upsert insert failed: {:?}", res);
@@ -32,7 +33,8 @@ async fn test_upsert_insert_and_update() {
     let rec2 = ObjectRecord {
         id: "X".to_string(),
         text: "bar".to_string(),
-        metadata: serde_json::json!({"a":2}),
+        metadata: Some(serde_json::json!({"a":2})),
+        ..Default::default()
     };
     let res2 = db.upsert(vec![rec2.clone()]).await;
     assert!(res2.is_ok(), "Upsert update failed: {:?}", res2);
@@ -45,3 +47,4 @@ async fn test_upsert_insert_and_update() {
     assert_eq!(v2["metadata"]["a"], Value::from(2));
     assert_eq!(v2["text"], Value::from("bar"));
 }
+

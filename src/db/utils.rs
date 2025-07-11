@@ -170,6 +170,7 @@ mod tests {
         let record = ObjectRecord {
             id: "test_id".to_string(),
             text: "test text".to_string(),
+            facets: None,
             namespace: Some("test_namespace".to_string()),
             organization: Some("test_org".to_string()),
             conversation_id: None,
@@ -193,4 +194,3 @@ mod tests {
         }
     }
 }
-

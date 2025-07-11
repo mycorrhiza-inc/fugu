@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use tantivy::schema::*;
 use tantivy::{DateTime, Document as TantivyDocument};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ObjectRecord {
     pub id: String,
     pub text: String,
