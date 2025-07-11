@@ -1,5 +1,6 @@
 // server/handlers/namespaces.rs - Namespace endpoint handlers
 use crate::tracing_utils;
+use aide::axum::IntoApiResponse;
 use axum::{
     Json,
     extract::{Path, State},
@@ -13,7 +14,7 @@ use tracing::{error, info};
 use crate::server::server_main::AppState;
 
 /// Get all available namespaces
-pub async fn get_available_namespaces(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_available_namespaces(State(state): State<Arc<AppState>>) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/namespaces", "GET");
     let _guard = span.enter();
 
@@ -45,7 +46,7 @@ pub async fn get_available_namespaces(State(state): State<Arc<AppState>>) -> imp
 pub async fn get_namespace_facets(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/namespaces/{}/facets", namespace), "GET");
     let _guard = span.enter();
 
@@ -90,7 +91,7 @@ pub async fn get_namespace_facets(
 pub async fn get_namespace_organizations(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span =
         tracing_utils::server_span(&format!("/namespaces/{}/organizations", namespace), "GET");
     let _guard = span.enter();
@@ -132,7 +133,7 @@ pub async fn get_namespace_organizations(
 pub async fn get_namespace_conversations(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span =
         tracing_utils::server_span(&format!("/namespaces/{}/conversations", namespace), "GET");
     let _guard = span.enter();
@@ -174,7 +175,7 @@ pub async fn get_namespace_conversations(
 pub async fn get_namespace_data_types(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/namespaces/{}/data", namespace), "GET");
     let _guard = span.enter();
 

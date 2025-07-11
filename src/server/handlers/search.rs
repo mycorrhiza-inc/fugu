@@ -80,7 +80,7 @@ pub async fn query_text_path(
     State(state): State<Arc<AppState>>,
     Path(encoded_query): Path<String>,
     Query(params): Query<TextQueryParams>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/search/:query", "GET");
     let _guard = span.enter();
 
@@ -286,7 +286,7 @@ pub async fn query_json_post(
 //pub async fn search_with_namespace_facets(
 //    State(state): State<Arc<AppState>>,
 //    Json(payload): Json<FuguSearchQuery>,
-//) -> impl IntoResponse {
+//) -> impl IntoApiResponse {
 //    let span = tracing_utils::server_span("/search/namespace", "POST");
 //    let _guard = span.enter();
 //

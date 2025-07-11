@@ -1,6 +1,7 @@
 // src/server/handlers/objects.rs - Object CRUD endpoint handlers
 use crate::server::types::*;
 use crate::tracing_utils;
+use aide::axum::IntoApiResponse;
 use axum::{
     Json,
     extract::{Path, State},
@@ -45,7 +46,7 @@ pub async fn get_object_by_id(
 pub async fn delete_object(
     State(state): State<Arc<AppState>>,
     Path(object_id): Path<String>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/objects/{}", object_id), "DELETE");
     let _guard = span.enter();
 
@@ -77,7 +78,7 @@ pub async fn delete_object(
 pub async fn upsert_objects(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<IndexRequest>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/objects", "PUT");
     let _guard = span.enter();
 

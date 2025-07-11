@@ -1,6 +1,7 @@
 // server/handlers/facets.rs - Facet endpoint handlers
-use crate::tracing_utils;
 use crate::server::types::FacetTreeParams;
+use crate::tracing_utils;
+use aide::axum::IntoApiResponse;
 use axum::{
     Json,
     extract::{Query, State},
@@ -17,7 +18,7 @@ use crate::server::server_main::AppState;
 pub async fn get_facet_tree(
     State(state): State<Arc<AppState>>,
     Query(params): Query<FacetTreeParams>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/facets/tree", "GET");
     let _guard = span.enter();
 

@@ -1,5 +1,6 @@
 // server/handlers/filters.rs - Filter endpoint handlers
 use crate::tracing_utils;
+use aide::axum::IntoApiResponse;
 use axum::{
     Json,
     extract::{Path, State},
@@ -20,7 +21,7 @@ pub async fn get_filter(
     let span = tracing_utils::server_span(&format!("/filters/{}", namespace), "GET");
     let _guard = span.enter();
     debug!("get filter endpoint called for {}", namespace);
-    
+
     let facets = state
         .db
         .clone()
@@ -46,7 +47,7 @@ pub async fn list_filters(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 /// Get all filter paths
-pub async fn get_all_filters(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_all_filters(State(state): State<Arc<AppState>>) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/filters/all", "GET");
     let _guard = span.enter();
 
@@ -77,7 +78,7 @@ pub async fn get_all_filters(State(state): State<Arc<AppState>>) -> impl IntoRes
 pub async fn get_namespace_filters(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/filters/namespace/{}", namespace), "GET");
     let _guard = span.enter();
 
@@ -115,7 +116,7 @@ pub async fn get_namespace_filters(
 pub async fn get_filter_values_at_path(
     State(state): State<Arc<AppState>>,
     Path(filter_path): Path<String>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/filters/path/{}", filter_path), "GET");
     let _guard = span.enter();
 
