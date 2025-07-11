@@ -22,8 +22,9 @@ use super::server_main::AppState;
 pub fn create_router() -> ApiRouter<std::sync::Arc<AppState>> {
     ApiRouter::new()
         // Basic routes
-        .route("/health", get_with(health, health_docs))
-        .route("/hi", aide_get(sayhi))
+        .api_route("/health", get_with(health, health_docs))
+        .api_route("/health2", get_with(health, health_docs))
+        .route("/hi", get_with(sayhi, sayhi_docs))
         // Search routes
         .route("/search", aide_get(query_text_get))
         .route("/search", aide_post(search))
