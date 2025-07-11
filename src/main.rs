@@ -11,14 +11,14 @@ use fugu::server;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Use a span for the application initialization
-    let init_span = tracing::span!(tracing::Level::INFO, "app_init");
-    let _init_guard = init_span.enter();
-
-    // Initialize tracing using our utility module
-    if !tracing_utils::init_tracing() {
-        eprintln!("Failed to initialize tracing, exiting");
-        return Ok(());
-    }
+    // let init_span = tracing::span!(tracing::Level::INFO, "app_init");
+    // let _init_guard = init_span.enter();
+    //
+    // // Initialize tracing using our utility module
+    // if !tracing_utils::init_tracing() {
+    //     eprintln!("Failed to initialize tracing, exiting");
+    //     return Ok(());
+    // }
 
     // Check if running in CLI mode or help mode
     let args: Vec<String> = std::env::args().collect();
@@ -34,11 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     } else {
         // Only run server mode if no CLI arguments were provided
-        let server_mode_span = tracing::span!(tracing::Level::INFO, "server");
+        // let server_mode_span = tracing::span!(tracing::Level::INFO, "server");
         info!("Running in server mode");
-        async { run_server_mode().await }
-            .instrument(server_mode_span)
-            .await?;
+        async { run_server_mode().await }.await?;
     }
 
     Ok(())
@@ -55,7 +53,7 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
     info!("Database initialized successfully");
 
     // With the unified backend, we don't need mailbox or compactor queue anymore
-    // These were part of the old implementation before the backend abstraction  
+    // These were part of the old implementation before the backend abstraction
 
     // We just pass the FuguDB instance directly to the server
     let server_db = fdb.clone();
@@ -82,3 +80,4 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
