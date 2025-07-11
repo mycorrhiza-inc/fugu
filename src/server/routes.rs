@@ -1,9 +1,9 @@
 use aide::axum::routing::post_with;
 use aide::axum::{
     ApiRouter,
+    routing::{delete, get, post, put},
     routing::{get as aide_get, get_with, post as aide_post},
 };
-use axum::routing::{delete, get, post, put};
 // server/routes.rs - Route configuration and setup
 use axum::Router;
 use tracing::info;
@@ -27,44 +27,44 @@ pub fn create_router() -> ApiRouter<std::sync::Arc<AppState>> {
         // Search routes
         .api_route("/search", aide_get(query_text_get))
         .api_route("/search", aide_post(search))
-        .route("/search/{query}", get(query_text_path))
-        .route("/search/json", post(query_json_post))
-        // .route("/search/namespace", post(search_with_namespace_facets))
+        .api_route("/search/{query}", get(query_text_path))
+        .api_route("/search/json", post(query_json_post))
+        // .api_route("/search/namespace", post(search_with_namespace_facets))
         // Object CRUD routes
-        .route("/objects", get(list_objects))
-        .route("/objects", put(upsert_objects))
-        .route("/objects/{object_id}", get(get_object_by_id))
-        .route("/objects/{object_id}", delete(delete_object))
+        .api_route("/objects", get(list_objects))
+        .api_route("/objects", put(upsert_objects))
+        .api_route("/objects/{object_id}", get(get_object_by_id))
+        .api_route("/objects/{object_id}", delete(delete_object))
         // Ingest routes
-        .route("/ingest", post(ingest_objects))
-        .route(
+        .api_route("/ingest", post(ingest_objects))
+        .api_route(
             "/ingest/namespace",
             post(ingest_objects_with_namespace_facets),
         )
-        .route("/batch/upsert", post(batch_upsert_objects))
+        .api_route("/batch/upsert", post(batch_upsert_objects))
         // Namespace routes
-        .route("/namespaces", get(get_available_namespaces))
-        .route("/namespaces/{namespace}/facets", get(get_namespace_facets))
-        .route(
+        .api_route("/namespaces", get(get_available_namespaces))
+        .api_route("/namespaces/{namespace}/facets", get(get_namespace_facets))
+        .api_route(
             "/namespaces/{namespace}/organizations",
             get(get_namespace_organizations),
         )
-        .route(
+        .api_route(
             "/namespaces/{namespace}/conversations",
             get(get_namespace_conversations),
         )
-        .route(
+        .api_route(
             "/namespaces/{namespace}/data",
             get(get_namespace_data_types),
         )
         // Filter routes
-        .route("/filters", get(list_filters))
-        .route("/filters/all", get(get_all_filters))
-        .route("/filters/namespace/{namespace}", get(get_namespace_filters))
-        .route("/filters/path/{*filter}", get(get_filter_values_at_path))
-        .route("/filters/{namespace}", get(get_filter))
+        .api_route("/filters", get(list_filters))
+        .api_route("/filters/all", get(get_all_filters))
+        .api_route("/filters/namespace/{namespace}", get(get_namespace_filters))
+        .api_route("/filters/path/{*filter}", get(get_filter_values_at_path))
+        .api_route("/filters/{namespace}", get(get_filter))
         // Facet tree routes
-        .route("/facets/tree", get(get_facet_tree))
+        .api_route("/facets/tree", get(get_facet_tree))
 }
 
 pub fn log_available_endpoints() {

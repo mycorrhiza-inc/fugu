@@ -190,7 +190,8 @@ pub async fn query_json_post(
     State(state): State<Arc<AppState>>,
     Query(flag): Query<IncludeTextFlag>,
     Json(payload): Json<JsonQueryRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/search", "POST");
     let _guard = span.enter();
 

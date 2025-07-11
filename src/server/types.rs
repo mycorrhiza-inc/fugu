@@ -79,12 +79,12 @@ pub struct DemoIndexRequest {
     pub id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct IndexRequest {
     pub data: Vec<ObjectRecord>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct BatchIndexRequest {
     pub objects: Vec<ObjectRecord>,
 }
@@ -98,7 +98,7 @@ pub struct FileIngestionRequest {
 }
 
 /// JSON query request body for POST requests
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct JsonQueryRequest {
     pub query: String,
     pub filters: Option<Vec<String>>,
@@ -112,7 +112,7 @@ pub struct JsonQueryRequest {
 }
 
 /// helper for POST?text=...
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct IncludeTextFlag {
     #[serde(default)]
     pub text: Option<bool>,
@@ -147,7 +147,7 @@ pub struct SearchResponse {
     pub query: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct FacetTreeParams {
     pub max_depth: Option<usize>,
 }
