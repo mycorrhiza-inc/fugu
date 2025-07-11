@@ -12,6 +12,24 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use crate::server::server_main::AppState;
+use aide::transform::TransformOperation;
+use schemars::JsonSchema;
+use serde::Serialize;
+
+#[derive(Serialize, JsonSchema)]
+pub struct FilterResponse {
+    filters: Vec<String>,
+}
+
+pub fn get_filter_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Get filter for a specific namespace (legacy endpoint).")
+        .response::<200, Json<FilterResponse>>()
+}
+
+pub fn list_filters_docs(op: TransformOperation) -> TransformOperation {
+    op.description("List all filters.")
+        .response::<200, Json<FilterResponse>>()
+}
 
 /// Get filter for a specific namespace (legacy endpoint)
 pub async fn get_filter(

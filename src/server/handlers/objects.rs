@@ -14,6 +14,18 @@ use tracing::{debug, error, info};
 
 use crate::server::server_main::AppState;
 use tantivy::Document;
+use aide::transform::TransformOperation;
+use crate::ObjectRecord;
+
+pub fn get_object_by_id_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Get a specific object by ID.")
+        .response::<200, Json<ObjectRecord>>()
+}
+
+pub fn list_objects_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Get all objects stored in the database.")
+        .response::<200, Json<Vec<ObjectRecord>>>()
+}
 
 /// Get a specific object by ID
 pub async fn get_object_by_id(

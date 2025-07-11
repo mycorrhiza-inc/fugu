@@ -2,6 +2,7 @@
 //! Search functionality for FuguDB
 
 use anyhow::Result;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tantivy::collector::TopDocs;
@@ -17,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use super::core::FuguDB;
 
 /// Search result returned by FuguDB queries
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FuguSearchResult {
     pub id: String,
     pub score: f32,

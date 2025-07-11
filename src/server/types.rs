@@ -138,7 +138,7 @@ pub struct TextQueryParams {
 pub type SearchResultItem = FuguSearchResult;
 
 /// Search response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct SearchResponse {
     pub results: Vec<SearchResultItem>,
     pub total: usize,
@@ -151,4 +151,3 @@ pub struct SearchResponse {
 pub struct FacetTreeParams {
     pub max_depth: Option<usize>,
 }
-

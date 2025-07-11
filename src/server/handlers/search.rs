@@ -15,6 +15,11 @@ use urlencoding::decode;
 
 use crate::server::server_main::AppState;
 
+pub fn query_json_post_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Execute a JSON query via POST.")
+        .response::<200, Json<SearchResponse>>()
+}
+
 pub fn query_text_get_docs(op: TransformOperation) -> TransformOperation {
     op.description("Get query text.")
         .response::<200, Json<String>>()

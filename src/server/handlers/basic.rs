@@ -1,6 +1,6 @@
 // server/handlers/basic.rs - Basic endpoint handlers
 use crate::{server::FacetTreeParams, tracing_utils};
-use aide::transform::TransformOperation;
+use aide::{axum::IntoApiResponse, transform::TransformOperation};
 use axum::{
     Json,
     extract::{Query, State},
@@ -29,16 +29,23 @@ pub async fn health(State(state): State<Arc<AppState>>) -> String {
 
 pub fn sayhi_docs(op: TransformOperation) -> TransformOperation {
     op.description("Server says hi")
-        .response::<200, Json<Value>>()
+        .response::<200, Json<BasicMessage>>()
 }
+
 /// Basic greeting endpoint
-// pub async fn sayhi(State(_state): State<Arc<AppState>>) -> Json<Value> {
-pub async fn sayhi(Query(_params): Query<FacetTreeParams>) -> Json<Value> {
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BasicMessage {
+    message: String,
+}
+
+pub async fn sayhi() -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/", "GET");
     let _guard = span.enter();
 
     info!("api endpoint hit");
 
-    Json(json!({"message":"hi!"}))
+    Json(BasicMessage {
+        message: "hi".to_owned(),
+    })
+    // Json(json!({"message":"hi!"}))
 }
-

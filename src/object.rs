@@ -10,7 +10,7 @@ use tantivy::{DateTime, Document as TantivyDocument};
 pub struct ObjectRecord {
     pub id: String,
     pub text: String,
-    pub metadata: Option<serde_json::Value>,
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
     pub namespace: Option<String>,
 
     // CRITICAL: Add explicit facets field to match Go SDK

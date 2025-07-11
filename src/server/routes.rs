@@ -9,7 +9,9 @@ use axum::Router;
 use tracing::info;
 
 use super::handlers::basic::{health_docs, sayhi_docs};
-use super::handlers::search::query_text_get_docs;
+use super::handlers::filters::{get_filter_docs, list_filters_docs};
+use super::handlers::objects::{get_object_by_id_docs, list_objects_docs};
+use super::handlers::search::query_json_post_docs;
 use super::handlers::{
     batch_upsert_objects, delete_object, get_all_filters, get_available_namespaces, get_facet_tree,
     get_filter, get_filter_values_at_path, get_namespace_conversations, get_namespace_data_types,
@@ -23,18 +25,23 @@ pub fn create_router() -> ApiRouter<std::sync::Arc<AppState>> {
     ApiRouter::new()
         // Basic routes
         .api_route("/health", get_with(health, health_docs))
-        .api_route("/health2", get_with(health, health_docs))
         .api_route("/hi", get_with(sayhi, sayhi_docs))
         // Search routes
         .api_route("/search", aide_get(query_text_get))
         .api_route("/search", aide_post(search))
         .api_route("/search/{query}", get(query_text_path))
-        .api_route("/search/json", post(query_json_post))
+        .api_route(
+            "/search/json",
+            post_with(query_json_post, query_json_post_docs),
+        )
         // .api_route("/search/namespace", post(search_with_namespace_facets))
         // Object CRUD routes
-        .api_route("/objects", get(list_objects))
+        .api_route("/objects", get_with(list_objects, list_objects_docs))
         .api_route("/objects", put(upsert_objects))
-        .api_route("/objects/{object_id}", get(get_object_by_id))
+        .api_route(
+            "/objects/{object_id}",
+            get_with(get_object_by_id, get_object_by_id_docs),
+        )
         .api_route("/objects/{object_id}", delete(delete_object))
         // Ingest routes
         .api_route("/ingest", post(ingest_objects))
@@ -59,11 +66,14 @@ pub fn create_router() -> ApiRouter<std::sync::Arc<AppState>> {
             get(get_namespace_data_types),
         )
         // Filter routes
-        .api_route("/filters", get(list_filters))
+        .api_route("/filters", get_with(list_filters, list_filters_docs))
         .api_route("/filters/all", get(get_all_filters))
         .api_route("/filters/namespace/{namespace}", get(get_namespace_filters))
         .api_route("/filters/path/{*filter}", get(get_filter_values_at_path))
-        .api_route("/filters/{namespace}", get(get_filter))
+        .api_route(
+            "/filters/{namespace}",
+            get_with(get_filter, get_filter_docs),
+        )
         // Facet tree routes
         .api_route("/facets/tree", get(get_facet_tree))
 }
