@@ -1,10 +1,15 @@
-// server/routes.rs - Route configuration and setup
-use axum::{
-    Router,
-    routing::{delete, get, post, put},
+use aide::axum::routing::post_with;
+use aide::axum::{
+    ApiRouter,
+    routing::{get as aide_get, get_with, post as aide_post},
 };
+use axum::routing::{delete, get, post, put};
+// server/routes.rs - Route configuration and setup
+use axum::Router;
 use tracing::info;
 
+use super::handlers::basic::{health_docs, sayhi_docs};
+use super::handlers::search::query_text_get_docs;
 use super::handlers::{
     batch_upsert_objects, delete_object, get_all_filters, get_available_namespaces, get_facet_tree,
     get_filter, get_filter_values_at_path, get_namespace_conversations, get_namespace_data_types,
@@ -14,15 +19,14 @@ use super::handlers::{
 };
 use super::server_main::AppState;
 
-pub fn create_router() -> Router<std::sync::Arc<AppState>> {
-    Router::new()
+pub fn create_router() -> ApiRouter<std::sync::Arc<AppState>> {
+    ApiRouter::new()
         // Basic routes
-        .route("/", get(|| async move { "Hello from Fugu API" }))
-        .route("/health", get(health))
-        .route("/hi", get(sayhi))
+        .api_route("/health", get_with(health, health_docs))
+        .api_route("/hi", aide_get(sayhi))
         // Search routes
-        .route("/search", get(query_text_get))
-        .route("/search", post(search))
+        .api_route("/search", aide_get(query_text_get))
+        .api_route("/search", aide_post(search))
         .route("/search/{query}", get(query_text_path))
         .route("/search/json", post(query_json_post))
         // .route("/search/namespace", post(search_with_namespace_facets))

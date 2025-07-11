@@ -1,6 +1,7 @@
 // src/server/handlers/search.rs - Search endpoint handlers
 use crate::server::types::*;
 use crate::tracing_utils;
+use aide::{axum::IntoApiResponse, transform::TransformOperation};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -14,11 +15,15 @@ use urlencoding::decode;
 
 use crate::server::server_main::AppState;
 
+pub fn query_text_get_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Get query text.")
+        .response::<200, Json<String>>()
+}
 /// Execute a text query via GET with URL parameters
 pub async fn query_text_get(
     State(state): State<Arc<AppState>>,
     Query(params): Query<TextQueryParams>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/search", "GET");
     let _guard = span.enter();
 
@@ -140,7 +145,7 @@ pub async fn query_text_path(
 pub async fn search(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<FuguSearchQuery>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/search", "POST");
     let _guard = span.enter();
 
@@ -371,4 +376,3 @@ pub async fn perform_search(
         }
     }
 }
-
