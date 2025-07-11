@@ -1,5 +1,7 @@
 //! Utility functions for database operations
 
+use std::collections::HashMap;
+
 use serde_json::Value as SerdeValue;
 use tantivy::TantivyDocument;
 use tracing::info;
@@ -7,6 +9,21 @@ use tracing::info;
 use crate::db::{FuguDB, FuguSearchResult};
 use crate::object::ObjectRecord;
 
+pub fn create_metadata_facets_hashmap(
+    value: &HashMap<String, SerdeValue>,
+    prefix: Vec<String>,
+) -> Vec<Vec<String>> {
+    let mut facets = Vec::new();
+
+    for (key, val) in value {
+        let mut new_prefix = prefix.clone();
+        new_prefix.push(key.clone());
+        let sub_facets = create_metadata_facets(val, new_prefix);
+        facets.extend(sub_facets);
+    }
+
+    facets
+}
 /// Helper function to create metadata facets
 pub fn create_metadata_facets(value: &SerdeValue, mut prefix: Vec<String>) -> Vec<Vec<String>> {
     let mut facets = Vec::new();
@@ -175,7 +192,7 @@ mod tests {
             organization: Some("test_org".to_string()),
             conversation_id: None,
             data_type: None,
-            metadata: Some(json!({"key": "value"})),
+            metadata: None,
             date_created: None,
             date_updated: None,
             date_published: None,
