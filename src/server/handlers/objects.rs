@@ -12,10 +12,10 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
-use crate::server::server_main::AppState;
-use tantivy::Document;
-use aide::transform::TransformOperation;
 use crate::ObjectRecord;
+use crate::server::server_main::AppState;
+use aide::transform::TransformOperation;
+use tantivy::Document;
 
 pub fn get_object_by_id_docs(op: TransformOperation) -> TransformOperation {
     op.description("Get a specific object by ID.")
@@ -30,7 +30,7 @@ pub fn list_objects_docs(op: TransformOperation) -> TransformOperation {
 /// Get a specific object by ID
 pub async fn get_object_by_id(
     State(state): State<Arc<AppState>>,
-    Path(object_id): Path<String>,
+    Path(ObjectidUrlComponent { object_id }): Path<ObjectidUrlComponent>,
 ) -> Json<Value> {
     let span = tracing_utils::server_span(&format!("/objects/{}", object_id), "GET");
     let _guard = span.enter();
@@ -57,7 +57,7 @@ pub async fn get_object_by_id(
 /// Delete a single object by ID
 pub async fn delete_object(
     State(state): State<Arc<AppState>>,
-    Path(object_id): Path<String>,
+    Path(ObjectidUrlComponent { object_id }): Path<ObjectidUrlComponent>,
 ) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/objects/{}", object_id), "DELETE");
     let _guard = span.enter();

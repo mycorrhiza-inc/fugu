@@ -151,3 +151,18 @@ pub struct SearchResponse {
 pub struct FacetTreeParams {
     pub max_depth: Option<usize>,
 }
+
+#[derive(JsonSchema, Clone, Deserialize)]
+pub struct NamespaceUrlComponent {
+    pub namespace: String,
+}
+
+#[derive(JsonSchema, Clone, Deserialize)]
+pub struct ObjectidUrlComponent {
+    pub object_id: String,
+}
+
+#[derive(JsonSchema, Clone, Deserialize)]
+pub struct EncodedQueryComponent {
+    pub query: String,
+}

@@ -1,5 +1,5 @@
 // server/handlers/namespaces.rs - Namespace endpoint handlers
-use crate::tracing_utils;
+use crate::{server::NamespaceUrlComponent, tracing_utils};
 use aide::axum::IntoApiResponse;
 use axum::{
     Json,
@@ -45,7 +45,7 @@ pub async fn get_available_namespaces(State(state): State<Arc<AppState>>) -> imp
 /// Get facets for a specific namespace
 pub async fn get_namespace_facets(
     State(state): State<Arc<AppState>>,
-    Path(namespace): Path<String>,
+    Path(NamespaceUrlComponent { namespace }): Path<NamespaceUrlComponent>,
 ) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/namespaces/{}/facets", namespace), "GET");
     let _guard = span.enter();
@@ -90,7 +90,7 @@ pub async fn get_namespace_facets(
 /// Get organization types for a namespace
 pub async fn get_namespace_organizations(
     State(state): State<Arc<AppState>>,
-    Path(namespace): Path<String>,
+    Path(NamespaceUrlComponent { namespace }): Path<NamespaceUrlComponent>,
 ) -> impl IntoApiResponse {
     let span =
         tracing_utils::server_span(&format!("/namespaces/{}/organizations", namespace), "GET");
@@ -132,7 +132,7 @@ pub async fn get_namespace_organizations(
 /// Get conversation IDs for a namespace
 pub async fn get_namespace_conversations(
     State(state): State<Arc<AppState>>,
-    Path(namespace): Path<String>,
+    Path(NamespaceUrlComponent { namespace }): Path<NamespaceUrlComponent>,
 ) -> impl IntoApiResponse {
     let span =
         tracing_utils::server_span(&format!("/namespaces/{}/conversations", namespace), "GET");
@@ -174,7 +174,7 @@ pub async fn get_namespace_conversations(
 /// Get data types for a namespace
 pub async fn get_namespace_data_types(
     State(state): State<Arc<AppState>>,
-    Path(namespace): Path<String>,
+    Path(NamespaceUrlComponent { namespace }): Path<NamespaceUrlComponent>,
 ) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/namespaces/{}/data", namespace), "GET");
     let _guard = span.enter();

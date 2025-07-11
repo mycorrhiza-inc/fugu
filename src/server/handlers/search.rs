@@ -83,14 +83,15 @@ pub async fn query_text_get(
 /// Execute a text query via URL path (URL-encoded)
 pub async fn query_text_path(
     State(state): State<Arc<AppState>>,
-    Path(encoded_query): Path<String>,
+
+    Path(EncodedQueryComponent { query }): Path<EncodedQueryComponent>,
     Query(params): Query<TextQueryParams>,
 ) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/search/:query", "GET");
     let _guard = span.enter();
 
     // Decode the URL-encoded query
-    let query = match decode(&encoded_query) {
+    let query = match decode(&query) {
         Ok(decoded) => decoded.to_string(),
         Err(_) => {
             return (

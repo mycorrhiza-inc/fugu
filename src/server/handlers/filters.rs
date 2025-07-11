@@ -1,5 +1,5 @@
 // server/handlers/filters.rs - Filter endpoint handlers
-use crate::tracing_utils;
+use crate::{server::NamespaceUrlComponent, tracing_utils};
 use aide::axum::IntoApiResponse;
 use axum::{
     Json,
@@ -95,7 +95,7 @@ pub async fn get_all_filters(State(state): State<Arc<AppState>>) -> impl IntoApi
 /// Get filter paths for a specific namespace
 pub async fn get_namespace_filters(
     State(state): State<Arc<AppState>>,
-    Path(namespace): Path<String>,
+    Path(NamespaceUrlComponent { namespace }): Path<NamespaceUrlComponent>,
 ) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/filters/namespace/{}", namespace), "GET");
     let _guard = span.enter();
