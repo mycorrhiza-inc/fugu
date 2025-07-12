@@ -5,7 +5,6 @@ use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -34,7 +33,7 @@ pub fn list_filters_docs(op: TransformOperation) -> TransformOperation {
 /// Get filter for a specific namespace (legacy endpoint)
 pub async fn get_filter(
     State(state): State<Arc<AppState>>,
-    Path(namespace): Path<String>,
+    Path(NamespaceUrlComponent { namespace }): Path<NamespaceUrlComponent>,
 ) -> Json<Value> {
     let span = tracing_utils::server_span(&format!("/filters/{}", namespace), "GET");
     let _guard = span.enter();
