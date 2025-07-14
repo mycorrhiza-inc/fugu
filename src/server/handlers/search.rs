@@ -1,4 +1,4 @@
-// src/server/handlers/search.rs - Search endpoint handlers
+'''// src/server/handlers/search.rs - Search endpoint handlers
 use crate::server::types::*;
 use crate::tracing_utils;
 use aide::{axum::IntoApiResponse, transform::TransformOperation};
@@ -33,14 +33,6 @@ pub async fn query_text_get(
     let _guard = span.enter();
 
     info!("GET search query: {}", params.q);
-    if params.q.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "Query parameter 'q' cannot be empty"
-            })),
-        );
-    }
 
     let limit = params.limit.unwrap_or(20);
     let include_text = params.text.unwrap_or(false);
@@ -104,14 +96,6 @@ pub async fn query_text_path(
     };
 
     info!("Path search query: {}", query);
-    if query.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "Query cannot be empty"
-            })),
-        );
-    }
 
     // For path-based searches without filters, include all data by default
     let filters = Vec::new();
@@ -145,6 +129,16 @@ pub async fn query_text_path(
             )
         }
     }
+}
+
+pub fn query_text_path_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Execute a text query via URL path (URL-encoded).")
+        .response::<200, Json<SearchResponse>>()
+}
+
+pub fn search_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Search endpoint returning full facet paths for each result.")
+        .response::<200, Json<SearchResponse>>()
 }
 
 /// Search endpoint returning full facet paths for each result
@@ -202,14 +196,6 @@ pub async fn query_json_post(
     let _guard = span.enter();
 
     info!("POST search query: {}", payload.query);
-    if payload.query.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "Query cannot be empty"
-            })),
-        ));
-    }
 
     // resolve text inclusion flags
     let url_text = flag.text.unwrap_or(false);
@@ -383,3 +369,4 @@ pub async fn perform_search(
         }
     }
 }
+''
