@@ -11,13 +11,16 @@ use tracing::info;
 use super::handlers::basic::{health_docs, sayhi_docs};
 use super::handlers::filters::{get_filter_docs, list_filters_docs};
 use super::handlers::objects::{get_object_by_id_docs, list_objects_docs};
-use super::handlers::search::{query_json_post_docs, query_text_get_docs, query_text_path_docs, search_docs};
+use super::handlers::search::{
+    query_json_post_docs, query_text_get_docs, query_text_path_docs, search_docs,
+};
 use super::handlers::{
     batch_upsert_objects, delete_object, get_all_filters, get_available_namespaces, get_facet_tree,
     get_filter, get_filter_values_at_path, get_namespace_conversations, get_namespace_data_types,
     get_namespace_facets, get_namespace_filters, get_namespace_organizations, get_object_by_id,
     health, ingest_objects, ingest_objects_with_namespace_facets, list_filters, list_objects,
-    query_json_post, query_text_get, query_text_path, sayhi, search, upsert_objects,
+    query_json_post, query_text_get, query_text_path, sayhi, search, search_endpoint,
+    upsert_objects,
 };
 use super::server_main::AppState;
 
@@ -28,8 +31,11 @@ pub fn create_router() -> ApiRouter<std::sync::Arc<AppState>> {
         .api_route("/hi", get_with(sayhi, sayhi_docs))
         // Search routes
         .api_route("/search", get_with(query_text_get, query_text_get_docs))
-        .api_route("/search", post_with(search, search_docs))
-        .api_route("/search/{query}", get_with(query_text_path, query_text_path_docs))
+        .api_route("/search", post_with(search_endpoint, search_docs))
+        .api_route(
+            "/search/{query}",
+            get_with(query_text_path, query_text_path_docs),
+        )
         .api_route(
             "/search/json",
             post_with(query_json_post, query_json_post_docs),

@@ -1,4 +1,4 @@
-'''// src/server/handlers/search.rs - Search endpoint handlers
+// src/server/handlers/search.rs - Search endpoint handlers
 use crate::server::types::*;
 use crate::tracing_utils;
 use aide::{axum::IntoApiResponse, transform::TransformOperation};
@@ -142,7 +142,7 @@ pub fn search_docs(op: TransformOperation) -> TransformOperation {
 }
 
 /// Search endpoint returning full facet paths for each result
-pub async fn search(
+pub async fn search_endpoint(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<FuguSearchQuery>,
 ) -> impl IntoApiResponse {
@@ -369,4 +369,3 @@ pub async fn perform_search(
         }
     }
 }
-''
