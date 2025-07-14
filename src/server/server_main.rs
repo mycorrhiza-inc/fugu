@@ -1,7 +1,13 @@
 // server/server_main.rs - Main server startup and configuration
 use crate::tracing_utils;
 use crate::{db::FuguDB, otel_setup::init_subscribers_and_loglevel};
+use aide::openapi::{Info, OpenApi};
+use aide::swagger::Swagger;
+use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::{Extension, Json};
 use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{Instrument, debug, error, info};
@@ -14,6 +20,29 @@ pub struct AppState {
     pub db: FuguDB,
 }
 
+async fn serve_api(Extension(api): Extension<OpenApi>) -> Json<Value> {
+    info!("Got API object, attempting JSON serialization");
+
+    // Attempt to serialize the OpenApi struct to a JSON Value
+    match serde_json::to_value(&api) {
+        Ok(value) => {
+            info!("Serialization successful");
+            Json(value)
+        }
+        Err(e) => {
+            // Log detailed error information
+            error!(err = %e, type_name =  std::any::type_name::<OpenApi>() ,"ApiSerialization FAILED");
+
+            // Return a structured error response
+            Json(json!({
+                "error": "Serialization failed",
+                "message": e.to_string(),
+                "type": std::any::type_name::<OpenApi>(),
+                "debug api": format!("{:?}", api)
+            }))
+        }
+    }
+}
 pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
     let server_span = tracing::span!(tracing::Level::INFO, "http_server", port = http_port);
 
@@ -26,12 +55,27 @@ pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
         let _ = init_subscribers_and_loglevel()
             .expect("Failed to initialize opentelemetry tracing stuff");
 
+        let mut api = OpenApi {
+            info: Info {
+                description: Some(
+                    "A search database, but with blackjack and other misc improvements".to_string(),
+                ),
+                ..Info::default()
+            },
+            ..OpenApi::default()
+        };
+
         // Create the router with shared state using our modular route configuration
         let app = routes::create_router()
+            .route("/api.json", get(serve_api))
+            .route("/swagger", Swagger::new("/api.json").axum_route())
             .with_state(app_state.clone())
             .layer(OtelInResponseLayer)
             //start OpenTelemetry trace on incoming request
-            .layer(OtelAxumLayer::default());
+            .layer(OtelAxumLayer::default())
+            .finish_api(&mut api)
+            // Expose the documentation to the handlers.
+            .layer(Extension(api));
 
         debug!("API routes configured with shared state");
 

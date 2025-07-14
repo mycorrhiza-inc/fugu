@@ -1,6 +1,7 @@
 // server/handlers/ingest.rs - Data ingest endpoint handlers
 use crate::server::types::*;
 use crate::tracing_utils;
+use aide::axum::IntoApiResponse;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde_json::json;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use crate::server::server_main::AppState;
 pub async fn ingest_objects(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<IndexRequest>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/ingest", "POST");
     let _guard = span.enter();
 
@@ -61,7 +62,7 @@ pub async fn ingest_objects(
 pub async fn ingest_objects_with_namespace_facets(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<IndexRequest>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/ingest/namespace", "POST");
     let _guard = span.enter();
 
@@ -132,7 +133,7 @@ pub async fn ingest_objects_with_namespace_facets(
 pub async fn batch_upsert_objects(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<BatchIndexRequest>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/batch/upsert", "POST");
     let _guard = span.enter();
 

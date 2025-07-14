@@ -7,6 +7,7 @@ use tracing::{info, warn};
 
 use super::core::FuguDB;
 use super::utils::create_metadata_facets;
+use crate::db::utils::create_metadata_facets_hashmap;
 use crate::object::ObjectRecord;
 
 /// Trait for document operations
@@ -155,7 +156,7 @@ impl FuguDB {
 
             // **FALLBACK: Process metadata facets if no explicit facets**
             if let Some(metadata) = &object.metadata {
-                let additional_facets = create_metadata_facets(metadata, Vec::new());
+                let additional_facets = create_metadata_facets_hashmap(metadata, Vec::new());
                 for facet_path in additional_facets {
                     if let Some(path) = facet_path.first() {
                         let normalized_path = if path.starts_with('/') {

@@ -1,26 +1,44 @@
 // server/handlers/filters.rs - Filter endpoint handlers
-use crate::tracing_utils;
+use crate::{server::NamespaceUrlComponent, tracing_utils};
+use aide::axum::IntoApiResponse;
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use crate::server::server_main::AppState;
+use aide::transform::TransformOperation;
+use schemars::JsonSchema;
+use serde::Serialize;
+
+#[derive(Serialize, JsonSchema)]
+pub struct FilterResponse {
+    filters: Vec<String>,
+}
+
+pub fn get_filter_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Get filter for a specific namespace (legacy endpoint).")
+        .response::<200, Json<FilterResponse>>()
+}
+
+pub fn list_filters_docs(op: TransformOperation) -> TransformOperation {
+    op.description("List all filters.")
+        .response::<200, Json<FilterResponse>>()
+}
 
 /// Get filter for a specific namespace (legacy endpoint)
 pub async fn get_filter(
     State(state): State<Arc<AppState>>,
-    Path(namespace): Path<String>,
+    Path(NamespaceUrlComponent { namespace }): Path<NamespaceUrlComponent>,
 ) -> Json<Value> {
     let span = tracing_utils::server_span(&format!("/filters/{}", namespace), "GET");
     let _guard = span.enter();
     debug!("get filter endpoint called for {}", namespace);
-    
+
     let facets = state
         .db
         .clone()
@@ -46,7 +64,7 @@ pub async fn list_filters(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 /// Get all filter paths
-pub async fn get_all_filters(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_all_filters(State(state): State<Arc<AppState>>) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/filters/all", "GET");
     let _guard = span.enter();
 
@@ -76,8 +94,8 @@ pub async fn get_all_filters(State(state): State<Arc<AppState>>) -> impl IntoRes
 /// Get filter paths for a specific namespace
 pub async fn get_namespace_filters(
     State(state): State<Arc<AppState>>,
-    Path(namespace): Path<String>,
-) -> impl IntoResponse {
+    Path(NamespaceUrlComponent { namespace }): Path<NamespaceUrlComponent>,
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/filters/namespace/{}", namespace), "GET");
     let _guard = span.enter();
 
@@ -115,7 +133,7 @@ pub async fn get_namespace_filters(
 pub async fn get_filter_values_at_path(
     State(state): State<Arc<AppState>>,
     Path(filter_path): Path<String>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span(&format!("/filters/path/{}", filter_path), "GET");
     let _guard = span.enter();
 

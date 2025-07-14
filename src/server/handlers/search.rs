@@ -1,36 +1,37 @@
 // src/server/handlers/search.rs - Search endpoint handlers
 use crate::server::types::*;
 use crate::tracing_utils;
+use aide::{axum::IntoApiResponse, transform::TransformOperation};
 use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use urlencoding::decode;
 
 use crate::server::server_main::AppState;
 
+pub fn query_json_post_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Execute a JSON query via POST.")
+        .response::<200, Json<SearchResponse>>()
+}
+
+pub fn query_text_get_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Get query text.")
+        .response::<200, Json<String>>()
+}
 /// Execute a text query via GET with URL parameters
 pub async fn query_text_get(
     State(state): State<Arc<AppState>>,
     Query(params): Query<TextQueryParams>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/search", "GET");
     let _guard = span.enter();
 
     info!("GET search query: {}", params.q);
-    if params.q.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "Query parameter 'q' cannot be empty"
-            })),
-        );
-    }
 
     let limit = params.limit.unwrap_or(20);
     let include_text = params.text.unwrap_or(false);
@@ -73,14 +74,15 @@ pub async fn query_text_get(
 /// Execute a text query via URL path (URL-encoded)
 pub async fn query_text_path(
     State(state): State<Arc<AppState>>,
-    Path(encoded_query): Path<String>,
+
+    Path(EncodedQueryComponent { query }): Path<EncodedQueryComponent>,
     Query(params): Query<TextQueryParams>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/search/:query", "GET");
     let _guard = span.enter();
 
     // Decode the URL-encoded query
-    let query = match decode(&encoded_query) {
+    let query = match decode(&query) {
         Ok(decoded) => decoded.to_string(),
         Err(_) => {
             return (
@@ -93,14 +95,6 @@ pub async fn query_text_path(
     };
 
     info!("Path search query: {}", query);
-    if query.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "Query cannot be empty"
-            })),
-        );
-    }
 
     // For path-based searches without filters, include all data by default
     let filters = Vec::new();
@@ -136,11 +130,21 @@ pub async fn query_text_path(
     }
 }
 
+pub fn query_text_path_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Execute a text query via URL path (URL-encoded).")
+        .response::<200, Json<SearchResponse>>()
+}
+
+pub fn search_docs(op: TransformOperation) -> TransformOperation {
+    op.description("Search endpoint returning full facet paths for each result.")
+        .response::<200, Json<SearchResponse>>()
+}
+
 /// Search endpoint returning full facet paths for each result
-pub async fn search(
+pub async fn search_endpoint(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<FuguSearchQuery>,
-) -> impl IntoResponse {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/search", "POST");
     let _guard = span.enter();
 
@@ -185,19 +189,12 @@ pub async fn query_json_post(
     State(state): State<Arc<AppState>>,
     Query(flag): Query<IncludeTextFlag>,
     Json(payload): Json<JsonQueryRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+) -> impl IntoApiResponse {
     let span = tracing_utils::server_span("/search", "POST");
     let _guard = span.enter();
 
     info!("POST search query: {}", payload.query);
-    if payload.query.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "Query cannot be empty"
-            })),
-        ));
-    }
 
     // resolve text inclusion flags
     let url_text = flag.text.unwrap_or(false);
@@ -281,7 +278,7 @@ pub async fn query_json_post(
 //pub async fn search_with_namespace_facets(
 //    State(state): State<Arc<AppState>>,
 //    Json(payload): Json<FuguSearchQuery>,
-//) -> impl IntoResponse {
+//) -> impl IntoApiResponse {
 //    let span = tracing_utils::server_span("/search/namespace", "POST");
 //    let _guard = span.enter();
 //
@@ -371,4 +368,3 @@ pub async fn perform_search(
         }
     }
 }
-

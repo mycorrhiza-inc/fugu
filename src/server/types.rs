@@ -1,11 +1,12 @@
 // server/types.rs - Type definitions for the server
-use crate::db::FuguSearchResult;
 use crate::ObjectRecord;
+use crate::db::FuguSearchResult;
 use axum::{
     Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -53,13 +54,13 @@ impl IntoResponse for AppError {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Pagination {
     pub page: Option<usize>,
     pub per_page: Option<usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct FuguSearchQuery {
     pub query: String,
     pub filters: Option<Vec<String>>,
@@ -78,12 +79,12 @@ pub struct DemoIndexRequest {
     pub id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct IndexRequest {
     pub data: Vec<ObjectRecord>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct BatchIndexRequest {
     pub objects: Vec<ObjectRecord>,
 }
@@ -97,7 +98,7 @@ pub struct FileIngestionRequest {
 }
 
 /// JSON query request body for POST requests
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct JsonQueryRequest {
     pub query: String,
     pub filters: Option<Vec<String>>,
@@ -111,7 +112,7 @@ pub struct JsonQueryRequest {
 }
 
 /// helper for POST?text=...
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct IncludeTextFlag {
     #[serde(default)]
     pub text: Option<bool>,
@@ -120,7 +121,7 @@ pub struct IncludeTextFlag {
 }
 
 /// Simple text query parameters for GET requests
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct TextQueryParams {
     pub q: String, // Changed from "query" to "q" to match standard
     #[serde(default)]
@@ -137,7 +138,7 @@ pub struct TextQueryParams {
 pub type SearchResultItem = FuguSearchResult;
 
 /// Search response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct SearchResponse {
     pub results: Vec<SearchResultItem>,
     pub total: usize,
@@ -146,7 +147,22 @@ pub struct SearchResponse {
     pub query: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct FacetTreeParams {
     pub max_depth: Option<usize>,
+}
+
+#[derive(JsonSchema, Clone, Deserialize)]
+pub struct NamespaceUrlComponent {
+    pub namespace: String,
+}
+
+#[derive(JsonSchema, Clone, Deserialize)]
+pub struct ObjectidUrlComponent {
+    pub object_id: String,
+}
+
+#[derive(JsonSchema, Clone, Deserialize)]
+pub struct EncodedQueryComponent {
+    pub query: String,
 }
