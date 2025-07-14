@@ -7,9 +7,9 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use urlencoding::decode;
 
 use crate::server::server_main::AppState;
