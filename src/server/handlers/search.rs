@@ -6,7 +6,6 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
