@@ -139,3 +139,19 @@ pub fn build_object_record_schema(mut schema_builder: SchemaBuilder) -> Schema {
 
     schema_builder.build()
 }
+
+/// builds the schema for facets
+pub fn build_facet_index_schema(mut schema_builder: SchemaBuilder) -> Schema {
+    // Core fields
+    schema_builder.add_text_field("text", TEXT | STORED);
+    // field of metadata facet eg `metadata.description`
+    schema_builder.add_text_field("field", TEXT | STORED);
+    schema_builder.add_text_field("namespace", TEXT | STORED);
+
+    // Date fields
+    schema_builder.add_date_field("date_created", INDEXED | STORED);
+    schema_builder.add_date_field("date_updated", INDEXED | STORED);
+    schema_builder.add_date_field("date_published", INDEXED | STORED);
+
+    schema_builder.build()
+}
