@@ -1,15 +1,15 @@
 // path: src/db/facet.rs
 //! Facet operations and tree building for FuguDB
 
-use std::collections::BTreeMap;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use tantivy::collector::FacetCollector;
 use tantivy::query::{AllQuery, TermQuery};
-use tantivy::schema::{Facet, IndexRecordOption};
 use tantivy::schema::*;
-use tantivy::{Term, TantivyDocument};
+use tantivy::schema::{Facet, IndexRecordOption};
+use tantivy::{TantivyDocument, Term};
 use tracing::{info, warn};
-use anyhow::Result;
 
 use super::core::FuguDB;
 
@@ -80,13 +80,13 @@ impl FuguDB {
         let facet = Facet::from(from_level.as_str());
         let facet_term = Term::from_facet(self.facet_field(), &facet);
         let _facet_term_query = TermQuery::new(facet_term, IndexRecordOption::Basic);
-        
+
         let mut facet_collector = FacetCollector::for_field("facet");
         facet_collector.add_facet(from_level.as_str());
-        
+
         let facet_counts = searcher.search(&AllQuery, &facet_collector)?;
         let facets: Vec<(&Facet, u64)> = facet_counts.get(from_level.as_str()).collect();
-        
+
         info!("found {} facets", facets.len());
         let mut out: Vec<(Facet, u64)> = Vec::new();
         for f in facets {
@@ -274,8 +274,11 @@ impl FuguDB {
         let namespace_term = Term::from_facet(self.facet_field(), &namespace_facet);
         let namespace_query = TermQuery::new(namespace_term, IndexRecordOption::Basic);
 
-        let top_docs = searcher.search(&namespace_query, &tantivy::collector::TopDocs::with_limit(10000))?;
-		        // let top_docs = searcher.search(&namespace_query, &TopDocs::with_limit(10000))?;
+        let top_docs = searcher.search(
+            &namespace_query,
+            &tantivy::collector::TopDocs::with_limit(10000),
+        )?;
+        // let top_docs = searcher.search(&namespace_query, &TopDocs::with_limit(10000))?;
 
         let mut namespace_facets = std::collections::HashMap::new();
 
@@ -401,3 +404,4 @@ impl FuguDB {
         Ok(values)
     }
 }
+

@@ -1,0 +1,84 @@
+schemas:
+  # Full document schema for the docs index
+  docs:
+    fields:
+      - name: id
+        type: text
+        options: ["TEXT", "STORED"]
+        description: "Unique identifier for the document"
+        
+      - name: text
+        type: text
+        options: ["TEXT", "STORED"]
+        description: "Main text content"
+        
+      - name: name
+        type: text
+        options: ["TEXT", "STORED"]
+        description: "Document name or title"
+        
+      - name: namespace
+        type: text
+        options: ["TEXT", "STORED"]
+        description: "Document namespace"
+
+      - name: organization
+        type: text
+        options: ["TEXT", "STORED"]
+        description: "Organization identifier"
+        
+      - name: conversation_id
+        type: text
+        options: ["TEXT", "STORED"]
+        description: "Related conversation ID"
+        
+      - name: data_type
+        type: text
+        options: ["TEXT", "STORED"]
+        description: "Type of data stored"
+
+      - name: facet
+        type: facet
+        options: ["INDEXED", "STORED"]
+        description: "Faceted search field"
+
+      - name: metadata
+        type: json
+        options: ["STORED"]
+        description: "Additional metadata information"
+
+      - name: date_created
+        type: date
+        options: ["INDEXED", "STORED"]
+        description: "Creation date"
+        
+      - name: date_updated
+        type: date
+        options: ["INDEXED", "STORED"]
+        description: "Last update date"
+        
+      - name: date_published
+        type: date
+        options: ["INDEXED", "STORED"]
+        description: "Publication date"
+
+  # Simple schema for query suggestions
+  query_index:
+    fields:
+      - name: text
+        type: text
+        options: ["TEXT", "STORED"]
+        description: "Query suggestion text"
+
+  # Specialized schema for facet filtering
+  filter_index:
+    fields:
+      - name: text
+        type: text
+        options: ["TEXT", "STORED"]
+        description: "Leaf node text of the facet"
+        
+      - name: facet
+        type: text
+        options: ["TEXT", "STORED"]
+        description: "Full facet path as searchable text"

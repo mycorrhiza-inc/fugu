@@ -73,6 +73,7 @@ pub fn create_router() -> ApiRouter<std::sync::Arc<AppState>> {
         )
         // Filter routes
         .api_route("/filters", get_with(list_filters, list_filters_docs))
+        // .api_route("/filters/reindex", post())
         .api_route("/filters/all", get(get_all_filters))
         .api_route("/filters/namespace/{namespace}", get(get_namespace_filters))
         .api_route("/filters/path/{*filter}", get(get_filter_values_at_path))
