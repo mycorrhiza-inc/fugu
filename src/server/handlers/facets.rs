@@ -30,14 +30,28 @@ pub async fn get_facet_tree(
     // Apply max_depth - 1 if specified
     let effective_max_depth = params.max_depth.map(|d| if d > 0 { d - 1 } else { 0 });
 
-    match state.db.get_facet_tree(effective_max_depth) {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            error!("Default dataset not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "Default dataset not found"
+                })),
+            ).into_response();
+        }
+    };
+
+    match default_dataset.get_facet_tree(effective_max_depth) {
         Ok(tree_response) => (
             StatusCode::OK,
             Json(json!({
                 "status": "success",
                 "data": tree_response
             })),
-        ),
+        ).into_response(),
         Err(e) => {
             error!("Failed to get facet tree: {}", e);
             (
@@ -46,7 +60,7 @@ pub async fn get_facet_tree(
                     "status": "error",
                     "error": format!("Failed to get facet tree: {}", e)
                 })),
-            )
+            ).into_response()
         }
     }
 }

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::server::server_main::AppState;
+use crate::db::document::DocumentOperations;
 
 /// Ingest objects into the database (now performs upserts)
 pub async fn ingest_objects(
@@ -36,8 +37,21 @@ pub async fn ingest_objects(
         }
     }
 
-    let db = state.db.clone();
-    match db.ingest(payload.data).await {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            error!("Default dataset not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "Default dataset not found"
+                })),
+            );
+        }
+    };
+
+    match default_dataset.ingest(payload.data).await {
         Ok(_) => (
             StatusCode::OK,
             Json(json!({
@@ -102,8 +116,21 @@ pub async fn ingest_objects_with_namespace_facets(
         );
     }
 
-    let db = state.db.clone();
-    match db.upsert(payload.data).await {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            error!("Default dataset not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "Default dataset not found"
+                })),
+            );
+        }
+    };
+
+    match default_dataset.upsert(payload.data).await {
         Ok(_) => {
             info!("Successfully ingested objects with namespace facets");
             (
@@ -156,8 +183,21 @@ pub async fn batch_upsert_objects(
         }
     }
 
-    let db = state.db.clone();
-    match db.batch_upsert(payload.objects).await {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            error!("Default dataset not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "Default dataset not found"
+                })),
+            );
+        }
+    };
+
+    match default_dataset.batch_upsert(payload.objects).await {
         Ok(successful_count) => (
             StatusCode::OK,
             Json(json!({

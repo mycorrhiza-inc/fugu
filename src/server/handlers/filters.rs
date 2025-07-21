@@ -39,10 +39,10 @@ pub async fn get_filter(
     let _guard = span.enter();
     debug!("get filter endpoint called for {}", namespace);
 
-    let facets = state
-        .db
-        .clone()
-        .get_facets(Some(format!("/{}", namespace.to_string())))
+    let default_dataset = state.db.get_dataset(&state.db.config().default_namespace)
+        .expect("Default dataset not found");
+    let facets = default_dataset
+                .get_facets(Some(format!("/{}", namespace.to_string())))
         .unwrap();
 
     Json(json!({"filters": facets }))
@@ -53,7 +53,9 @@ pub async fn list_filters(State(state): State<Arc<AppState>>) -> Json<Value> {
     let span = tracing_utils::server_span("/filters", "GET");
     let _guard = span.enter();
 
-    let facets = state.db.clone().get_facets(None).unwrap();
+    let default_dataset = state.db.get_dataset(&state.db.config().default_namespace)
+        .expect("Default dataset not found");
+    let facets = default_dataset.get_facets(None).unwrap();
     info!("List filters endpoint called");
     let res: Vec<Value> = facets
         .iter()
@@ -70,7 +72,21 @@ pub async fn get_all_filters(State(state): State<Arc<AppState>>) -> impl IntoApi
 
     info!("Get all filter paths endpoint called");
 
-    match state.db.get_all_filter_paths() {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            error!("Default dataset not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "Default dataset not found"
+                })),
+            );
+        }
+    };
+
+    match default_dataset.as_ref().get_all_filter_paths() {
         Ok(filter_paths) => (
             StatusCode::OK,
             Json(json!({
@@ -104,7 +120,21 @@ pub async fn get_namespace_filters(
         namespace
     );
 
-    match state.db.get_filter_paths_for_namespace(&namespace) {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            error!("Default dataset not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "Default dataset not found"
+                })),
+            );
+        }
+    };
+
+    match default_dataset.as_ref().get_filter_paths_for_namespace(&namespace) {
         Ok(filter_paths) => (
             StatusCode::OK,
             Json(json!({
@@ -142,7 +172,21 @@ pub async fn get_filter_values_at_path(
         filter_path
     );
 
-    match state.db.get_filter_values_at_path(&filter_path) {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            error!("Default dataset not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "Default dataset not found"
+                })),
+            );
+        }
+    };
+
+    match default_dataset.as_ref().get_filter_values_at_path(&filter_path) {
         Ok(values) => (
             StatusCode::OK,
             Json(json!({

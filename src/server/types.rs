@@ -54,7 +54,7 @@ impl IntoResponse for AppError {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Pagination {
     pub page: Option<usize>,
     pub per_page: Option<usize>,
@@ -101,6 +101,8 @@ pub struct FileIngestionRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JsonQueryRequest {
     pub query: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
     pub filters: Option<Vec<String>>,
     pub page: Option<Pagination>,
     /// whether to include the full text in each hit
@@ -124,6 +126,8 @@ pub struct IncludeTextFlag {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TextQueryParams {
     pub q: String, // Changed from "query" to "q" to match standard
+    #[serde(default)]
+    pub namespace: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
     /// whether to include the `text` of each hit

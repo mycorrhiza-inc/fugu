@@ -1,6 +1,6 @@
 // server/server_main.rs - Main server startup and configuration
 use crate::tracing_utils;
-use crate::{db::FuguDB, otel_setup::init_subscribers_and_loglevel};
+use crate::{db::DatasetManager, otel_setup::init_subscribers_and_loglevel};
 use aide::openapi::{Info, OpenApi};
 use aide::swagger::Swagger;
 use axum::response::IntoResponse;
@@ -17,7 +17,7 @@ use super::routes;
 // Define a shared application state for dependency injection
 pub struct AppState {
     // Using Arc for shared ownership across handlers, but no Mutex since only the compactor writes
-    pub db: FuguDB,
+    pub db: DatasetManager,
 }
 
 async fn serve_api(Extension(api): Extension<OpenApi>) -> Json<Value> {
@@ -43,7 +43,7 @@ async fn serve_api(Extension(api): Extension<OpenApi>) -> Json<Value> {
         }
     }
 }
-pub async fn start_http_server(http_port: u16, fugu_db: FuguDB) {
+pub async fn start_http_server(http_port: u16, fugu_db: DatasetManager) {
     let server_span = tracing::span!(tracing::Level::INFO, "http_server", port = http_port);
 
     async {
