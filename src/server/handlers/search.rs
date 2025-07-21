@@ -39,8 +39,12 @@ pub async fn query_text_get(
     // For GET requests without filters, include all data by default
     let filters = Vec::new();
 
+    // Get namespace from params or use default
+    let namespace = params.namespace.as_deref()
+        .unwrap_or(&state.db.config().default_namespace);
+
     // Perform the search
-    match perform_search(&state.db, &params.q, &filters, 0, limit).await {
+    match perform_search(&state.db, namespace, &params.q, &filters, 0, limit).await {
         Ok(response) => {
             // build JSON and strip text if needed
             let mut out = serde_json::to_value(&response).unwrap();
@@ -99,8 +103,12 @@ pub async fn query_text_path(
     // For path-based searches without filters, include all data by default
     let filters = Vec::new();
     let include_text = params.text.unwrap_or(false);
+    
+    // Get namespace from params or use default
+    let namespace = params.namespace.as_deref()
+        .unwrap_or(&state.db.config().default_namespace);
 
-    match perform_search(&state.db, &query, &filters, 0, 20).await {
+    match perform_search(&state.db, namespace, &query, &filters, 0, 20).await {
         Ok(response) => {
             let mut out = serde_json::to_value(&response).unwrap();
             if !include_text {
@@ -158,7 +166,21 @@ pub async fn search_endpoint(
         query, filters
     );
 
-    match state.db.search(&query, &filters, page, per_page).await {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            error!("Default dataset not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "Default dataset not found"
+                })),
+            );
+        }
+    };
+
+    match default_dataset.search(&query, &filters, page, per_page).await {
         Ok(results) => (
             StatusCode::OK,
             Json(json!({
@@ -230,9 +252,13 @@ pub async fn query_json_post(
         targeting_conv_or_org, include_data, filters
     );
 
+    // Get namespace from payload or use default
+    let namespace = payload.namespace.as_deref()
+        .unwrap_or(&state.db.config().default_namespace);
+
     // The database search method now handles conditional data inclusion automatically
     // based on the filters, so we just pass the filters as-is
-    match perform_search(&state.db, &payload.query, &filters, page, per_page).await {
+    match perform_search(&state.db, namespace, &payload.query, &filters, page, per_page).await {
         Ok(response) => {
             let mut out = serde_json::to_value(&response).unwrap();
             if !include_text {
@@ -289,8 +315,8 @@ pub async fn query_json_post(
 //
 //    let db = state.db.clone();
 //    let filters = payload.filters.unwrap_or_default();
-//    let page = payload.page.as_ref().and_then(|p| p.page).unwrap_or(0);
-//    let per_page = payload.page.as_ref().and_then(|p| p.per_page).unwrap_or(20);
+//    let page = payload.page.and_then(|p| p.page).unwrap_or(0);
+//    let per_page = payload.page.and_then(|p| p.per_page).unwrap_or(20);
 //
 //    match db
 //        .search_with_namespace_facets(&payload.query, &filters, page, per_page)
@@ -322,17 +348,23 @@ pub async fn query_json_post(
 //}
 
 pub async fn perform_search(
-    db: &crate::db::FuguDB,
+    dataset_manager: &crate::db::DatasetManager,
+    namespace: &str,
     query: &str,
     filters: &[String],
     page: usize,
     per_page: usize,
 ) -> Result<SearchResponse, Box<dyn std::error::Error + Send + Sync>> {
     info!(
-        "Performing search for query: '{}' with {} filters",
-        query,
+        "Performing search for namespace: '{}', query: '{}' with {} filters",
+        namespace, query,
         filters.len()
     );
+
+    // Get the dataset for the namespace
+    let dataset = dataset_manager
+        .get_dataset(namespace)
+        .ok_or_else(|| format!("Namespace '{}' not found", namespace))?;
 
     // Validate pagination parameters
     let per_page = if per_page == 0 || per_page > 100 {
@@ -342,7 +374,7 @@ pub async fn perform_search(
     };
 
     // The database search method now handles conditional data inclusion automatically
-    match db.search(query, filters, page, per_page).await {
+    match dataset.search(query, filters, page, per_page).await {
         Ok(search_results) => {
             let results = search_results;
             let total = results.len();

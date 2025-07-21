@@ -53,7 +53,7 @@ pub async fn get_namespace_facets(
     info!("Get namespace facets endpoint called for: {}", namespace);
 
     let db = state.db.clone();
-    match db.get_namespace_facets(&namespace) {
+    match db.get_namespace_facets(&namespace, "/") {
         Ok(facets) => {
             let facet_list: Vec<serde_json::Value> = facets
                 .iter()

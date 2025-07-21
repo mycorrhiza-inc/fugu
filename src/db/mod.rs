@@ -21,94 +21,36 @@ pub mod config;
 // Usage examples and patterns
 //pub mod examples;
 
-// Utility functions
+// Utility functions  
 pub mod utils;
+
+// Search functionality
+pub mod search;
+
+// Facet operations  
+pub mod facet;
 
 // Re-export main types for easier imports
 pub use config::{DatasetManager, NamespaceConfig, ServerConfig, ValidationConfig};
 pub use core::{Dataset, IndexType, NamedIndex};
 pub use document::DocumentOperations;
+pub use schemas::{build_docs_schema, build_filter_index_schema, build_query_index_schema};
+pub use crate::db::search::{FuguSearchResult, SearchOptions};
 
-// Include generated schemas from build script
-include!(concat!(env!("OUT_DIR"), "/generated_schemas.rs"));
+// Schema builders for different index types
+pub mod schemas;
 
-pub mod object {
-    //! Object record definitions and validation
+// Re-export ObjectRecord from the existing object module
+pub use crate::object::ObjectRecord;
 
-    // Main ObjectRecord struct and related types
-    pub mod record;
+// Server modules exist in src/server/, not here
 
-    // Validation logic
-    pub mod validation;
+// CLI module exists in src/cli.rs, not here
 
-    // Facet generation utilities
-    pub mod facets;
-
-    // Re-export main types
-    pub use record::ObjectRecord;
-
-    // Include generated schema builders
-    pub use crate::db::{build_docs_schema, build_filter_index_schema, build_query_index_schema};
-
-    /// Build the object record schema based on index type
-    pub fn build_object_record_schema(
-        schema_builder: tantivy::schema::SchemaBuilder,
-    ) -> tantivy::Schema {
-        // Default to docs schema for backward compatibility
-        build_docs_schema(schema_builder)
-    }
-}
-
-pub mod server {
-    //! HTTP server implementation
-
-    // Main server logic
-    pub mod http;
-
-    // API endpoints
-    pub mod api;
-
-    // Middleware
-    pub mod middleware;
-
-    // Re-export server functions
-    pub use http::start_http_server;
-}
-
-pub mod cli {
-    //! Command-line interface
-
-    // CLI command handlers
-    pub mod commands;
-
-    // CLI utilities
-    pub mod utils;
-
-    // Main CLI entry point
-    pub async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
-        commands::handle_cli_commands().await
-    }
-}
-
-pub mod tracing_utils {
-    //! Tracing and logging utilities
-
-    use tracing::span;
-
-    pub fn init_tracing() -> bool {
-        // Initialize tracing subscriber
-        // Implementation depends on your tracing setup
-        true
-    }
-
-    pub fn db_span(name: &str) -> span::Span {
-        tracing::span!(tracing::Level::INFO, "db", operation = name)
-    }
-}
+// Tracing utilities exist in src/tracing_utils.rs, not here
 
 // Re-export commonly used types at the crate root
-pub use db::{Dataset, DatasetManager, DocumentOperations, IndexType, NamedIndex};
-pub use object::ObjectRecord;
+// (ObjectRecord already re-exported above)
 
 // Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

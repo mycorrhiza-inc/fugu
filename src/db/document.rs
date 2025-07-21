@@ -3,6 +3,7 @@
 use anyhow::{Result, anyhow};
 use tantivy::indexer::UserOperation;
 use tantivy::{DateTime, TantivyDocument, Term};
+use tantivy::schema::Facet;
 use tracing::{info, warn};
 
 use super::core::{IndexType, NamedIndex};
@@ -127,10 +128,14 @@ impl NamedIndex {
         doc.add_text(id_field, &object.id);
         doc.add_text(text_field, &object.text);
 
-        // Optional name field
+        // Optional name field - check if name is available in metadata
         if let Some(name_field) = self.name_field() {
-            if let Some(name) = &object.name {
-                doc.add_text(name_field, name);
+            if let Some(metadata) = &object.metadata {
+                if let Some(name_value) = metadata.get("name") {
+                    if let Some(name_str) = name_value.as_str() {
+                        doc.add_text(name_field, name_str);
+                    }
+                }
             }
         }
 
@@ -198,11 +203,15 @@ impl NamedIndex {
         doc.add_text(text_field, &object.text);
         docs.push(doc);
 
-        // Add the name as a query suggestion if present
-        if let Some(name) = &object.name {
-            let mut doc = TantivyDocument::new();
-            doc.add_text(text_field, name);
-            docs.push(doc);
+        // Add the name as a query suggestion if present in metadata
+        if let Some(metadata) = &object.metadata {
+            if let Some(name_value) = metadata.get("name") {
+                if let Some(name_str) = name_value.as_str() {
+                    let mut doc = TantivyDocument::new();
+                    doc.add_text(text_field, name_str);
+                    docs.push(doc);
+                }
+            }
         }
 
         // Extract meaningful phrases from text for additional suggestions
@@ -228,6 +237,9 @@ impl NamedIndex {
         let facet_field = self
             .facet_field()
             .ok_or_else(|| anyhow!("Facet field required for filter_index"))?;
+        let facet_hierarchy_field = self
+            .facet_hierarchy_field()
+            .ok_or_else(|| anyhow!("Facet hierarchy field required for filter_index"))?;
 
         let mut docs = Vec::new();
 
@@ -250,6 +262,11 @@ impl NamedIndex {
 
             // Add full facet path as searchable text
             doc.add_text(facet_field, &facet_path);
+
+            // Add to facet hierarchy field as well
+            if let Ok(facet) = Facet::from_text(&facet_path) {
+                doc.add_facet(facet_hierarchy_field, facet);
+            }
 
             docs.push(doc);
         }

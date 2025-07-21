@@ -6,7 +6,6 @@ use serde_json::Value as SerdeValue;
 use tantivy::TantivyDocument;
 use tracing::info;
 
-use crate::db::{FuguDB, FuguSearchResult};
 use crate::object::ObjectRecord;
 
 pub fn create_metadata_facets_hashmap(

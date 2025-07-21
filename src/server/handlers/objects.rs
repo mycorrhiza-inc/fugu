@@ -14,6 +14,7 @@ use tracing::{debug, error, info};
 
 use crate::ObjectRecord;
 use crate::server::server_main::AppState;
+use crate::db::document::DocumentOperations;
 use aide::transform::TransformOperation;
 use tantivy::Document;
 
@@ -38,10 +39,19 @@ pub async fn get_object_by_id(
     debug!("Get object endpoint called for ID: {}", object_id);
 
     // Use the get method to retrieve the object
-    match state.db.get(&object_id) {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            return Json(json!({
+                "error": "Default dataset not found"
+            }));
+        }
+    };
+
+    match default_dataset.get(&object_id) {
         Ok(results) => {
             if let Some(record) = results.get(0) {
-                Json(json!(record.to_json(&state.db.schema())))
+                Json(json!(record.to_json(&default_dataset.docs().schema())))
             } else {
                 Json(json!({
                     "error": format!("Object with id {} not found", object_id)
@@ -64,8 +74,21 @@ pub async fn delete_object(
 
     info!("Delete object endpoint called for ID: {}", object_id);
 
-    let db = state.db.clone();
-    match db.delete_document(object_id.clone()).await {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            error!("Default dataset not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "Default dataset not found"
+                })),
+            );
+        }
+    };
+
+    match default_dataset.delete_document(object_id.clone()).await {
         Ok(_) => (
             StatusCode::OK,
             Json(json!({
@@ -96,8 +119,21 @@ pub async fn upsert_objects(
 
     info!("Upsert endpoint called for {} objects", payload.data.len());
 
-    let db = state.db.clone();
-    match db.upsert(payload.data).await {
+    let default_dataset = match state.db.get_dataset(&state.db.config().default_namespace) {
+        Some(dataset) => dataset,
+        None => {
+            error!("Default dataset not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "Default dataset not found"
+                })),
+            );
+        }
+    };
+
+    match default_dataset.upsert(payload.data).await {
         Ok(_) => (
             StatusCode::OK,
             Json(json!({

@@ -1,5 +1,4 @@
-// path: src/db/core.rs
-//! Core FuguDB implementation with programmatic field access
+//! Core FuguDB implementation with schema-aware field access
 
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
@@ -12,23 +11,31 @@ use tantivy::{
 use tokio::sync::{Mutex, MutexGuard};
 use tracing::info;
 
-/// Field name constants for type safety and consistency
-pub mod field_names {
-    pub const ID: &str = "id";
-    pub const TEXT: &str = "text";
-    pub const NAME: &str = "name";
-    pub const METADATA: &str = "metadata";
-    pub const FACET: &str = "facet";
-    pub const DATE_PUBLISHED: &str = "date_published";
-    pub const DATE_UPDATED: &str = "date_updated";
-    pub const DATE_CREATED: &str = "date_created";
-    pub const NAMESPACE: &str = "namespace";
-    pub const ORGANIZATION: &str = "organization";
-    pub const CONVERSATION_ID: &str = "conversation_id";
-    pub const DATA_TYPE: &str = "data_type";
+use crate::db::schemas::{build_docs_schema, build_filter_index_schema, build_query_index_schema};
+
+// Include generated schemas and types
+// include!(concat!(env!("OUT_DIR"), "/generated_schemas.rs"));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexType {
+    Docs,        // Full documents with all fields
+    FilterIndex, // Facet leaf nodes for filtering
+    QueryIndex,  // Text suggestions for autocomplete
+}
+
+impl IndexType {
+    pub fn build_schema(&self) -> Schema {
+        let schema_builder = tantivy::schema::SchemaBuilder::new();
+        match self {
+            IndexType::Docs => build_docs_schema(schema_builder),
+            IndexType::FilterIndex => build_filter_index_schema(schema_builder),
+            IndexType::QueryIndex => build_query_index_schema(schema_builder),
+        }
+    }
 }
 
 /// A Dataset manages multiple related indexes for a namespace
+#[derive(Debug)]
 pub struct Dataset {
     namespace: String,
     base_path: PathBuf,
@@ -52,10 +59,15 @@ impl Dataset {
         std::fs::create_dir_all(&filter_path)?;
         std::fs::create_dir_all(&query_path)?;
 
-        // Create the three indexes
-        let docs = NamedIndex::new("docs".to_string(), docs_path)?;
-        let filter_index = NamedIndex::new("filter_index".to_string(), filter_path)?;
-        let query_index = NamedIndex::new("query_index".to_string(), query_path)?;
+        // Create the three indexes with appropriate schemas
+        let docs = NamedIndex::new("docs".to_string(), docs_path, IndexType::Docs)?;
+        let filter_index = NamedIndex::new(
+            "filter_index".to_string(),
+            filter_path,
+            IndexType::FilterIndex,
+        )?;
+        let query_index =
+            NamedIndex::new("query_index".to_string(), query_path, IndexType::QueryIndex)?;
 
         Ok(Self {
             namespace,
@@ -114,12 +126,86 @@ impl Dataset {
             &mut self.query_index,
         ]
     }
+
+    /// Create multiple datasets for different namespaces
+    pub fn create_multiple(
+        namespaces: Vec<String>,
+        base_path: PathBuf,
+    ) -> Result<HashMap<String, Dataset>> {
+        let mut datasets = HashMap::new();
+
+        for namespace in namespaces {
+            let dataset = Dataset::new(namespace.clone(), base_path.clone())?;
+            datasets.insert(namespace, dataset);
+        }
+
+        Ok(datasets)
+    }
+
+    /// Get dataset statistics
+    pub fn stats(&self) -> Result<DatasetStats> {
+        let docs_count = self.docs().get_index().reader()?.searcher().num_docs();
+        let filter_count = self
+            .filter_index()
+            .get_index()
+            .reader()?
+            .searcher()
+            .num_docs();
+        let query_count = self
+            .query_index()
+            .get_index()
+            .reader()?
+            .searcher()
+            .num_docs();
+
+        Ok(DatasetStats {
+            namespace: self.namespace.clone(),
+            docs_count,
+            filter_count,
+            query_count,
+        })
+    }
+
+    /// Validate all indexes have the required fields
+    pub fn validate_all_schemas(&self) -> Result<()> {
+        self.docs().validate_required_fields()?;
+        self.filter_index().validate_required_fields()?;
+        self.query_index().validate_required_fields()?;
+        Ok(())
+    }
+
+    /// Get schema information for all indexes
+    pub fn schema_info(&self) -> HashMap<String, HashMap<String, String>> {
+        let mut info = HashMap::new();
+        info.insert("docs".to_string(), self.docs().schema_info());
+        info.insert(
+            "filter_index".to_string(),
+            self.filter_index().schema_info(),
+        );
+        info.insert("query_index".to_string(), self.query_index().schema_info());
+        info
+    }
 }
 
-/// A named index with programmatic field access
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DatasetStats {
+    pub namespace: String,
+    pub docs_count: u64,
+    pub filter_count: u64,
+    pub query_count: u64,
+}
+
+impl DatasetStats {
+    pub fn total_docs(&self) -> u64 {
+        self.docs_count + self.filter_count + self.query_count
+    }
+}
+
+/// A named index with schema-aware field access
 pub struct NamedIndex {
     pub(crate) name: String,
     pub(crate) schema: Schema,
+    pub(crate) index_type: IndexType,
     pub(crate) _path: PathBuf,
     pub(crate) index: Index,
     pub(crate) writer: Arc<Mutex<IndexWriter>>,
@@ -127,15 +213,24 @@ pub struct NamedIndex {
     field_cache: HashMap<String, Field>,
 }
 
-impl NamedIndex {
-    /// Create a new NamedIndex instance
-    pub fn new(name: String, path: PathBuf) -> Result<Self> {
-        info!(
-            "NamedIndex::new – initializing '{}' with path {:?}",
-            name, path
-        );
+impl std::fmt::Debug for NamedIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NamedIndex")
+            .field("name", &self.name)
+            .field("index_type", &self.index_type)
+            .field("_path", &self._path)
+            .field("field_cache", &self.field_cache)
+            .finish()
+    }
+}
 
-        let schema_builder = Schema::builder();
+impl NamedIndex {
+    /// Create a new NamedIndex instance with a specific schema type
+    pub fn new(name: String, path: PathBuf, index_type: IndexType) -> Result<Self> {
+        info!(
+            "NamedIndex::new – initializing '{}' ({:?}) with path {:?}",
+            name, index_type, path
+        );
 
         // Ensure directory exists
         std::fs::create_dir_all(&path)?;
@@ -143,7 +238,9 @@ impl NamedIndex {
         let dir = tantivy::directory::MmapDirectory::open(&path)
             .map_err(|e| anyhow!("Failed to open directory {:?}: {}", path, e))?;
 
-        let schema = crate::object::build_object_record_schema(schema_builder);
+        // Build schema based on index type
+        let schema = index_type.build_schema();
+
         let index = Index::open_or_create(dir, schema.clone())
             .map_err(|e| anyhow!("Failed to create index: {}", e))?;
 
@@ -161,6 +258,7 @@ impl NamedIndex {
         Ok(Self {
             name,
             schema,
+            index_type,
             _path: path,
             index,
             writer: Arc::new(Mutex::new(writer)),
@@ -171,6 +269,11 @@ impl NamedIndex {
     /// Get the name of this index
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Get the index type
+    pub fn index_type(&self) -> IndexType {
+        self.index_type
     }
 
     /// Get the underlying Tantivy index
@@ -202,8 +305,9 @@ impl NamedIndex {
     pub fn get_field(&self, field_name: &str) -> Result<Field> {
         self.field_cache.get(field_name).copied().ok_or_else(|| {
             anyhow!(
-                "Field '{}' not found in schema for index '{}'",
+                "Field '{}' not found in schema for {} index '{}'",
                 field_name,
+                self.index_type_name(),
                 self.name
             )
         })
@@ -224,78 +328,140 @@ impl NamedIndex {
         self.field_cache.get(field_name).copied()
     }
 
-    // Convenience methods for commonly used fields with proper error handling
-
-    /// Get the ID field (required field)
-    pub fn id_field(&self) -> Result<Field> {
-        self.get_field(field_names::ID)
+    /// Get the index type as a string for debugging
+    pub fn index_type_name(&self) -> &'static str {
+        match self.index_type {
+            IndexType::Docs => "docs",
+            IndexType::FilterIndex => "filter_index",
+            IndexType::QueryIndex => "query_index",
+        }
     }
 
-    /// Get the text field (required field)
+    /// Schema-aware field accessors based on index type
+
+    /// Get the text field (available in all schemas)
     pub fn text_field(&self) -> Result<Field> {
-        self.get_field(field_names::TEXT)
+        self.get_field("text")
     }
 
-    /// Get the name field (optional field)
-    pub fn name_field(&self) -> Option<Field> {
-        self.try_get_field(field_names::NAME)
+    /// Get the ID field (only available in docs schema)
+    pub fn id_field(&self) -> Result<Field> {
+        match self.index_type {
+            IndexType::Docs => self.get_field("id"),
+            _ => Err(anyhow!(
+                "ID field not available in {} index",
+                self.index_type_name()
+            )),
+        }
     }
 
-    /// Get the metadata field (optional field)
-    pub fn metadata_field(&self) -> Option<Field> {
-        self.try_get_field(field_names::METADATA)
-    }
-
-    /// Get the facet field (optional field)
+    /// Get the facet field (docs and filter_index schemas)
     pub fn facet_field(&self) -> Option<Field> {
-        self.try_get_field(field_names::FACET)
+        match self.index_type {
+            IndexType::Docs => self.try_get_field("facet"), // Facet type
+            IndexType::FilterIndex => self.try_get_field("facet"), // Text type for searchable facet paths
+            IndexType::QueryIndex => None,
+        }
     }
 
-    /// Get the namespace field (optional field)
+    /// Get the facet hierarchy field (filter_index schema only)
+    pub fn facet_hierarchy_field(&self) -> Option<Field> {
+        match self.index_type {
+            IndexType::FilterIndex => self.try_get_field("facet_hierarchy"), // Facet type for hierarchical filtering
+            _ => None,
+        }
+    }
+
+    /// Get optional fields that only exist in docs schema
+    pub fn name_field(&self) -> Option<Field> {
+        match self.index_type {
+            IndexType::Docs => self.try_get_field("name"),
+            _ => None,
+        }
+    }
+
+    pub fn metadata_field(&self) -> Option<Field> {
+        match self.index_type {
+            IndexType::Docs => self.try_get_field("metadata"),
+            _ => None,
+        }
+    }
+
     pub fn namespace_field(&self) -> Option<Field> {
-        self.try_get_field(field_names::NAMESPACE)
+        match self.index_type {
+            IndexType::Docs => self.try_get_field("namespace"),
+            _ => None,
+        }
     }
 
-    /// Get the organization field (optional field)
     pub fn organization_field(&self) -> Option<Field> {
-        self.try_get_field(field_names::ORGANIZATION)
+        match self.index_type {
+            IndexType::Docs => self.try_get_field("organization"),
+            _ => None,
+        }
     }
 
-    /// Get the conversation_id field (optional field)
     pub fn conversation_id_field(&self) -> Option<Field> {
-        self.try_get_field(field_names::CONVERSATION_ID)
+        match self.index_type {
+            IndexType::Docs => self.try_get_field("conversation_id"),
+            _ => None,
+        }
     }
 
-    /// Get the data_type field (optional field)
     pub fn data_type_field(&self) -> Option<Field> {
-        self.try_get_field(field_names::DATA_TYPE)
+        match self.index_type {
+            IndexType::Docs => self.try_get_field("data_type"),
+            _ => None,
+        }
     }
 
-    /// Get date fields (optional fields)
+    /// Get date fields (only available in docs schema)
     pub fn date_created_field(&self) -> Option<Field> {
-        self.try_get_field(field_names::DATE_CREATED)
+        match self.index_type {
+            IndexType::Docs => self.try_get_field("date_created"),
+            _ => None,
+        }
     }
 
     pub fn date_updated_field(&self) -> Option<Field> {
-        self.try_get_field(field_names::DATE_UPDATED)
+        match self.index_type {
+            IndexType::Docs => self.try_get_field("date_updated"),
+            _ => None,
+        }
     }
 
     pub fn date_published_field(&self) -> Option<Field> {
-        self.try_get_field(field_names::DATE_PUBLISHED)
+        match self.index_type {
+            IndexType::Docs => self.try_get_field("date_published"),
+            _ => None,
+        }
     }
 
-    /// Validate that required fields exist in the schema
+    /// Validate that required fields exist for this index type
     pub fn validate_required_fields(&self) -> Result<()> {
-        let required_fields = [field_names::ID, field_names::TEXT];
+        // All indexes must have text field
+        if !self.has_field("text") {
+            return Err(anyhow!(
+                "Required field 'text' not found in {} index '{}'",
+                self.index_type_name(),
+                self.name
+            ));
+        }
 
-        for field_name in &required_fields {
-            if !self.has_field(field_name) {
-                return Err(anyhow!(
-                    "Required field '{}' not found in schema for index '{}'",
-                    field_name,
-                    self.name
-                ));
-            }
+        // Docs index must have ID field
+        if matches!(self.index_type, IndexType::Docs) && !self.has_field("id") {
+            return Err(anyhow!(
+                "Required field 'id' not found in docs index '{}'",
+                self.name
+            ));
+        }
+
+        // Filter index must have facet field (as text)
+        if matches!(self.index_type, IndexType::FilterIndex) && !self.has_field("facet") {
+            return Err(anyhow!(
+                "Required field 'facet' not found in filter_index '{}'",
+                self.name
+            ));
         }
 
         Ok(())
@@ -314,5 +480,18 @@ impl NamedIndex {
         }
 
         info
+    }
+
+    /// Check if this index supports a specific operation based on its schema
+    pub fn supports_full_documents(&self) -> bool {
+        matches!(self.index_type, IndexType::Docs)
+    }
+
+    pub fn supports_facet_filtering(&self) -> bool {
+        matches!(self.index_type, IndexType::Docs | IndexType::FilterIndex)
+    }
+
+    pub fn supports_query_suggestions(&self) -> bool {
+        matches!(self.index_type, IndexType::QueryIndex)
     }
 }
