@@ -57,8 +57,8 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Get the default dataset for the server
-    let default_dataset = dataset_manager
+    // Verify the default dataset exists
+    let _default_dataset = dataset_manager
         .get_dataset(&dataset_manager.config().default_namespace)
         .ok_or("Default dataset not found")?;
 
@@ -73,12 +73,8 @@ async fn run_server_mode() -> Result<(), Box<dyn std::error::Error>> {
     // Run the HTTP server within the runtime span
     async {
         tokio::select! {
-            result = server::start_http_server(3301, default_dataset) => {
-                if let Err(e) = result {
-                    warn!("HTTP server error: {}", e);
-                } else {
-                    info!("HTTP server has shut down");
-                }
+            _ = server::start_http_server(3301, dataset_manager.clone()) => {
+                info!("HTTP server has shut down");
             },
         }
         info!("Server shutdown complete");
