@@ -1,13 +1,12 @@
 // server/handlers/basic.rs - Basic endpoint handlers
-use crate::{server::FacetTreeParams, tracing_utils};
+use crate::tracing_utils;
 use aide::{axum::IntoApiResponse, transform::TransformOperation};
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::State,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, info};
 

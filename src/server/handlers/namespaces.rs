@@ -5,9 +5,8 @@ use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::Arc;
 use tracing::{error, info};
 

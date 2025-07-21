@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use super::core::{Dataset, DatasetStats, IndexType, NamedIndex};
+use super::core::{Dataset, DatasetStats};
 
 /// Server configuration for FuguDB
 #[derive(Debug, Deserialize, Serialize, Clone)]

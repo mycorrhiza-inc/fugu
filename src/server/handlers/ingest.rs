@@ -2,10 +2,10 @@
 use crate::server::types::*;
 use crate::tracing_utils;
 use aide::axum::IntoApiResponse;
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{Json, extract::State, http::StatusCode};
 use serde_json::json;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::server::server_main::AppState;
 use crate::db::document::DocumentOperations;

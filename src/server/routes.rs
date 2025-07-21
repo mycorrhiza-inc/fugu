@@ -2,10 +2,9 @@ use aide::axum::routing::post_with;
 use aide::axum::{
     ApiRouter,
     routing::{delete, get, post, put},
-    routing::{get as aide_get, get_with, post as aide_post},
+    routing::get_with,
 };
 // server/routes.rs - Route configuration and setup
-use axum::Router;
 use tracing::info;
 
 use super::handlers::basic::{health_docs, sayhi_docs};
@@ -19,7 +18,7 @@ use super::handlers::{
     get_filter, get_filter_values_at_path, get_namespace_conversations, get_namespace_data_types,
     get_namespace_facets, get_namespace_filters, get_namespace_organizations, get_object_by_id,
     health, ingest_objects, ingest_objects_with_namespace_facets, list_filters, list_objects,
-    query_json_post, query_text_get, query_text_path, sayhi, search, search_endpoint,
+    query_json_post, query_text_get, query_text_path, sayhi, search_endpoint,
     upsert_objects,
 };
 use super::server_main::AppState;

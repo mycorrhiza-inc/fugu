@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashSet;
 use tantivy::collector::TopDocs;
 use tantivy::columnar::DocId;
@@ -11,8 +11,7 @@ use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuer
 
 use tantivy::schema::Facet;
 use tantivy::schema::Value;
-use tantivy::schema::document::CompactDocValue;
-use tantivy::{Score, Searcher, SegmentReader, TantivyDocument, Term};
+use tantivy::{Score, SegmentReader, TantivyDocument, Term};
 use tracing::{debug, error, info, warn};
 
 use super::core::Dataset;
