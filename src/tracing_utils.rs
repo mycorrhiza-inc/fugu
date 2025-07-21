@@ -216,7 +216,7 @@ where
     S: std::fmt::Debug + Send + Sync + 'static,
 {
     // Create a basic span with the operation and query
-    let mut span = tracing::span!(
+    let span = tracing::span!(
         Level::INFO,
         "query",
         operation = operation,

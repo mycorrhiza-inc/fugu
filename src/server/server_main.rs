@@ -1,9 +1,7 @@
 // server/server_main.rs - Main server startup and configuration
-use crate::tracing_utils;
 use crate::{db::DatasetManager, otel_setup::init_subscribers_and_loglevel};
 use aide::openapi::{Info, OpenApi};
 use aide::swagger::Swagger;
-use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Extension, Json};
 use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};

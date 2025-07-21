@@ -5,11 +5,11 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tantivy::collector::FacetCollector;
-use tantivy::query::{AllQuery, RegexQuery, TermQuery};
+use tantivy::query::{AllQuery, TermQuery};
 use tantivy::schema::*;
 use tantivy::schema::{Facet, IndexRecordOption};
 use tantivy::{TantivyDocument, Term};
-use tracing::{info, warn};
+use tracing::info;
 
 use super::core::Dataset;
 

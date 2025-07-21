@@ -7,7 +7,6 @@ use tantivy::schema::Facet;
 use tracing::{info, warn};
 
 use super::core::{IndexType, NamedIndex};
-use super::utils::create_metadata_facets;
 use crate::db::utils::create_metadata_facets_hashmap;
 use crate::object::ObjectRecord;
 
