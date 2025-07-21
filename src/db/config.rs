@@ -239,24 +239,24 @@ impl DatasetManager {
     }
 
     /// Get dataset statistics for all namespaces
-    pub fn get_all_stats(
-        &self,
-    ) -> Result<HashMap<String, super::dataset_usage_example::DatasetStats>> {
-        let mut all_stats = HashMap::new();
-
-        for (namespace, dataset) in &self.datasets {
-            match dataset.stats() {
-                Ok(stats) => {
-                    all_stats.insert(namespace.clone(), stats);
-                }
-                Err(e) => {
-                    warn!("Failed to get stats for namespace {}: {}", namespace, e);
-                }
-            }
-        }
-
-        Ok(all_stats)
-    }
+    // pub fn get_all_stats(
+    //     &self,
+    // ) -> Result<HashMap<String, super::dataset_usage_example::DatasetStats>> {
+    //     let mut all_stats = HashMap::new();
+    //
+    //     for (namespace, dataset) in &self.datasets {
+    //         match dataset.stats() {
+    //             Ok(stats) => {
+    //                 all_stats.insert(namespace.clone(), stats);
+    //             }
+    //             Err(e) => {
+    //                 warn!("Failed to get stats for namespace {}: {}", namespace, e);
+    //             }
+    //         }
+    //     }
+    //
+    //     Ok(all_stats)
+    // }
 
     /// Validate configuration
     pub fn validate_config(&self) -> Result<()> {
