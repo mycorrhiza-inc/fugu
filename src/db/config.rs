@@ -4,9 +4,10 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use super::core::{Dataset, IndexType, NamedIndex};
+use super::core::{Dataset, DatasetStats, IndexType, NamedIndex};
 
 /// Server configuration for FuguDB
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -86,10 +87,10 @@ impl Default for ValidationConfig {
 }
 
 /// Dataset manager that handles multiple namespaces and configuration
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DatasetManager {
     config: ServerConfig,
-    datasets: HashMap<String, Dataset>,
+    datasets: HashMap<String, Arc<Dataset>>,
 }
 
 impl DatasetManager {
@@ -159,7 +160,9 @@ impl DatasetManager {
 
     /// Initialize all namespaces marked for startup initialization
     fn initialize_configured_namespaces(&mut self) -> Result<()> {
-        for namespace_config in &self.config.namespaces {
+        // Clone the namespace configs to avoid borrow checker issues
+        let namespace_configs = self.config.namespaces.clone();
+        for namespace_config in &namespace_configs {
             if namespace_config.initialize_on_startup {
                 info!("Initializing namespace: {}", namespace_config.name);
                 self.create_namespace(&namespace_config.name, Some(namespace_config))?;
@@ -169,7 +172,7 @@ impl DatasetManager {
     }
 
     /// Create or get a dataset for a namespace
-    pub fn get_or_create_dataset(&mut self, namespace: &str) -> Result<&Dataset> {
+    pub fn get_or_create_dataset(&mut self, namespace: &str) -> Result<Arc<Dataset>> {
         if !self.datasets.contains_key(namespace) {
             self.create_namespace(namespace, None)?;
         }
@@ -177,12 +180,13 @@ impl DatasetManager {
         Ok(self
             .datasets
             .get(namespace)
+            .cloned()
             .ok_or_else(|| anyhow!("Failed to create dataset for namespace: {}", namespace))?)
     }
 
     /// Get an existing dataset
-    pub fn get_dataset(&self, namespace: &str) -> Option<&Dataset> {
-        self.datasets.get(namespace)
+    pub fn get_dataset(&self, namespace: &str) -> Option<Arc<Dataset>> {
+        self.datasets.get(namespace).cloned()
     }
 
     /// Create a new namespace
@@ -205,7 +209,7 @@ impl DatasetManager {
                 .map_err(|e| anyhow!("Failed to create directory {:?}: {}", base_path, e))?;
         }
 
-        let dataset = Dataset::new(namespace.to_string(), base_path)?;
+        let dataset = Arc::new(Dataset::new(namespace.to_string(), base_path)?);
 
         // Validate the dataset
         dataset.validate_all_schemas().map_err(|e| {
@@ -223,7 +227,7 @@ impl DatasetManager {
     }
 
     /// Get the default namespace dataset
-    pub fn default_dataset(&mut self) -> Result<&Dataset> {
+    pub fn default_dataset(&mut self) -> Result<Arc<Dataset>> {
         let default_ns = self.config.default_namespace.clone();
         self.get_or_create_dataset(&default_ns)
     }
@@ -238,25 +242,51 @@ impl DatasetManager {
         &self.config
     }
 
+    /// Get available namespaces - returns all dataset keys
+    pub fn get_available_namespaces(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self.datasets.keys().cloned().collect())
+    }
+
+    /// Get namespace facets from the specified namespace dataset
+    pub fn get_namespace_facets(&self, namespace: &str, facet_root: &str) -> anyhow::Result<Vec<(tantivy::schema::Facet, u64)>> {
+        let dataset = self.get_dataset(namespace)
+            .ok_or_else(|| anyhow::anyhow!("Dataset not found for namespace: {}", namespace))?;
+        dataset.get_facets_at(facet_root)
+    }
+
+    /// Get filter values at path from the appropriate namespace dataset
+    pub fn get_filter_values_at_path(&self, filter_path: &str) -> anyhow::Result<Vec<String>> {
+        // Extract namespace from filter path (assumes paths like "/namespace/foo/bar")
+        let namespace = if filter_path.starts_with("/namespace/") {
+            filter_path.strip_prefix("/namespace/")
+                .and_then(|s| s.split('/').next())
+                .unwrap_or(&self.config.default_namespace)
+        } else {
+            &self.config.default_namespace
+        };
+        
+        let dataset = self.get_dataset(namespace)
+            .ok_or_else(|| anyhow::anyhow!("Dataset not found for namespace: {}", namespace))?;
+        dataset.get_filter_values_at_path(filter_path)
+    }
+
     /// Get dataset statistics for all namespaces
-    // pub fn get_all_stats(
-    //     &self,
-    // ) -> Result<HashMap<String, super::dataset_usage_example::DatasetStats>> {
-    //     let mut all_stats = HashMap::new();
-    //
-    //     for (namespace, dataset) in &self.datasets {
-    //         match dataset.stats() {
-    //             Ok(stats) => {
-    //                 all_stats.insert(namespace.clone(), stats);
-    //             }
-    //             Err(e) => {
-    //                 warn!("Failed to get stats for namespace {}: {}", namespace, e);
-    //             }
-    //         }
-    //     }
-    //
-    //     Ok(all_stats)
-    // }
+    pub fn get_all_stats(&self) -> Result<HashMap<String, DatasetStats>> {
+        let mut all_stats = HashMap::new();
+
+        for (namespace, dataset) in &self.datasets {
+            match dataset.stats() {
+                Ok(stats) => {
+                    all_stats.insert(namespace.clone(), stats);
+                }
+                Err(e) => {
+                    warn!("Failed to get stats for namespace {}: {}", namespace, e);
+                }
+            }
+        }
+
+        Ok(all_stats)
+    }
 
     /// Validate configuration
     pub fn validate_config(&self) -> Result<()> {

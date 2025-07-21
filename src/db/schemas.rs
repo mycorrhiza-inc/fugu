@@ -38,6 +38,9 @@ pub fn build_filter_index_schema(mut schema_builder: SchemaBuilder) -> Schema {
     // Facet field as text for searchable facet paths
     schema_builder.add_text_field("facet", TEXT | STORED);
     
+    // Facet field for hierarchical filtering (mirrors the text field)
+    schema_builder.add_facet_field("facet_hierarchy", INDEXED | STORED);
+    
     // Namespace for multi-tenant filtering
     schema_builder.add_text_field("namespace", TEXT | STORED);
 

@@ -35,6 +35,7 @@ impl IndexType {
 }
 
 /// A Dataset manages multiple related indexes for a namespace
+#[derive(Debug)]
 pub struct Dataset {
     namespace: String,
     base_path: PathBuf,
@@ -186,7 +187,7 @@ impl Dataset {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DatasetStats {
     pub namespace: String,
     pub docs_count: u64,
@@ -210,6 +211,17 @@ pub struct NamedIndex {
     pub(crate) writer: Arc<Mutex<IndexWriter>>,
     // Cache fields for performance
     field_cache: HashMap<String, Field>,
+}
+
+impl std::fmt::Debug for NamedIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NamedIndex")
+            .field("name", &self.name)
+            .field("index_type", &self.index_type)
+            .field("_path", &self._path)
+            .field("field_cache", &self.field_cache)
+            .finish()
+    }
 }
 
 impl NamedIndex {
@@ -349,6 +361,14 @@ impl NamedIndex {
             IndexType::Docs => self.try_get_field("facet"), // Facet type
             IndexType::FilterIndex => self.try_get_field("facet"), // Text type for searchable facet paths
             IndexType::QueryIndex => None,
+        }
+    }
+
+    /// Get the facet hierarchy field (filter_index schema only)
+    pub fn facet_hierarchy_field(&self) -> Option<Field> {
+        match self.index_type {
+            IndexType::FilterIndex => self.try_get_field("facet_hierarchy"), // Facet type for hierarchical filtering
+            _ => None,
         }
     }
 

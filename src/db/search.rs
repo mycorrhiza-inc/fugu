@@ -15,7 +15,7 @@ use tantivy::schema::document::CompactDocValue;
 use tantivy::{Score, Searcher, SegmentReader, TantivyDocument, Term};
 use tracing::{debug, error, info, warn};
 
-use super::core::FuguDB;
+use super::core::Dataset;
 
 /// Search result returned by FuguDB queries
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -63,7 +63,7 @@ pub enum FilterOperator {
     Wildcard, // Wildcard match (*text* - any facet containing text)
 }
 
-impl FuguDB {
+impl Dataset {
     /// Simple search method for basic queries (includes all data types by default)
     pub async fn simple_search(
         &self,
@@ -84,7 +84,7 @@ impl FuguDB {
             query, filters, page, per_page
         );
 
-        let reader = self.index.reader()?;
+        let reader = self.docs().get_index().reader()?;
         let searcher = reader.searcher();
 
         // Parse filters to check for wildcard patterns
@@ -106,11 +106,11 @@ impl FuguDB {
             .collect();
 
         // Parse the text query
-        let text_field = self.text_field();
-        let name_field = self.name_field();
+        let text_field = self.docs().get_field("text")?;
+        let name_field = self.docs().get_field("name")?;
         let fields_to_search = vec![text_field, name_field];
 
-        let query_parser = QueryParser::for_index(&self.index, fields_to_search);
+        let query_parser = QueryParser::for_index(self.docs().get_index(), fields_to_search);
 
         // Build the text query
         let text_query = if query.trim().is_empty() {
@@ -220,7 +220,7 @@ impl FuguDB {
 
     /// Build a facet query from filter strings
     fn build_facet_query(&self, filters: &[String]) -> Result<Box<dyn Query>> {
-        let facet_field = self.facet_field();
+        let facet_field = self.docs().facet_field().ok_or_else(|| anyhow::anyhow!("No facet field in docs index"))?;
         let parsed_filters = self.parse_filters(filters);
 
         // Group filters by their behavior
@@ -457,8 +457,8 @@ impl FuguDB {
     /// Direct get method for convenience
     pub fn get(&self, id: &str) -> Result<Vec<TantivyDocument>> {
         info!("FuguDB::get – querying id={}", id);
-        let searcher = self.searcher()?;
-        let query_parser = QueryParser::for_index(&self.index, vec![self.id_field()]);
+        let searcher = self.docs().searcher()?;
+        let query_parser = QueryParser::for_index(self.docs().get_index(), vec![self.docs().id_field()?]);
         let query = query_parser.parse_query(id)?;
         let top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
 
@@ -479,10 +479,10 @@ impl FuguDB {
     ) -> Result<()> {
         let facets: Vec<Facet> = filters.iter().map(|f| Facet::from(f)).collect();
         let limit = max.unwrap_or(10);
-        let facet_field = self.facet_field();
-        let searcher = self.searcher()?;
+        let facet_field = self.docs().facet_field().ok_or_else(|| anyhow::anyhow!("No facet field in docs index"))?;
+        let searcher = self.docs().searcher()?;
 
-        let qp = QueryParser::for_index(&self.index, vec![self.text_field(), self.name_field()]);
+        let qp = QueryParser::for_index(self.docs().get_index(), vec![self.docs().text_field()?, self.docs().name_field().ok_or_else(|| anyhow::anyhow!("No name field in docs index"))?]);
         let string_query = qp.parse_query(&query)?;
         let facet_query = Box::new(BooleanQuery::new_multiterms_query(
             facets
@@ -534,7 +534,7 @@ impl FuguDB {
     /// Convert a Tantivy document to a search result
     fn convert_doc_to_search_result(&self, doc: TantivyDocument, score: f32) -> FuguSearchResult {
         // Get field references - handle errors gracefully
-        let id = if let Ok(id_field) = self.schema.get_field("id") {
+        let id = if let Ok(id_field) = self.docs().get_field("id") {
             doc.get_first(id_field)
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
@@ -543,7 +543,7 @@ impl FuguDB {
             "unknown".to_string()
         };
 
-        let text = if let Ok(text_field) = self.schema.get_field("text") {
+        let text = if let Ok(text_field) = self.docs().get_field("text") {
             doc.get_first(text_field)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -553,7 +553,7 @@ impl FuguDB {
         };
 
         // Extract metadata if present
-        let metadata = if let Ok(metadata_field) = self.schema.get_field("metadata") {
+        let metadata = if let Ok(metadata_field) = self.docs().get_field("metadata") {
             doc.get_first(metadata_field)
                 .and_then(|v| v.as_str())
                 .and_then(|s| serde_json::from_str(s).ok())
@@ -562,7 +562,7 @@ impl FuguDB {
         };
 
         // Extract all facets for the document
-        let facets = if let Ok(facet_field) = self.schema.get_field("facet") {
+        let facets = if let Ok(facet_field) = self.docs().get_field("facet") {
             let facet_vals: Vec<String> = doc
                 .get_all(facet_field)
                 .filter_map(|value| {

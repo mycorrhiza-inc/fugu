@@ -5,13 +5,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tantivy::collector::FacetCollector;
-use tantivy::query::{AllQuery, TermQuery};
+use tantivy::query::{AllQuery, RegexQuery, TermQuery};
 use tantivy::schema::*;
 use tantivy::schema::{Facet, IndexRecordOption};
 use tantivy::{TantivyDocument, Term};
 use tracing::{info, warn};
 
-use super::core::FuguDB;
+use super::core::Dataset;
 
 /// A node in the facet tree structure
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,10 +30,10 @@ pub struct FacetTreeResponse {
     pub total_facets: usize,
 }
 
-impl FuguDB {
+impl Dataset {
     /// Get facets for a specific namespace
     pub fn get_namespace_facets(&self, namespace: &str) -> Result<Vec<(Facet, u64)>> {
-        let searcher = self.searcher()?;
+        let searcher = self.docs().searcher()?;
         let namespace_root = format!("/namespace/{}", namespace);
 
         let mut facet_collector = FacetCollector::for_field("facet");
@@ -52,7 +52,7 @@ impl FuguDB {
 
     /// Get all available namespaces
     pub fn get_available_namespaces(&self) -> Result<Vec<String>> {
-        let searcher = self.searcher()?;
+        let searcher = self.docs().searcher()?;
         let mut facet_collector = FacetCollector::for_field("facet");
         facet_collector.add_facet("/namespace");
 
@@ -76,9 +76,9 @@ impl FuguDB {
 
     /// List facets at a specific level
     pub fn list_facet(&self, from_level: String) -> Result<Vec<(Facet, u64)>> {
-        let searcher = self.searcher()?;
+        let searcher = self.docs().searcher()?;
         let facet = Facet::from(from_level.as_str());
-        let facet_term = Term::from_facet(self.facet_field(), &facet);
+        let facet_term = Term::from_facet(self.docs().facet_field().unwrap(), &facet);
         let _facet_term_query = TermQuery::new(facet_term, IndexRecordOption::Basic);
 
         let mut facet_collector = FacetCollector::for_field("facet");
@@ -103,11 +103,17 @@ impl FuguDB {
         self.list_facet(root)
     }
 
+    /// Get facets at a specific prefix/root path
+    pub fn get_facets_at(&self, prefix: &str) -> Result<Vec<(Facet, u64)>> {
+        info!("getting facets at prefix: {}", prefix);
+        self.list_facet(prefix.to_string())
+    }
+
     /// Get all facets and build a tree structure up to max_depth
     pub fn get_facet_tree(&self, max_depth: Option<usize>) -> Result<FacetTreeResponse> {
         info!("Getting facet tree with max_depth: {:?}", max_depth);
 
-        let searcher = self.searcher()?;
+        let searcher = self.docs().searcher()?;
         let mut all_facets = Vec::new();
 
         self.collect_facets_recursive(&searcher, "/", 0, max_depth, &mut all_facets)?;
@@ -268,10 +274,13 @@ impl FuguDB {
         &self,
         namespace: &str,
     ) -> Result<BTreeMap<String, Vec<String>>> {
-        let searcher = self.searcher()?;
+        let searcher = self.filter_index().searcher()?;
 
         let namespace_facet = Facet::from_text(&format!("/namespace/{}", namespace))?;
-        let namespace_term = Term::from_facet(self.facet_field(), &namespace_facet);
+        // For filter index, facet is a text field, not a facet field
+        let facet_field = self.filter_index().get_field("facet")?;
+        let namespace_term =
+            Term::from_field_text(facet_field, &format!("/namespace/{}", namespace));
         let namespace_query = TermQuery::new(namespace_term, IndexRecordOption::Basic);
 
         let top_docs = searcher.search(
@@ -285,7 +294,7 @@ impl FuguDB {
         for (_score, doc_address) in top_docs {
             let doc: TantivyDocument = searcher.doc(doc_address)?;
 
-            let facet_field = self.facet_field();
+            let facet_field = self.docs().facet_field().unwrap();
             let doc_facets: Vec<Facet> = doc
                 .get_all(facet_field)
                 .filter_map(|field_value| {
@@ -376,8 +385,8 @@ impl FuguDB {
 
     /// Get the values (children) at a specific filter path
     pub fn get_filter_values_at_path(&self, filter_path: &str) -> Result<Vec<String>> {
-        let searcher = self.searcher()?;
-        let mut facet_collector = FacetCollector::for_field("facet");
+        let searcher = self.filter_index().searcher()?;
+        let facet_field = self.filter_index().get_field("facet")?;
 
         let normalized_path = if filter_path.starts_with('/') {
             filter_path.to_string()
@@ -385,23 +394,68 @@ impl FuguDB {
             format!("/{}", filter_path)
         };
 
+        // Use the facet hierarchy field for proper facet queries
+        let facet_hierarchy_field = self.filter_index().get_field("facet_hierarchy")?;
+        
+        let mut facet_collector = FacetCollector::for_field("facet_hierarchy");
         facet_collector.add_facet(&normalized_path);
+
         let facet_counts = searcher.search(&AllQuery, &facet_collector)?;
+        let facets: Vec<(&Facet, u64)> = facet_counts.get(&normalized_path).collect();
+        
+        let mut values = std::collections::HashSet::new();
 
-        let facets_at_path: Vec<(&Facet, u64)> = facet_counts.get(&normalized_path).collect();
-
-        let mut values = Vec::new();
-        for (facet, _count) in facets_at_path {
+        for (facet, _count) in facets {
             let facet_str = facet.to_string();
-            if let Some(last_component) = facet_str.split('/').last() {
-                if !last_component.is_empty() {
-                    values.push(last_component.to_string());
+            if let Some(child_path) = facet_str.strip_prefix(&format!("{}/", normalized_path)) {
+                // Only get immediate children (no nested paths)
+                if !child_path.contains('/') && !child_path.is_empty() {
+                    values.insert(child_path.to_string());
                 }
             }
         }
 
-        values.sort();
-        Ok(values)
+        let mut result: Vec<String> = values.into_iter().collect();
+        result.sort();
+        Ok(result)
+    }
+
+    /// Search for facets that start with a given facet prefix and match query text
+    /// Used for frontend filter searches
+    pub fn search_facet(&self, facet_prefix: &str, query_text: Option<&str>) -> Result<Vec<(Facet, u64)>> {
+        let searcher = self.filter_index().searcher()?;
+        
+        let normalized_prefix = if facet_prefix.starts_with('/') {
+            facet_prefix.to_string()
+        } else {
+            format!("/{}", facet_prefix)
+        };
+
+        // Use FacetCollector to get facets that start with the given prefix
+        let mut facet_collector = FacetCollector::for_field("facet_hierarchy");
+        facet_collector.add_facet(&normalized_prefix);
+
+        let facet_counts = searcher.search(&AllQuery, &facet_collector)?;
+        let facets: Vec<(&Facet, u64)> = facet_counts.get(&normalized_prefix).collect();
+        
+        let mut result = Vec::new();
+        
+        for (facet, count) in facets {
+            let facet_str = facet.to_string();
+            
+            // If query_text is provided, filter facets that contain the query text
+            if let Some(query) = query_text {
+                if !facet_str.to_lowercase().contains(&query.to_lowercase()) {
+                    continue;
+                }
+            }
+            
+            result.push((facet.clone(), count));
+        }
+
+        // Sort by facet path for consistent results
+        result.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        
+        Ok(result)
     }
 }
-

@@ -27,6 +27,9 @@ pub mod utils;
 // Search functionality
 pub mod search;
 
+// Facet operations  
+pub mod facet;
+
 // Re-export main types for easier imports
 pub use config::{DatasetManager, NamespaceConfig, ServerConfig, ValidationConfig};
 pub use core::{Dataset, IndexType, NamedIndex};
